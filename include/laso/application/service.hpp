@@ -3,8 +3,8 @@
 #include <laso/plugins/loader.hpp>
 #include <laso/runtime/runtime.hpp>
 #include <laso/scheduler/scheduler.hpp>
-#include <laso/security/security.hpp>
 #include <laso/schema/validator.hpp>
+#include <laso/security/security.hpp>
 
 namespace laso {
 class Service {

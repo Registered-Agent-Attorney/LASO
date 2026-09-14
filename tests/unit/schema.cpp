@@ -11,16 +11,24 @@ void write_schema(const std::filesystem::path &root, const std::string &name, co
   std::ofstream(root / name) << schema.dump(2);
 }
 std::string pipeline_with(const std::string &node) {
-  return "laso: '1'\nname: schema-test\nversion: 1\nnodes:\n  action:\n    " + node + "\nedges:\n  - {from: input, to: action}\n  - {from: action, to: output}\n";
+  return "laso: '1'\nname: schema-test\nversion: 1\nnodes:\n  action:\n    " + node +
+         "\nedges:\n  - {from: input, to: action}\n  - {from: action, to: output}\n";
 }
-}
+} // namespace
 TEST(Schema, ValidAndInvalidPayloads) {
   TemporaryDirectory dir;
   auto root = dir.path / "schemas";
-  write_schema(root, "value.json", {{"type", "object"}, {"required", {"value"}}, {"properties", {{"value", {{"type", "integer"}}}}}});
+  write_schema(root, "value.json",
+               {{"type", "object"},
+                {"required", {"value"}},
+                {"properties", {{"value", {{"type", "integer"}}}}}});
   SchemaValidator validator({root});
-  try { validator.validate("value.json", {{"value", 3}}, "n", "input"); }
-  catch (const Error &error) { std::cerr << error.what() << " " << error.details.dump() << std::endl; FAIL(); }
+  try {
+    validator.validate("value.json", {{"value", 3}}, "n", "input");
+  } catch (const Error &error) {
+    std::cerr << error.what() << " " << error.details.dump() << std::endl;
+    FAIL();
+  }
   try {
     validator.validate("value.json", {{"value", "bad"}}, "n", "output");
     FAIL();
@@ -34,7 +42,8 @@ TEST(Schema, SecureLocalRefsAndRejectedRemoteRefs) {
   TemporaryDirectory dir;
   auto root = dir.path / "schemas";
   write_schema(root, "common.json", {{"$defs", {{"id", {{"type", "integer"}}}}}});
-  write_schema(root, "value.json", {{"type", "object"}, {"properties", {{"id", {{"$ref", "common.json#/$defs/id"}}}}}});
+  write_schema(root, "value.json",
+               {{"type", "object"}, {"properties", {{"id", {{"$ref", "common.json#/$defs/id"}}}}}});
   SchemaValidator validator({root});
   EXPECT_NO_THROW(validator.validate_declaration("value.json"));
   write_schema(root, "remote.json", {{"$ref", "https://example.invalid/schema.json"}});
@@ -50,8 +59,13 @@ TEST(Schema, RuntimeOutputContractFailure) {
   auto c = config(dir.path);
   c.schema_roots = {root};
   Service service(io, c);
-  service.functions().add("bad", std::make_shared<Function>([](ExecutionContext &, const Json &) -> Task<Json> { co_return "not an integer"; }));
-  auto run = execute(service, io, pipeline_with("type: function\n    function: bad\n    output_schema: integer.json"), 1);
+  service.functions().add(
+      "bad", std::make_shared<Function>([](ExecutionContext &, const Json &) -> Task<Json> {
+        co_return "not an integer";
+      }));
+  auto run = execute(
+      service, io,
+      pipeline_with("type: function\n    function: bad\n    output_schema: integer.json"), 1);
   EXPECT_EQ(run.state, RunState::Failed);
   EXPECT_EQ(service.list(RecordKind::Attempt, run.id).back().at("state"), "Failed");
 }
@@ -64,14 +78,23 @@ TEST(Schema, RuntimeInputContractPreventsInvocation) {
   c.schema_roots = {root};
   Service service(io, c);
   bool invoked = false;
-  service.functions().add("observe", std::make_shared<Function>([&](ExecutionContext &, const Json &input) -> Task<Json> {
-    invoked = true;
-    co_return input;
-  }));
-  auto run = execute(service, io, pipeline_with("type: function\n    function: observe\n    input_schema: integer.json"), Json{{"wrong", true}});
+  service.functions().add("observe", std::make_shared<Function>(
+                                         [&](ExecutionContext &, const Json &input) -> Task<Json> {
+                                           invoked = true;
+                                           co_return input;
+                                         }));
+  auto run = execute(
+      service, io,
+      pipeline_with("type: function\n    function: observe\n    input_schema: integer.json"),
+      Json{{"wrong", true}});
   EXPECT_EQ(run.state, RunState::Failed);
   EXPECT_FALSE(invoked);
-  EXPECT_NE(service.list(RecordKind::Attempt, run.id).back().at("error").get<std::string>().find("schema=integer.json"), std::string::npos);
+  EXPECT_NE(service.list(RecordKind::Attempt, run.id)
+                .back()
+                .at("error")
+                .get<std::string>()
+                .find("schema=integer.json"),
+            std::string::npos);
 }
 TEST(Schema, PayloadLimitIsEnforced) {
   TemporaryDirectory dir;
@@ -91,10 +114,14 @@ TEST(Schema, ConcurrentValidationUsesThreadSafeCache) {
   std::vector<std::thread> workers;
   for (unsigned i = 0; i < 8; ++i)
     workers.emplace_back([&] {
-      try { validator.validate("integer.json", 7, "n", "input"); }
-      catch (...) { ++failures; }
+      try {
+        validator.validate("integer.json", 7, "n", "input");
+      } catch (...) {
+        ++failures;
+      }
     });
-  for (auto &worker : workers) worker.join();
+  for (auto &worker : workers)
+    worker.join();
   EXPECT_EQ(failures.load(), 0U);
 }
 TEST(Schema, ValidatorNodeUsesSchemaEngine) {
@@ -105,7 +132,12 @@ TEST(Schema, ValidatorNodeUsesSchemaEngine) {
   auto c = config(dir.path);
   c.schema_roots = {root};
   Service service(io, c);
-  auto yaml = "laso: '1'\nname: validator-schema\nversion: 1\nnodes:\n  verify:\n    type: validator\n    schema: object.json\n  accepted:\n    type: function\n    function: identity\n  rejected:\n    type: function\n    function: identity\nedges:\n  - {from: input, to: verify}\n  - {from: verify, to: accepted, condition: accepted}\n  - {from: verify, to: rejected, condition: rejected}\n  - {from: accepted, to: output}\n  - {from: rejected, to: output}\n";
+  auto yaml =
+      "laso: '1'\nname: validator-schema\nversion: 1\nnodes:\n  verify:\n    type: validator\n    "
+      "schema: object.json\n  accepted:\n    type: function\n    function: identity\n  rejected:\n "
+      "   type: function\n    function: identity\nedges:\n  - {from: input, to: verify}\n  - "
+      "{from: verify, to: accepted, condition: accepted}\n  - {from: verify, to: rejected, "
+      "condition: rejected}\n  - {from: accepted, to: output}\n  - {from: rejected, to: output}\n";
   auto run = execute(service, io, yaml, {{"ok", true}});
   EXPECT_EQ(run.state, RunState::Completed);
   EXPECT_TRUE(std::any_of(run.message.provenance.begin(), run.message.provenance.end(),
@@ -121,7 +153,13 @@ TEST(Schema, MissingAndMalformedSchemasFailRegistration) {
   auto c = config(dir.path);
   c.schema_roots = {root};
   Service service(io, c);
-  EXPECT_THROW(service.register_pipeline(pipeline_with("type: function\n    function: identity\n    output_schema: missing.json")), Error);
-  EXPECT_THROW(service.register_pipeline(pipeline_with("type: function\n    function: identity\n    output_schema: bad.json")), Error);
-  EXPECT_THROW(service.register_pipeline(pipeline_with("type: function\n    function: identity\n    output_schema: invalid.json")), Error);
+  EXPECT_THROW(service.register_pipeline(pipeline_with(
+                   "type: function\n    function: identity\n    output_schema: missing.json")),
+               Error);
+  EXPECT_THROW(service.register_pipeline(pipeline_with(
+                   "type: function\n    function: identity\n    output_schema: bad.json")),
+               Error);
+  EXPECT_THROW(service.register_pipeline(pipeline_with(
+                   "type: function\n    function: identity\n    output_schema: invalid.json")),
+               Error);
 }

@@ -69,9 +69,10 @@ int cli_main(int argc, char **argv) {
     if (*validate) {
       auto p = parse_pipeline(read_document(target));
       auto config = load_config(config_path);
-      SchemaValidator schemas(config.schema_roots.empty()
-                                  ? std::vector<std::filesystem::path>{std::filesystem::current_path()}
-                                  : config.schema_roots);
+      SchemaValidator schemas(
+          config.schema_roots.empty()
+              ? std::vector<std::filesystem::path>{std::filesystem::current_path()}
+              : config.schema_roots);
       for (const auto &[id, node] : p.nodes) {
         (void)id;
         if (!node.input_schema.empty())

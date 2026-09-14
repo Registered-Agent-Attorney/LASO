@@ -203,17 +203,19 @@ TEST(Runtime, ParallelBranchesOverlapBeforeRelease) {
   auto entered = std::make_shared<std::atomic<unsigned>>(0);
   auto active = std::make_shared<std::atomic<unsigned>>(0);
   auto maximum = std::make_shared<std::atomic<unsigned>>(0);
-  s.functions().add("barrier", std::make_shared<Function>(
-      [entered, active, maximum](ExecutionContext &context, const Json &input) -> Task<Json> {
-        const auto now = active->fetch_add(1) + 1;
-        auto old = maximum->load();
-        while (now > old && !maximum->compare_exchange_weak(old, now)) {}
-        entered->fetch_add(1);
-        while (entered->load() < 3)
-          co_await context.delay(Milliseconds{1});
-        active->fetch_sub(1);
-        co_return input;
-      }));
+  s.functions().add("barrier", std::make_shared<Function>([entered, active, maximum](
+                                                              ExecutionContext &context,
+                                                              const Json &input) -> Task<Json> {
+                      const auto now = active->fetch_add(1) + 1;
+                      auto old = maximum->load();
+                      while (now > old && !maximum->compare_exchange_weak(old, now)) {
+                      }
+                      entered->fetch_add(1);
+                      while (entered->load() < 3)
+                        co_await context.delay(Milliseconds{1});
+                      active->fetch_sub(1);
+                      co_return input;
+                    }));
   const auto yaml = R"(laso: "1"
 name: overlap
 version: 1
@@ -247,15 +249,17 @@ TEST(Runtime, ParallelPerRunLimitBoundsActiveBranches) {
   Service s(io, c);
   auto active = std::make_shared<std::atomic<unsigned>>(0);
   auto maximum = std::make_shared<std::atomic<unsigned>>(0);
-  s.functions().add("bounded", std::make_shared<Function>(
-      [active, maximum](ExecutionContext &context, const Json &input) -> Task<Json> {
-        const auto now = active->fetch_add(1) + 1;
-        auto old = maximum->load();
-        while (now > old && !maximum->compare_exchange_weak(old, now)) {}
-        co_await context.delay(Milliseconds{5});
-        active->fetch_sub(1);
-        co_return input;
-      }));
+  s.functions().add("bounded",
+                    std::make_shared<Function>([active, maximum](ExecutionContext &context,
+                                                                 const Json &input) -> Task<Json> {
+                      const auto now = active->fetch_add(1) + 1;
+                      auto old = maximum->load();
+                      while (now > old && !maximum->compare_exchange_weak(old, now)) {
+                      }
+                      co_await context.delay(Milliseconds{5});
+                      active->fetch_sub(1);
+                      co_return input;
+                    }));
   const auto yaml = R"(laso: "1"
 name: bounded-parallel
 version: 1
@@ -284,10 +288,10 @@ TEST(Runtime, ParallelCancellationStopsActiveBranches) {
   asio::io_context io;
   Service s(io, config(dir.path));
   s.functions().add("slow", std::make_shared<Function>(
-      [](ExecutionContext &context, const Json &input) -> Task<Json> {
-        co_await context.delay(Milliseconds{100});
-        co_return input;
-      }));
+                                [](ExecutionContext &context, const Json &input) -> Task<Json> {
+                                  co_await context.delay(Milliseconds{100});
+                                  co_return input;
+                                }));
   const auto yaml = R"(laso: "1"
 name: cancel-parallel
 version: 1

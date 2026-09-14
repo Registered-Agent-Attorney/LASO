@@ -16,8 +16,7 @@ struct SchemaLimits {
 
 class SchemaValidator {
 public:
-  explicit SchemaValidator(std::vector<std::filesystem::path> roots = {},
-                           SchemaLimits limits = {});
+  explicit SchemaValidator(std::vector<std::filesystem::path> roots = {}, SchemaLimits limits = {});
 
   void validate(const std::string &reference, const Json &payload, const std::string &node_id,
                 const std::string &direction) const;
@@ -33,7 +32,7 @@ private:
   std::filesystem::path resolve_root_reference(const std::string &) const;
   std::filesystem::path resolve_uri(const std::string &, const std::filesystem::path &) const;
   std::shared_ptr<const Loaded> load(const std::filesystem::path &) const;
-  void inspect_schema(const Json &, const std::filesystem::path &, std::set<std::string> &, unsigned,
-                      unsigned &) const;
+  void inspect_schema(const Json &, const std::filesystem::path &, std::set<std::string> &,
+                      unsigned, unsigned &) const;
 };
 } // namespace laso

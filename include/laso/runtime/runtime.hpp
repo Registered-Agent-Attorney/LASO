@@ -4,8 +4,8 @@
 #include <laso/nodes/node.hpp>
 #include <laso/schema/validator.hpp>
 #include <laso/storage/storage.hpp>
-#include <mutex>
 #include <memory>
+#include <mutex>
 
 namespace laso {
 struct RuntimeDependencies {

@@ -12,7 +12,8 @@ Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), lease_(config_.db_path), storage_(config_.db_path),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       plugins_(tools_, providers_),
-      runtime_(io, config_, {storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_}),
+      runtime_(io, config_,
+               {storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_}),
       artifacts_(config_.data_dir / "artifacts", storage_),
       scheduler_(
           io, [this](const ScheduledPipeline &s) { start(s.pipeline_id, s.input, "scheduler"); }) {

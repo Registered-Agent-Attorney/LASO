@@ -79,7 +79,8 @@ nodes:
 edges:
   - {from: input, to: generate}
   - {from: generate, to: output}
-)", Json{{"request", "example"}});
+)",
+                   Json{{"request", "example"}});
   EXPECT_EQ(r.state, RunState::Completed);
   EXPECT_EQ(r.message.payload.at("text"), "Offline plugin model response");
   EXPECT_TRUE(r.message.payload.at("reviewed"));

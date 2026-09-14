@@ -37,20 +37,22 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
         ++state->completed;
         co_return;
       }
-      ExecutionContext context{branch.id, branch.pipeline_id, definition.id, state->stop.get_token(),
+      ExecutionContext context{branch.id, branch.pipeline_id, definition.id,
+                               state->stop.get_token(),
                                std::chrono::steady_clock::now() + definition.timeout.timeout};
       context.visit = branch.node_visits[definition.id] + 1;
       if (definition.type == "tool") {
         const auto metadata = deps_.tools.get(definition.binding)->metadata();
-        context.deadline = std::min(context.deadline,
-                                    std::chrono::steady_clock::now() + metadata.timeout);
+        context.deadline =
+            std::min(context.deadline, std::chrono::steady_clock::now() + metadata.timeout);
       } else if (definition.type == "agent") {
         const auto binding = config_.models.find(definition.binding);
         if (binding == config_.models.end())
           throw Error(ErrorCode::Provider, "Logical model not configured");
-        context.deadline = std::min(
-            context.deadline, std::chrono::steady_clock::now() +
-                                  deps_.providers.get(binding->second.provider)->metadata().timeout);
+        context.deadline =
+            std::min(context.deadline,
+                     std::chrono::steady_clock::now() +
+                         deps_.providers.get(binding->second.provider)->metadata().timeout);
       }
       auto node = make_node(definition);
       bool succeeded = false;
@@ -67,11 +69,11 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           auto global_slot = co_await nodes_.acquire(context);
           auto run_slot = co_await run_nodes->acquire(context);
           deps_.schemas.validate(definition.input_schema, branch.message.payload, definition.id,
-                                "input");
+                                 "input");
           auto result = co_await node->execute(context, branch.message);
           context.check();
           deps_.schemas.validate(definition.output_schema, result.message.payload, definition.id,
-                                "output");
+                                 "output");
           attempt.state = NodeState::Completed;
           ++branch.node_visits[definition.id];
           auto parent = branch.message.id;
@@ -83,9 +85,9 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           branch.message.time = timestamp();
           branch.message.provenance.push_back(
               {definition.id, "", "", "", "", parent, "", timestamp()});
-          deps_.storage.commit({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)},
-                                {RecordKind::Message, branch.message.id, branch.id,
-                                 Json(branch.message)}});
+          deps_.storage.commit(
+              {{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)},
+               {RecordKind::Message, branch.message.id, branch.id, Json(branch.message)}});
           std::vector<const EdgeDefinition *> edges;
           for (const auto &edge : pipeline.edges)
             if (edge.from == definition.id &&
@@ -98,13 +100,12 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           break;
         } catch (const Error &error) {
           attempt.state = error.code == ErrorCode::Cancellation ? NodeState::Cancelled
-                          : error.code == ErrorCode::Timeout ? NodeState::TimedOut
-                                                             : NodeState::Failed;
-          attempt.error = attempt.state == NodeState::Cancelled ? "Node cancelled"
-                         : attempt.state == NodeState::TimedOut ? "Node deadline exceeded"
-                                                                  : error.code == ErrorCode::Validation
-                                                                        ? "Schema validation failed"
-                                                                        : "Node execution failed";
+                          : error.code == ErrorCode::Timeout    ? NodeState::TimedOut
+                                                                : NodeState::Failed;
+          attempt.error = attempt.state == NodeState::Cancelled  ? "Node cancelled"
+                          : attempt.state == NodeState::TimedOut ? "Node deadline exceeded"
+                          : error.code == ErrorCode::Validation  ? "Schema validation failed"
+                                                                 : "Node execution failed";
           deps_.storage.commit({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
           if (attempt.state == NodeState::Cancelled || attempt.state == NodeState::TimedOut ||
               attempt_number == definition.retry.max_attempts)
@@ -138,13 +139,15 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
 }
 
 Task<void> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipeline,
-                                     std::shared_ptr<AsyncLimiter> run_nodes, std::stop_token parent) {
+                                     std::shared_ptr<AsyncLimiter> run_nodes,
+                                     std::stop_token parent) {
   std::vector<ExecutionToken> tokens;
   tokens.swap(run.ready);
   auto state = std::make_shared<ParallelState>(tokens.size());
   std::stop_callback parent_stop(parent, [state] { state->stop.request_stop(); });
   for (auto &token : tokens)
-    asio::co_spawn(io_, execute_branch(pipeline, std::move(token), state, run_nodes), asio::detached);
+    asio::co_spawn(io_, execute_branch(pipeline, std::move(token), state, run_nodes),
+                   asio::detached);
   while (true) {
     {
       std::lock_guard lock(state->mutex);
@@ -302,7 +305,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
             if (e.details.contains("direction"))
               failure_detail += ", direction=" + e.details.at("direction").get<std::string>();
             if (e.details.contains("instance_path"))
-              failure_detail += ", instance_path=" + e.details.at("instance_path").get<std::string>();
+              failure_detail +=
+                  ", instance_path=" + e.details.at("instance_path").get<std::string>();
             failure_detail += ")";
           }
         } catch (...) {
@@ -322,8 +326,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
                                                                 : NodeState::Failed;
           attempt.error = *failure == ErrorCode::Timeout        ? "Node deadline exceeded"
                           : *failure == ErrorCode::Cancellation ? "Node cancelled"
-                                                                : failure_detail.empty() ? "Node execution failed"
-                                                                                          : failure_detail;
+                          : failure_detail.empty()              ? "Node execution failed"
+                                                                : failure_detail;
           checkpoint(r, "node.failed", {{RecordKind::Attempt, attempt.id, r.id, Json(attempt)}});
           if (*failure == ErrorCode::Cancellation || *failure == ErrorCode::Timeout ||
               attempt_number == definition.retry.max_attempts)

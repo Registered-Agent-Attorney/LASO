@@ -47,8 +47,7 @@ Task<NodeResult> ValidatorNode::execute(ExecutionContext &c, const Message &inpu
   c.check();
   schemas_->validate(definition_.schema, input.payload, c.node_id, "validator");
   auto message = input;
-  message.provenance.push_back(
-      {c.node_id, "", "", "", "", input.id, "validated", timestamp()});
+  message.provenance.push_back({c.node_id, "", "", "", "", input.id, "validated", timestamp()});
   co_return NodeResult{std::move(message), "accepted"};
 }
 void register_functions(FunctionRegistry &r) {

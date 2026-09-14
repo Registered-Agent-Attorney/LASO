@@ -22,7 +22,8 @@ bool inside(const std::filesystem::path &file, const std::filesystem::path &root
 }
 class Handler final : public nlohmann::json_schema::error_handler {
 public:
-  void error(const Json::json_pointer &instance, const Json &, const std::string &message) override {
+  void error(const Json::json_pointer &instance, const Json &,
+             const std::string &message) override {
     if (message_.empty()) {
       instance_ = instance.to_string();
       message_ = message;
@@ -82,7 +83,7 @@ std::filesystem::path SchemaValidator::resolve_root_reference(const std::string 
 }
 
 std::filesystem::path SchemaValidator::resolve_uri(const std::string &reference,
-                                                    const std::filesystem::path &base) const {
+                                                   const std::filesystem::path &base) const {
   if (reference.empty() || remote(reference))
     throw Error(ErrorCode::Validation, "Remote schema references are forbidden");
   const auto hash = reference.find('#');
@@ -166,13 +167,13 @@ void SchemaValidator::inspect_schema(const Json &schema, const std::filesystem::
       inspect_schema(child, base, seen, depth + 1, documents);
     }
     if (schema.contains("type")) {
-      static const std::set<std::string> types = {"null", "boolean", "object", "array",
+      static const std::set<std::string> types = {"null",   "boolean", "object", "array",
                                                   "number", "integer", "string"};
       const auto &type = schema.at("type");
       if (!(type.is_string() && types.contains(type.get<std::string>())) &&
           !(type.is_array() && std::all_of(type.begin(), type.end(), [](const Json &item) {
-                return item.is_string() && types.contains(item.get<std::string>());
-              })))
+              return item.is_string() && types.contains(item.get<std::string>());
+            })))
         throw Error(ErrorCode::Validation, "Schema type keyword is invalid");
     }
   } else if (schema.is_array())
@@ -221,8 +222,11 @@ void SchemaValidator::validate(const std::string &reference, const Json &payload
     validator.validate(payload, handler);
     if (!handler.message_.empty())
       throw Error(ErrorCode::Validation, "Schema validation failed",
-                  {{"schema", reference}, {"node", node_id}, {"direction", direction},
-                   {"instance_path", handler.instance_}, {"message", handler.message_}});
+                  {{"schema", reference},
+                   {"node", node_id},
+                   {"direction", direction},
+                   {"instance_path", handler.instance_},
+                   {"message", handler.message_}});
   } catch (const Error &) {
     throw;
   } catch (const std::exception &) {

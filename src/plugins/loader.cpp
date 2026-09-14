@@ -1,9 +1,9 @@
+#include <cstddef>
 #include <cstring>
 #include <dlfcn.h>
 #include <laso/core/config.hpp>
 #include <laso/plugins/loader.hpp>
 #include <laso_plugin.h>
-#include <cstddef>
 #include <mutex>
 #include <regex>
 #include <set>
@@ -167,8 +167,8 @@ public:
       return {true, "plugin loaded; health callback not supplied"};
     try {
       std::lock_guard lock(mutex_);
-      ExecutionContext execution{"", "", "plugin-health", {},
-                                 std::chrono::steady_clock::now() + Milliseconds{1000}};
+      ExecutionContext execution{
+          "", "", "plugin-health", {}, std::chrono::steady_clock::now() + Milliseconds{1000}};
       Call call{execution, {}, false, false};
       laso_call_context context{sizeof(laso_call_context), LASO_PLUGIN_ABI_VERSION, &call,
                                 should_stop, write_json};
@@ -202,7 +202,8 @@ public:
                                         execution.deadline - std::chrono::steady_clock::now())
                                         .count()}};
     const auto wire = input.dump();
-    const auto status = registration_.invoke(registration_.instance, wire.data(), wire.size(), &context);
+    const auto status =
+        registration_.invoke(registration_.instance, wire.data(), wire.size(), &context);
     execution.check();
     if (status != LASO_OK || call.failed || !call.written)
       throw Error(ErrorCode::Provider, "Plugin provider generation failed");
