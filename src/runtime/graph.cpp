@@ -122,6 +122,8 @@ bool Runtime::advance(Run &r, const PipelineDefinition &p, const NodeDefinition 
   }
   if (r.ready.size() > 256)
     throw Error(ErrorCode::Execution, "Ready branch limit exceeded");
+  if (n.type == "parallel")
+    return true;
   return next_ready(r);
 }
 } // namespace laso

@@ -193,6 +193,127 @@ TEST(Runtime, ParallelJoinsInBranchOrder) {
   EXPECT_TRUE(r.message.payload.at(0).contains("greeting"));
   EXPECT_EQ(r.message.payload.at(1).at("example"), 1);
 }
+TEST(Runtime, ParallelBranchesOverlapBeforeRelease) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.max_nodes = 8;
+  c.max_nodes_per_run = 3;
+  Service s(io, c);
+  auto entered = std::make_shared<std::atomic<unsigned>>(0);
+  auto active = std::make_shared<std::atomic<unsigned>>(0);
+  auto maximum = std::make_shared<std::atomic<unsigned>>(0);
+  s.functions().add("barrier", std::make_shared<Function>(
+      [entered, active, maximum](ExecutionContext &context, const Json &input) -> Task<Json> {
+        const auto now = active->fetch_add(1) + 1;
+        auto old = maximum->load();
+        while (now > old && !maximum->compare_exchange_weak(old, now)) {}
+        entered->fetch_add(1);
+        while (entered->load() < 3)
+          co_await context.delay(Milliseconds{1});
+        active->fetch_sub(1);
+        co_return input;
+      }));
+  const auto yaml = R"(laso: "1"
+name: overlap
+version: 1
+nodes:
+  fork: {type: parallel, join: join}
+  branch_a: {type: function, function: barrier}
+  branch_b: {type: function, function: barrier}
+  branch_c: {type: function, function: barrier}
+  join: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: branch_a}
+  - {from: fork, to: branch_b}
+  - {from: fork, to: branch_c}
+  - {from: branch_a, to: join}
+  - {from: branch_b, to: join}
+  - {from: branch_c, to: join}
+  - {from: join, to: output}
+)";
+  auto r = execute(s, io, yaml, Json{{"value", 7}});
+  EXPECT_EQ(r.state, RunState::Completed);
+  EXPECT_EQ(entered->load(), 3U);
+  EXPECT_EQ(maximum->load(), 3U);
+}
+TEST(Runtime, ParallelPerRunLimitBoundsActiveBranches) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.max_nodes = 8;
+  c.max_nodes_per_run = 2;
+  Service s(io, c);
+  auto active = std::make_shared<std::atomic<unsigned>>(0);
+  auto maximum = std::make_shared<std::atomic<unsigned>>(0);
+  s.functions().add("bounded", std::make_shared<Function>(
+      [active, maximum](ExecutionContext &context, const Json &input) -> Task<Json> {
+        const auto now = active->fetch_add(1) + 1;
+        auto old = maximum->load();
+        while (now > old && !maximum->compare_exchange_weak(old, now)) {}
+        co_await context.delay(Milliseconds{5});
+        active->fetch_sub(1);
+        co_return input;
+      }));
+  const auto yaml = R"(laso: "1"
+name: bounded-parallel
+version: 1
+nodes:
+  fork: {type: parallel, join: join}
+  a: {type: function, function: bounded}
+  b: {type: function, function: bounded}
+  c: {type: function, function: bounded}
+  join: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: a}
+  - {from: fork, to: b}
+  - {from: fork, to: c}
+  - {from: a, to: join}
+  - {from: b, to: join}
+  - {from: c, to: join}
+  - {from: join, to: output}
+)";
+  auto r = execute(s, io, yaml);
+  EXPECT_EQ(r.state, RunState::Completed);
+  EXPECT_EQ(maximum->load(), 2U);
+}
+TEST(Runtime, ParallelCancellationStopsActiveBranches) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add("slow", std::make_shared<Function>(
+      [](ExecutionContext &context, const Json &input) -> Task<Json> {
+        co_await context.delay(Milliseconds{100});
+        co_return input;
+      }));
+  const auto yaml = R"(laso: "1"
+name: cancel-parallel
+version: 1
+nodes:
+  fork: {type: parallel, join: join}
+  a: {type: function, function: slow}
+  b: {type: function, function: slow}
+  c: {type: function, function: slow}
+  join: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: a}
+  - {from: fork, to: b}
+  - {from: fork, to: c}
+  - {from: a, to: join}
+  - {from: b, to: join}
+  - {from: c, to: join}
+  - {from: join, to: output}
+)";
+  auto name = s.register_pipeline(yaml).at("name").get<std::string>();
+  auto id = s.start(name);
+  asio::steady_timer timer(io, Milliseconds{5});
+  timer.async_wait([&](const boost::system::error_code &) { s.runtime().cancel(id); });
+  io.run();
+  EXPECT_EQ(s.get(RecordKind::Run, id).get<laso::Run>().state, RunState::Cancelled);
+}
 TEST(Runtime, ParallelApprovalCheckpointSurvivesRestart) {
   TemporaryDirectory dir;
   std::string id, approval;
