@@ -1,6 +1,6 @@
 # Validation record
 
-Snapshot validated: 2026-09-12. The Windows development workstation was used for
+Snapshot validated: 2026-09-14. The Windows development workstation was used for
 source review and packaging. Native validation was performed over SSH in an isolated
 directory on a remote Ubuntu 24.04.5 LTS (x86-64) host.
 
