@@ -68,6 +68,19 @@ int cli_main(int argc, char **argv) {
     }
     if (*validate) {
       auto p = parse_pipeline(read_document(target));
+      auto config = load_config(config_path);
+      SchemaValidator schemas(config.schema_roots.empty()
+                                  ? std::vector<std::filesystem::path>{std::filesystem::current_path()}
+                                  : config.schema_roots);
+      for (const auto &[id, node] : p.nodes) {
+        (void)id;
+        if (!node.input_schema.empty())
+          schemas.validate_declaration(node.input_schema);
+        if (!node.output_schema.empty())
+          schemas.validate_declaration(node.output_schema);
+        if (!node.schema.empty())
+          schemas.validate_declaration(node.schema);
+      }
       std::cout << Json{{"valid", true}, {"name", p.name}}.dump(2) << '\n';
       return 0;
     }

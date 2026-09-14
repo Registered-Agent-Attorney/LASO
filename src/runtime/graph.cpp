@@ -41,7 +41,7 @@ std::unique_ptr<Node> Runtime::make_node(const NodeDefinition &n) {
   if (n.type == "router")
     return std::make_unique<RouterNode>(n);
   if (n.type == "validator")
-    return std::make_unique<ValidatorNode>(n);
+    return std::make_unique<ValidatorNode>(n, &deps_.schemas);
   if (n.type == "function")
     return std::make_unique<FunctionNode>(deps_.functions.get(n.binding));
   if (n.type == "tool")

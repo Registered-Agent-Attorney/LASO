@@ -121,7 +121,7 @@ PipelineDefinition parse_pipeline(const std::string &text,
       const auto n = item.second;
       keys(n, {"type", "function", "tool", "model", "pipeline", "prompt", "field", "value",
                "condition", "reason", "join", "max_attempts", "retry_delay_ms", "timeout_ms",
-               "max_iterations"});
+               "max_iterations", "input_schema", "output_schema", "schema"});
       NodeDefinition d;
       d.id = item.first.as<std::string>();
       d.type = str(n, "type");
@@ -143,6 +143,9 @@ PipelineDefinition parse_pipeline(const std::string &text,
       d.condition = str(n, "condition");
       d.reason = str(n, "reason", "Human review requested");
       d.join = str(n, "join");
+      d.input_schema = str(n, "input_schema");
+      d.output_schema = str(n, "output_schema");
+      d.schema = str(n, "schema");
       d.value = value(n["value"]);
       d.retry.max_attempts = number(n, "max_attempts", 1, 1, 10);
       d.retry.delay = Milliseconds(number(n, "retry_delay_ms", 0, 0, 60000));
@@ -192,7 +195,8 @@ void validate_pipeline(const PipelineDefinition &p, const std::set<std::string> 
       throw Error(ErrorCode::Validation, "Loop requires max_iterations");
     if (n.type == "parallel" && (!p.nodes.contains(n.join) || p.nodes.at(n.join).type != "join"))
       throw Error(ErrorCode::Validation, "Parallel node requires an existing join node");
-    if ((n.type == "router" || n.type == "validator") && n.field.empty())
+    if ((n.type == "router" || n.type == "validator") && n.field.empty() &&
+        (n.type != "validator" || n.schema.empty()))
       throw Error(ErrorCode::Validation, "Router/validator requires a top-level field");
   }
   std::map<std::string, std::vector<const EdgeDefinition *>> outgoing;

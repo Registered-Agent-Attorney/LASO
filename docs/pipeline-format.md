@@ -47,3 +47,17 @@ they look like booleans or numbers.
 This format intentionally does not evaluate expressions, execute code strings,
 read prompt files, expand environment variables, or embed credentials. Extend the
 schema explicitly in a later version instead of relying on ignored fields.
+
+## JSON Schema contracts
+
+Node definitions may optionally set `input_schema` and `output_schema` to a JSON
+Schema file. The file is resolved below a configured `schema_roots` directory;
+schemas are checked before registration and payloads are checked at node
+boundaries. A failed contract is a normal validation failure and follows the
+node's retry policy. `validator` nodes may set `schema` to run the same validator
+explicitly. Schemas are optional, so existing pipelines remain compatible.
+
+Only local files below an approved root are accepted. Remote `$ref` values and
+parent traversal are rejected. Local file references are canonicalized and
+symlink escapes are rejected. Schema documents and payloads are limited to 1 MiB,
+nesting is limited to 64 levels, and at most 64 referenced documents are loaded.

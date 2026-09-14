@@ -39,3 +39,7 @@ For a vulnerability, use the repository host's private vulnerability reporting
 feature when it is enabled, or contact the repository maintainer privately. Do not
 post exploit details or sensitive records in public issues. No security contact
 address or response-time commitment has been invented for this initial skeleton.
+
+JSON Schema validation is local-only. Remote `$ref` retrieval is disabled, schema
+paths are canonicalized beneath configured roots (including symlink checks), and
+schema, reference, nesting and payload limits bound validation work.

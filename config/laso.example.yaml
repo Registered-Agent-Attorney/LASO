@@ -15,6 +15,8 @@ allow_remote_api: false
 # inference runtime bound to 127.0.0.1. Leave empty to register only Mock.
 local_openai_endpoint: ""
 plugin_dirs: []
+# Optional approved roots for node JSON Schemas. Empty uses the process directory.
+schema_roots: []
 models:
   research: {provider: mock, model: mock-v1}
   reviewer: {provider: mock, model: mock-v1}

@@ -66,8 +66,12 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
         try {
           auto global_slot = co_await nodes_.acquire(context);
           auto run_slot = co_await run_nodes->acquire(context);
+          deps_.schemas.validate(definition.input_schema, branch.message.payload, definition.id,
+                                "input");
           auto result = co_await node->execute(context, branch.message);
           context.check();
+          deps_.schemas.validate(definition.output_schema, result.message.payload, definition.id,
+                                "output");
           attempt.state = NodeState::Completed;
           ++branch.node_visits[definition.id];
           auto parent = branch.message.id;
@@ -98,7 +102,9 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
                                                              : NodeState::Failed;
           attempt.error = attempt.state == NodeState::Cancelled ? "Node cancelled"
                          : attempt.state == NodeState::TimedOut ? "Node deadline exceeded"
-                                                                  : "Node execution failed";
+                                                                  : error.code == ErrorCode::Validation
+                                                                        ? "Schema validation failed"
+                                                                        : "Node execution failed";
           deps_.storage.commit({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
           if (attempt.state == NodeState::Cancelled || attempt.state == NodeState::TimedOut ||
               attempt_number == definition.retry.max_attempts)
@@ -274,16 +280,31 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
         if (definition.type == "agent")
           transition(r, RunState::WaitingModel, "model.called");
         std::optional<ErrorCode> failure;
+        std::string failure_detail;
         NodeResult result;
         try {
           auto global_slot = co_await nodes_.acquire(context);
           auto run_slot = co_await run_nodes->acquire(context);
+          deps_.schemas.validate(definition.input_schema, r.message.payload, definition.id,
+                                 "input");
           result = co_await node->execute(context, r.message);
           context.check();
+          deps_.schemas.validate(definition.output_schema, result.message.payload, definition.id,
+                                 "output");
           if (result.message.payload.dump().size() > max_document_bytes)
             throw Error(ErrorCode::Execution, "Node result exceeds 1 MiB");
         } catch (const Error &e) {
           failure = e.code;
+          if (e.code == ErrorCode::Validation && e.details.is_object()) {
+            failure_detail = e.what();
+            if (e.details.contains("schema"))
+              failure_detail += " (schema=" + e.details.at("schema").get<std::string>();
+            if (e.details.contains("direction"))
+              failure_detail += ", direction=" + e.details.at("direction").get<std::string>();
+            if (e.details.contains("instance_path"))
+              failure_detail += ", instance_path=" + e.details.at("instance_path").get<std::string>();
+            failure_detail += ")";
+          }
         } catch (...) {
           failure = ErrorCode::Execution;
         }
@@ -301,7 +322,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
                                                                 : NodeState::Failed;
           attempt.error = *failure == ErrorCode::Timeout        ? "Node deadline exceeded"
                           : *failure == ErrorCode::Cancellation ? "Node cancelled"
-                                                                : "Node execution failed";
+                                                                : failure_detail.empty() ? "Node execution failed"
+                                                                                          : failure_detail;
           checkpoint(r, "node.failed", {{RecordKind::Attempt, attempt.id, r.id, Json(attempt)}});
           if (*failure == ErrorCode::Cancellation || *failure == ErrorCode::Timeout ||
               attempt_number == definition.retry.max_attempts)

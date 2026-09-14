@@ -2,6 +2,7 @@
 #include <laso/core/config.hpp>
 #include <laso/events/events.hpp>
 #include <laso/nodes/node.hpp>
+#include <laso/schema/validator.hpp>
 #include <laso/storage/storage.hpp>
 #include <mutex>
 #include <memory>
@@ -15,6 +16,7 @@ struct RuntimeDependencies {
   FunctionRegistry &functions;
   NodeRegistry &nodes;
   Policy &policy;
+  SchemaValidator &schemas;
 };
 class Runtime {
 public:

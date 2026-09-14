@@ -51,3 +51,14 @@ cooperative stop token and a steady-clock deadline. `Task<T>` is an Asio awaitab
 The baseline performs no external network or model calls. Short SQLite calls and
 v1 native callbacks are synchronous; future external I/O implementations must
 suspend rather than hold a worker on a blocking operation.
+
+## Schema contracts
+
+The runtime uses the pinned `pboettch/json-schema-validator` Draft 7 library
+through `SchemaValidator`. `input_schema` is checked immediately before a node is
+invoked and `output_schema` immediately after it produces a payload. `validator`
+nodes call the same service explicitly. Parsed documents are cached by canonical
+path behind a mutex, while each validation owns its validator instance, so branch
+validation is safe concurrently. Configured `schema_roots`, canonical path checks,
+disabled remote references, and bounded document/depth/payload limits protect the
+filesystem and runtime.

@@ -10,8 +10,9 @@ Config checked(Config c) {
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), lease_(config_.db_path), storage_(config_.db_path),
-      policy_(config_.rules, config_.allow_network), plugins_(tools_, providers_),
-      runtime_(io, config_, {storage_, events_, providers_, tools_, functions_, nodes_, policy_}),
+      policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
+      plugins_(tools_, providers_),
+      runtime_(io, config_, {storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_}),
       artifacts_(config_.data_dir / "artifacts", storage_),
       scheduler_(
           io, [this](const ScheduledPipeline &s) { start(s.pipeline_id, s.input, "scheduler"); }) {
@@ -28,6 +29,14 @@ Service::Service(asio::io_context &io, Config config)
 Json Service::register_pipeline(const std::string &yaml) {
   auto extensions = nodes_.names();
   auto p = parse_pipeline(yaml, {extensions.begin(), extensions.end()});
+  for (const auto &[id, node] : p.nodes) {
+    if (!node.input_schema.empty())
+      schemas_.validate_declaration(node.input_schema);
+    if (!node.output_schema.empty())
+      schemas_.validate_declaration(node.output_schema);
+    if (!node.schema.empty())
+      schemas_.validate_declaration(node.schema);
+  }
   Json record = {{"id", p.name},         {"name", p.name},
                  {"version", p.version}, {"laso", p.schema_version},
                  {"yaml", yaml},         {"registered_at", timestamp()}};

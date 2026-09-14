@@ -31,9 +31,10 @@ enum class ErrorCode {
 };
 class Error : public std::runtime_error {
 public:
-  Error(ErrorCode code, const std::string &safe_message)
-      : std::runtime_error(safe_message), code(code) {}
+  Error(ErrorCode code, const std::string &safe_message, Json details = Json::object())
+      : std::runtime_error(safe_message), code(code), details(std::move(details)) {}
   ErrorCode code;
+  Json details;
 };
 enum class RunState {
   Queued,
@@ -92,7 +93,8 @@ struct TimeoutPolicy {
   Milliseconds timeout{30000};
 };
 struct NodeDefinition {
-  std::string id, type, binding, prompt, field, condition, reason, join;
+  std::string id, type, binding, prompt, field, condition, reason, join, input_schema,
+      output_schema, schema;
   Json value = nullptr;
   RetryPolicy retry;
   TimeoutPolicy timeout;

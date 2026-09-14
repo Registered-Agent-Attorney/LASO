@@ -1,0 +1,16 @@
+laso: '1'
+name: schema-contract
+version: 1
+nodes:
+  produce:
+    type: function
+    function: hello
+    output_schema: examples/schema-contract/schemas/hello-output.schema.json
+  consume:
+    type: function
+    function: identity
+    input_schema: examples/schema-contract/schemas/hello-output.schema.json
+edges:
+  - {from: input, to: produce}
+  - {from: produce, to: consume}
+  - {from: consume, to: output}

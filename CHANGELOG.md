@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added optional JSON Schema contracts for node inputs and outputs.
+- Added shared schema validation for explicit `validator` nodes, safe local `$ref`
+  loading, bounded schema/payload resources, and structured validation errors.
+
 ## 0.2.0 — Framework Milestone 1 (in progress)
 
 - Native model-provider components are available through the stable C plugin ABI.

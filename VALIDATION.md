@@ -86,3 +86,8 @@ another distribution or deployment environment. Ubuntu and Debian results above
 are actual executions; pending and blocked rows do not imply success. The TSan
 failure occurred before LASO tests ran and must be repeated on a compatible kernel
 and sanitizer runtime; global ASLR settings were not weakened to work around it.
+
+The schema-contract tests additionally cover valid and invalid input/output,
+registration-time missing or malformed schemas, safe local references, forbidden
+remote references, traversal rejection, payload limits, explicit ValidatorNode
+use, and concurrent cache access.

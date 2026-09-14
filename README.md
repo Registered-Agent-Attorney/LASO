@@ -37,7 +37,8 @@ pending systemd deployment validation, and the blocked host TSan run.
 Target environments: Ubuntu 24.04 LTS / Debian 13, x86-64, GCC or Clang,
 C++20, CMake 3.22+, Ninja. No Python, Node.js, Java, model download, external AI
 account, or GUI is required to build or run LASO. Dependencies come from the
-distribution; CMake does not fetch code from the network.
+distribution; CMake fetches the pinned small MIT-licensed JSON Schema validator
+when it is not already available locally.
 
 ```sh
 sudo apt-get update
@@ -138,6 +139,7 @@ process.** Metadata validation does not isolate native code. See the
 | `native-plugin` | Harmless JSON echo through a native C plugin |
 | `plugin-model` | Offline AgentNode response from a native model-provider plugin |
 | `parallel-join` | Fork, checkpoint each branch, combine results in branch order |
+| `schema-contract` | Offline function pipeline with input/output JSON Schema contracts |
 | `bounded-loop` | Exactly two deterministic repetitions |
 | `subpipeline` | Invoke registered `hello`; register it first with `pipeline register` |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |

@@ -2,6 +2,7 @@
 #include <functional>
 #include <laso/providers/provider.hpp>
 #include <laso/runtime/executor.hpp>
+#include <laso/schema/validator.hpp>
 #include <laso/tools/tool.hpp>
 
 namespace laso {
@@ -115,10 +116,15 @@ protected:
 };
 class ValidatorNode final : public RouterNode {
 public:
-  using RouterNode::RouterNode;
+  explicit ValidatorNode(NodeDefinition definition, SchemaValidator *schemas = nullptr)
+      : RouterNode(std::move(definition)), schemas_(schemas) {}
   std::string_view type() const noexcept override {
     return "validator";
   }
+  Task<NodeResult> execute(ExecutionContext &, const Message &) override;
+
+private:
+  SchemaValidator *schemas_;
 };
 class LoopNode final : public Node {
 public:

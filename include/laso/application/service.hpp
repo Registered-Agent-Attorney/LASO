@@ -4,6 +4,7 @@
 #include <laso/runtime/runtime.hpp>
 #include <laso/scheduler/scheduler.hpp>
 #include <laso/security/security.hpp>
+#include <laso/schema/validator.hpp>
 
 namespace laso {
 class Service {
@@ -61,6 +62,7 @@ private:
   FunctionRegistry functions_;
   NodeRegistry nodes_;
   PolicyEngine policy_;
+  SchemaValidator schemas_;
   PluginLoader plugins_;
   Runtime runtime_;
   LocalArtifactStore artifacts_;

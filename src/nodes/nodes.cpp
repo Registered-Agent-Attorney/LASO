@@ -41,6 +41,16 @@ Task<NodeResult> RouterNode::execute(ExecutionContext &c, const Message &input) 
         {c.node_id, "", "", "", "", input.id, accepted ? "accepted" : "rejected", timestamp()});
   co_return NodeResult{message, accepted ? "accepted" : "rejected"};
 }
+Task<NodeResult> ValidatorNode::execute(ExecutionContext &c, const Message &input) {
+  if (definition_.schema.empty())
+    co_return co_await RouterNode::execute(c, input);
+  c.check();
+  schemas_->validate(definition_.schema, input.payload, c.node_id, "validator");
+  auto message = input;
+  message.provenance.push_back(
+      {c.node_id, "", "", "", "", input.id, "validated", timestamp()});
+  co_return NodeResult{std::move(message), "accepted"};
+}
 void register_functions(FunctionRegistry &r) {
   r.add("identity",
         std::make_shared<Function>([](ExecutionContext &c, const Json &input) -> Task<Json> {

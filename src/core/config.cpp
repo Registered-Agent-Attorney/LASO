@@ -57,6 +57,11 @@ Config load_config(const std::filesystem::path &supplied,
             throw Error(ErrorCode::Configuration, "plugin_dirs must be a sequence");
           for (const auto &dir : pair.second)
             c.plugin_dirs.emplace_back(dir.as<std::string>());
+        } else if (key == "schema_roots") {
+          if (!pair.second.IsSequence())
+            throw Error(ErrorCode::Configuration, "schema_roots must be a sequence");
+          for (const auto &root : pair.second)
+            c.schema_roots.emplace_back(root.as<std::string>());
         } else if (key == "policies") {
           for (const auto &rule : pair.second) {
             auto decision = rule["decision"].as<std::string>();
