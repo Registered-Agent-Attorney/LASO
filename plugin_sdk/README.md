@@ -1,7 +1,7 @@
 # LASO native plugin SDK
 
-The SDK header has no C++ or third-party dependency. The supplied C example echoes
-JSON through the host result callback. Build it independently on Linux:
+The SDK header has no C++ or third-party dependency. The supplied C examples echo
+JSON and provide a deterministic offline model provider. Build them independently on Linux:
 
 ```sh
 mkdir -p trusted-plugins
@@ -17,6 +17,7 @@ test fixtures into a deployment plugin directory. Query reports ABI 1; the proje
 version and plugin's own version are separate.
 
 Read [the ownership and compatibility contract](../docs/plugin-abi.md) before
-implementing a plugin. Only tool registration is implemented; reserved component
-kinds return `LASO_UNSUPPORTED`. Plugins are privileged native code, loaded only
-from explicitly configured locations. The sample has no network or shell behavior.
+implementing a plugin. Tool and model-provider registration are implemented;
+the remaining component kinds return `LASO_UNSUPPORTED`. Plugins are privileged
+native code, loaded only from explicitly configured locations. The samples have
+no network or shell behavior.

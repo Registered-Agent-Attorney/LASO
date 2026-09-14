@@ -7,7 +7,7 @@ version (0.1.0), YAML format (1), SQLite schema (1), and plugin ABI (1) are dist
 |---|---|
 | `laso_core` | Domain types, safe parser, config, policy contracts, registry, events, security and artifacts; no HTTP includes |
 | `laso_storage_sqlite` | Native SQLite C API behind `Storage`, transactional checkpoints |
-| `laso_plugin_loader` | Linux dynamic loader and C-to-tool adapter |
+| `laso_plugin_loader` | Linux dynamic loader and C adapters for tools and model providers |
 | `laso_runtime` | Async node execution, state transitions, finite scheduling and checkpoint decisions |
 | `laso_application` | Owns dependencies, registration, recovery inspection and shared services |
 | `laso_api` | Versioned JSON routes and Boost.Beast asynchronous HTTP |
@@ -19,8 +19,8 @@ No custom HTTP parser or provider SDK is in the runtime. SQLite uses its small C
 API instead of an ORM. YAML and JSON remain at parsing and payload boundaries.
 
 Registries use shared mutexes and shared ownership of registered objects. Plugin
-tool objects retain their library handle; shutdown and `dlclose` occur only after
-the last tool reference disappears. A batch registration either replaces the
+tool and provider objects retain their library handle; shutdown and `dlclose` occur only after
+the last registered reference disappears. A batch registration either replaces the
 registry snapshot atomically or leaves it unchanged. Registration is a startup
 operation. Plugins are never hot-reloaded during execution.
 

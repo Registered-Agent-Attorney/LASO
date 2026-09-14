@@ -29,7 +29,7 @@ pending systemd deployment validation, and the blocked host TSan run.
           |
      Versioned C plugin ABI
           |
-     Native tool adapters
+ Native tool and model-provider adapters
 ```
 
 ## Linux requirements and build
@@ -50,8 +50,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 Produced binaries are `build/bin/laso`, `build/bin/laso-server`, and
-`build/laso_tests`. The example C plugin is
-`build/plugins/liblaso_example_tool.so`. Core, runtime, SQLite, plugin loader,
+`build/laso_tests`. Example C plugins are
+`build/plugins/liblaso_example_tool.so` and
+`build/plugins/liblaso_example_model_provider.so`. Core, runtime, SQLite, plugin loader,
 application, API, and CLI are separate library targets. Installation currently
 installs the executables, public headers, C SDK header, and example configuration;
 a relocatable CMake SDK package is deferred.
@@ -119,8 +120,9 @@ LASO_PLUGIN_DIR=build/plugins ./build/bin/laso run start examples/native-plugin/
 Plugins are loaded with `dlopen`/`dlsym`, only from configured directories.
 The SDK uses a versioned C ABI, explicit structure sizes, borrowed inputs,
 host-owned output callbacks, and no STL objects or exceptions across the boundary.
-The first operational plugin adapter registers tools. Other component kinds have
-reserved IDs and return `LASO_UNSUPPORTED` until corresponding adapters exist.
+Tool and model-provider components are operational. Model providers are resolved
+through the existing provider registry, so built-in mock and local providers remain
+available. Other component kinds have reserved IDs and return `LASO_UNSUPPORTED`.
 
 **Loading a native LASO plugin grants that plugin code execution inside the LASO
 process.** Metadata validation does not isolate native code. See the
@@ -134,6 +136,7 @@ process.** Metadata validation does not isolate native code. See the
 | `agent-review` | Two offline mock model calls and a structured validator |
 | `human-approval` | Durable pause and CLI/API decision |
 | `native-plugin` | Harmless JSON echo through a native C plugin |
+| `plugin-model` | Offline AgentNode response from a native model-provider plugin |
 | `parallel-join` | Fork, checkpoint each branch, combine results in branch order |
 | `bounded-loop` | Exactly two deterministic repetitions |
 | `subpipeline` | Invoke registered `hello`; register it first with `pipeline register` |

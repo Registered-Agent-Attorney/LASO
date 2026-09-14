@@ -31,10 +31,18 @@ against concurrent entry; busy components fail explicitly and may use bounded
 pipeline retries. Long-running external I/O needs a later asynchronous ABI, not
 background use of borrowed callbacks.
 
-The enum reserves model, storage, event, identity, scheduler, artifact, telemetry
-and custom-node component kinds. They currently return `LASO_UNSUPPORTED` during
-registration. Only tool registrations have an operational adapter in ABI v1.
-Future ABI versions may add typed function tables for these interfaces.
+ABI v1 supports `TOOL` and `MODEL` components. The other component kinds remain
+reserved and return `LASO_UNSUPPORTED`. Existing v1 tool components remain valid:
+the appended optional `health` callback is discovered only when `struct_size`
+includes it.
+
+A model component's metadata is a bounded JSON object with `version`, `remote`,
+`network`, `streaming`, `context_size`, `timeout_ms`, and `capabilities` fields.
+Its `invoke` callback receives one JSON generation request containing `operation`,
+`logical_model`, `model`, `prompt`, `input`, `options`, and `timeout_ms`. It must
+write one JSON response containing `ok` and `output`; `model` and `provider` are
+optional. A model `health` callback is optional and returns
+`{ "healthy": boolean, "detail": string }`.
 
 Plugins are discovered non-recursively in explicit configured directories.
 Symlink entries and non-`.so` files are skipped. No default search of system library
