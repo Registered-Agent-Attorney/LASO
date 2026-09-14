@@ -1,0 +1,88 @@
+{
+  "scope": "Host-only static validation; not a Linux build or runtime test",
+  "checks": {
+    "source_grammar_files": 49,
+    "cmake_grammar": "parsed",
+    "cmake_source_references": 25,
+    "yaml_documents": 15,
+    "declared_google_tests": 73,
+    "declared_ctest_scripts": 2,
+    "clang_format_18_1_8_files": 48,
+    "clang_format_exit_code": 0
+  },
+  "issues": [],
+  "grammar_notes": [
+    {
+      "kind": "syntax",
+      "node_type": "type_identifier",
+      "file": "include/laso/core/config.hpp",
+      "line": 20,
+      "text": "",
+      "reason": "Known grammar limitation: valid C++ empty braced default argument; manually reviewed"
+    },
+    {
+      "kind": "syntax",
+      "node_type": "type_identifier",
+      "file": "include/laso/core/config.hpp",
+      "line": 19,
+      "text": "",
+      "reason": "Known grammar limitation: valid C++ empty braced default argument; manually reviewed"
+    },
+    {
+      "kind": "syntax",
+      "node_type": "type_identifier",
+      "file": "include/laso/pipeline/parser.hpp",
+      "line": 12,
+      "text": "",
+      "reason": "Known grammar limitation: valid C++ empty braced default argument; manually reviewed"
+    },
+    {
+      "kind": "syntax",
+      "node_type": "type_identifier",
+      "file": "include/laso/pipeline/parser.hpp",
+      "line": 10,
+      "text": "",
+      "reason": "Known grammar limitation: valid C++ empty braced default argument; manually reviewed"
+    },
+    {
+      "kind": "syntax",
+      "node_type": "type_identifier",
+      "file": "include/laso/policies/policy.hpp",
+      "line": 26,
+      "text": "",
+      "reason": "Known grammar limitation: valid C++ empty braced default argument; manually reviewed"
+    },
+    {
+      "kind": "syntax",
+      "node_type": "type_identifier",
+      "file": "include/laso/runtime/runtime.hpp",
+      "line": 43,
+      "text": "",
+      "reason": "Known grammar limitation: valid C++ empty braced default argument; manually reviewed"
+    },
+    {
+      "kind": "syntax",
+      "node_type": "type_identifier",
+      "file": "include/laso/runtime/runtime.hpp",
+      "line": 42,
+      "text": "",
+      "reason": "Known grammar limitation: valid C++ empty braced default argument; manually reviewed"
+    }
+  ],
+  "linux_execution": {
+    "host": "Ubuntu 24.04.5 LTS, x86-64",
+    "gcc_debug_build": "PASS",
+    "clang_debug_build": "PASS",
+    "gcc_ctest": "PASS 75/75",
+    "clang_ctest": "PASS 75/75",
+    "asan_ubsan_ctest": "PASS 75/75",
+    "clang_tidy": "PASS exit 0; advisory warnings remain",
+    "debian_gcc_build": "PASS",
+    "debian_ctest": "PASS 75/75",
+    "runtime_image": "PASS; host-network health endpoint served as unprivileged user",
+    "local_gpu_inference": "PASS; loopback agent run with GPU allocation and utilization observed",
+    "systemd_unit_verify": "PASS",
+    "systemd_deployment": "PENDING",
+    "tsan": "BLOCKED; host runtime unexpected memory mapping"
+  }
+}

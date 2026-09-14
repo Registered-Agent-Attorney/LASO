@@ -1,0 +1,289 @@
+#include "../support.hpp"
+#include <atomic>
+
+using namespace laso;
+using namespace laso::test;
+TEST(Runtime, DeterministicExecutionAndHistory) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  auto run = execute(service, io, fixture("hello-pipeline"), {{"number", 3}});
+  EXPECT_EQ(run.state, RunState::Completed);
+  EXPECT_EQ(run.message.payload.at("greeting"), "Hello from LASO");
+  EXPECT_EQ(service.list(RecordKind::Attempt, run.id).size(), 3U);
+  EXPECT_EQ(service.list(RecordKind::Message, run.id).size(), 3U);
+  EXPECT_GT(service.list(RecordKind::Event, run.id).size(), 3U);
+}
+TEST(Runtime, AgentReviewUsesMockProviders) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto r = execute(s, io, fixture("agent-review"));
+  EXPECT_EQ(r.state, RunState::Completed);
+  EXPECT_TRUE(r.message.payload.at("reviewed").get<bool>());
+}
+TEST(Runtime, RecordsNodeFailureWithoutThrowingToHost) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add("fail",
+                    std::make_shared<Function>([](ExecutionContext &, const Json &) -> Task<Json> {
+                      throw std::runtime_error("DO_NOT_PERSIST_EXCEPTION_CONTENT");
+                      co_return nullptr;
+                    }));
+  auto r = execute(s, io, single("type: function\n    function: fail"));
+  EXPECT_EQ(r.state, RunState::Failed);
+  auto attempts = s.list(RecordKind::Attempt, r.id);
+  ASSERT_EQ(attempts.size(), 2U);
+  EXPECT_EQ(attempts.back().at("state"), "Failed");
+  EXPECT_EQ(Json(r).dump().find("DO_NOT_PERSIST"), std::string::npos);
+}
+TEST(Runtime, RetriesBoundedAttempts) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add(
+      "flaky", std::make_shared<Function>([](ExecutionContext &c, const Json &j) -> Task<Json> {
+        if (c.attempt < 3)
+          throw Error(ErrorCode::Execution, "Retry");
+        co_return j;
+      }));
+  auto r = execute(
+      s, io,
+      single("type: function\n    function: flaky\n    max_attempts: 3\n    retry_delay_ms: 1"));
+  EXPECT_EQ(r.state, RunState::Completed);
+  EXPECT_EQ(s.list(RecordKind::Attempt, r.id).size(), 5U);
+}
+TEST(Runtime, RetryExhaustionFails) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add("fail",
+                    std::make_shared<Function>([](ExecutionContext &, const Json &) -> Task<Json> {
+                      throw Error(ErrorCode::Execution, "Failure");
+                      co_return nullptr;
+                    }));
+  auto r = execute(s, io, single("type: function\n    function: fail\n    max_attempts: 2"));
+  EXPECT_EQ(r.state, RunState::Failed);
+  EXPECT_EQ(s.list(RecordKind::Attempt, r.id).size(), 3U);
+}
+TEST(Runtime, CooperativeNodeTimeout) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add(
+      "delay", std::make_shared<Function>([](ExecutionContext &c, const Json &j) -> Task<Json> {
+        co_await c.delay(Milliseconds{50});
+        co_return j;
+      }));
+  auto r = execute(s, io, single("type: function\n    function: delay\n    timeout_ms: 2"));
+  EXPECT_EQ(r.state, RunState::TimedOut);
+  EXPECT_EQ(s.list(RecordKind::Attempt, r.id).back().at("state"), "TimedOut");
+}
+TEST(Runtime, CooperativeCancellation) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add(
+      "delay", std::make_shared<Function>([](ExecutionContext &c, const Json &j) -> Task<Json> {
+        co_await c.delay(Milliseconds{100});
+        co_return j;
+      }));
+  s.register_pipeline(single("type: function\n    function: delay"));
+  auto id = s.start("test");
+  asio::steady_timer timer(io, Milliseconds{5});
+  timer.async_wait([&](const boost::system::error_code &) { s.runtime().cancel(id); });
+  io.run();
+  EXPECT_EQ(s.get(RecordKind::Run, id).get<laso::Run>().state, RunState::Cancelled);
+}
+TEST(Runtime, LoopBoundsAndStepLimit) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto r = execute(s, io, fixture("bounded-loop"));
+  EXPECT_EQ(r.state, RunState::Completed);
+  EXPECT_EQ(r.node_visits.at("action"), 2U);
+  auto failed = execute(s, io, single("type: function\n    function: identity", "max_steps: 1\n"));
+  EXPECT_EQ(failed.state, RunState::Failed);
+}
+TEST(Runtime, EdgeBudgetCannotLoopForever) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto yaml = fixture("bounded-loop");
+  auto pos = yaml.find("type: loop, max_iterations: 2");
+  yaml.replace(pos, std::string("type: loop, max_iterations: 2").size(),
+               "type: loop, max_iterations: 3");
+  auto r = execute(s, io, yaml);
+  EXPECT_EQ(r.state, RunState::Failed);
+  EXPECT_LE(r.steps, 8U);
+}
+TEST(Runtime, PolicyDeniesBeforeToolInvocation) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.rules = {{"echo", PolicyDecision::Deny}};
+  Service s(io, c);
+  auto r = execute(s, io, single("type: tool\n    tool: echo"));
+  EXPECT_EQ(r.state, RunState::Failed);
+  EXPECT_EQ(r.node_visits.count("action"), 0U);
+}
+TEST(Runtime, PolicyApprovalGatesTool) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.rules = {{"echo", PolicyDecision::RequireApproval}};
+  Service s(io, c);
+  auto r = execute(s, io, single("type: tool\n    tool: echo"));
+  ASSERT_EQ(r.state, RunState::WaitingApproval);
+  auto a = s.list(RecordKind::Approval, r.id).front().get<Approval>();
+  s.runtime().decide(a.id, true, "tester", "");
+  io.restart();
+  io.run();
+  EXPECT_EQ(s.get(RecordKind::Run, r.id).get<laso::Run>().state, RunState::Completed);
+}
+TEST(Runtime, ApprovalSurvivesServiceRestart) {
+  TemporaryDirectory dir;
+  std::string id, approval;
+  {
+    asio::io_context io;
+    Service s(io, config(dir.path));
+    auto r = execute(s, io, fixture("human-approval"));
+    ASSERT_EQ(r.state, RunState::WaitingApproval);
+    id = r.id;
+    approval = s.list(RecordKind::Approval, id).front().at("id").get<std::string>();
+  }
+  {
+    asio::io_context io;
+    Service s(io, config(dir.path));
+    EXPECT_EQ(s.get(RecordKind::Run, id).get<laso::Run>().state, RunState::WaitingApproval);
+    s.runtime().decide(approval, true, "tester", "Reviewed");
+    io.run();
+    auto r = s.get(RecordKind::Run, id).get<laso::Run>();
+    EXPECT_EQ(r.state, RunState::Completed);
+    EXPECT_EQ(r.node_visits.at("prepare"), 1U);
+    EXPECT_EQ(s.get(RecordKind::Approval, approval).at("actor"), "tester");
+  }
+}
+TEST(Runtime, ApprovalRejectAndDuplicateDecision) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto r = execute(s, io, fixture("human-approval"));
+  auto a = s.list(RecordKind::Approval, r.id).front().get<Approval>();
+  s.runtime().decide(a.id, false, "tester", "");
+  EXPECT_EQ(s.get(RecordKind::Run, r.id).get<laso::Run>().state, RunState::Failed);
+  EXPECT_THROW(s.runtime().decide(a.id, true, "tester", ""), Error);
+}
+TEST(Runtime, CancelPendingApproval) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto r = execute(s, io, fixture("human-approval"));
+  s.runtime().cancel(r.id);
+  EXPECT_EQ(s.get(RecordKind::Run, r.id).get<laso::Run>().state, RunState::Cancelled);
+}
+TEST(Runtime, ParallelJoinsInBranchOrder) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto r = execute(s, io, fixture("parallel-join"), {{"example", 1}});
+  ASSERT_EQ(r.state, RunState::Completed);
+  ASSERT_EQ(r.message.payload.size(), 2U);
+  EXPECT_TRUE(r.message.payload.at(0).contains("greeting"));
+  EXPECT_EQ(r.message.payload.at(1).at("example"), 1);
+}
+TEST(Runtime, ParallelApprovalCheckpointSurvivesRestart) {
+  TemporaryDirectory dir;
+  std::string id, approval;
+  auto yaml = fixture("parallel-join");
+  auto pos = yaml.find("first: {type: function, function: hello}");
+  yaml.replace(pos, std::string("first: {type: function, function: hello}").size(),
+               "first: {type: approval}");
+  {
+    asio::io_context io;
+    Service s(io, config(dir.path));
+    auto r = execute(s, io, yaml);
+    ASSERT_EQ(r.state, RunState::WaitingApproval);
+    id = r.id;
+    approval = s.list(RecordKind::Approval, id).front().at("id").get<std::string>();
+  }
+  {
+    asio::io_context io;
+    Service s(io, config(dir.path));
+    s.runtime().decide(approval, true, "tester", "");
+    io.run();
+    auto r = s.get(RecordKind::Run, id).get<laso::Run>();
+    EXPECT_EQ(r.state, RunState::Completed);
+    EXPECT_EQ(r.message.payload.size(), 2U);
+  }
+}
+TEST(Runtime, RoutingFailureRetainsCompletedAttempt) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto yaml = fixture("bounded-loop");
+  auto pos = yaml.find("type: loop, max_iterations: 2");
+  yaml.replace(pos, std::string("type: loop, max_iterations: 2").size(),
+               "type: loop, max_iterations: 3");
+  auto r = execute(s, io, yaml);
+  ASSERT_EQ(r.state, RunState::Failed);
+  for (const auto &a : s.list(RecordKind::Attempt, r.id))
+    EXPECT_NE(a.at("state"), "Running");
+}
+TEST(Runtime, SubpipelineReturnsOutput) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.register_pipeline(fixture("hello-pipeline"));
+  auto r = execute(s, io, fixture("subpipeline"));
+  ASSERT_EQ(r.state, RunState::Completed);
+  EXPECT_EQ(r.message.payload.at("greeting"), "Hello from LASO");
+  EXPECT_EQ(s.list(RecordKind::Run).size(), 2U);
+}
+TEST(Runtime, SubpipelineApprovalResumeAfterRestart) {
+  TemporaryDirectory dir;
+  std::string parent, approval;
+  {
+    asio::io_context io;
+    Service s(io, config(dir.path));
+    s.register_pipeline(fixture("human-approval"));
+    auto r = execute(s, io, single("type: subpipeline\n    pipeline: human-approval"));
+    ASSERT_EQ(r.state, RunState::Paused);
+    parent = r.id;
+    approval = s.list(RecordKind::Approval).front().at("id").get<std::string>();
+  }
+  {
+    asio::io_context io;
+    Service s(io, config(dir.path));
+    s.runtime().decide(approval, true, "tester", "");
+    io.run();
+    EXPECT_EQ(s.get(RecordKind::Run, parent).get<laso::Run>().state, RunState::Completed);
+  }
+}
+TEST(Runtime, CapacityIsBounded) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.max_runs = 1;
+  Service s(io, c);
+  s.register_pipeline(fixture("hello-pipeline"));
+  s.start("hello");
+  EXPECT_THROW(s.start("hello"), Error);
+  io.run();
+}
+TEST(Runtime, EventSubscribersReceiveCommittedEvents) {
+  struct Subscriber : EventSubscriber {
+    unsigned count = 0;
+    void receive(const Event &) override {
+      ++count;
+    }
+  };
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto subscriber = std::make_shared<Subscriber>();
+  s.event_bus().subscribe(subscriber);
+  execute(s, io, fixture("hello-pipeline"));
+  EXPECT_GT(subscriber->count, 5U);
+}

@@ -1,0 +1,11 @@
+laso: "1"
+name: bounded-loop
+version: 1
+nodes:
+  repeat: {type: loop, max_iterations: 2}
+  action: {type: function, function: identity}
+edges:
+  - {from: input, to: repeat}
+  - {from: repeat, condition: repeat, to: action, max_iterations: 2}
+  - {from: action, to: repeat}
+  - {from: repeat, condition: done, to: output}

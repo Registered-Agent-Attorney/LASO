@@ -1,0 +1,5 @@
+Checks: '-*,bugprone-*,performance-*,portability-*,modernize-use-nullptr,modernize-use-override'
+WarningsAsErrors: ''
+HeaderFilterRegex: '(^|/)(include/laso|src|apps)/.*'
+CheckOptions:
+  bugprone-easily-swappable-parameters.MinimumLength: '4'

@@ -1,0 +1,7 @@
+.git
+build*
+.laso
+.env
+*.db*
+*.lock
+compile_commands.json

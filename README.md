@@ -1,0 +1,186 @@
+# LASO
+
+**LASO is an orchestration framework, not a prebuilt AI assistant.**
+
+Local AI System for Orchestration is an early, Linux-first C++20 framework for
+declarative workflows, deterministic functions, model and tool registries, policy
+checks, durable human approval, and execution history. Applications supply their
+own logic and integrations. Agents are one node type; pipelines are the root
+abstraction. Version **0.1.0** is a foundation, not a production-readiness claim.
+
+**Validation status:** implemented and statically reviewed in a non-Linux workspace.
+Linux compilation, executable tests, clang-tidy, and sanitizers are **PENDING**.
+The Linux CI workflows have been written but have not been run here. See
+[VALIDATION.md](VALIDATION.md) before treating this baseline as validated.
+
+```text
+                 API / CLI
+                     |
+              Application services
+                     |
+               Pipeline runtime
+                     |
+          +----------+----------+
+          |          |          |
+        Nodes      SQLite     Events
+          |
+       Registries
+          |
+     Versioned C plugin ABI
+          |
+     Native tool adapters
+```
+
+## Linux requirements and build
+
+Target environments: Ubuntu 24.04 LTS / Debian 13, x86-64, GCC or Clang,
+C++20, CMake 3.22+, Ninja. No Python, Node.js, Java, model download, external AI
+account, or GUI is required to build or run LASO. Dependencies come from the
+distribution; CMake does not fetch code from the network.
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential cmake ninja-build \
+  libsqlite3-dev libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev \
+  libcli11-dev libboost-system-dev libgtest-dev curl jq
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Produced binaries are `build/bin/laso`, `build/bin/laso-server`, and
+`build/laso_tests`. The example C plugin is
+`build/plugins/liblaso_example_tool.so`. Core, runtime, SQLite, plugin loader,
+application, API, and CLI are separate library targets. Installation currently
+installs the executables, public headers, C SDK header, and example configuration;
+a relocatable CMake SDK package is deferred.
+
+## First pipeline
+
+```yaml
+laso: "1"
+name: hello
+version: 1
+nodes:
+  greet:
+    type: function
+    function: hello
+edges:
+  - {from: input, to: greet}
+  - {from: greet, to: output}
+```
+
+`input` and `output` are implicit boundary nodes. Functions and tools resolve
+through registries; no shell command interpretation occurs. See
+[pipeline format](docs/pipeline-format.md) for the intentionally small schema.
+
+```sh
+./build/bin/laso pipeline validate examples/hello-pipeline/pipeline.yaml
+./build/bin/laso run start examples/hello-pipeline/pipeline.yaml --input '{"value":42}'
+./build/bin/laso run start examples/agent-review/pipeline.yaml
+./build/bin/laso run start examples/human-approval/pipeline.yaml
+./build/bin/laso approval list
+./build/bin/laso approval approve APPROVAL_ID --actor operator --comment Reviewed
+```
+
+The approval example exits with `WaitingApproval`. A later CLI process opens the
+same SQLite database, records the decision, and continues. `LASO_DATA_DIR` defaults
+to `.laso` relative to the working directory. The CLI is a local service adapter,
+not an HTTP command wrapper. Only one service process may own a database: while
+the daemon is running, use its API. Stop it before using local CLI database commands.
+`laso health` checks local storage initialization; use HTTP health to probe the daemon.
+
+## API
+
+```sh
+./build/bin/laso-server --config config/laso.example.yaml
+curl -fsS http://127.0.0.1:8080/api/v1/health
+curl -fsS http://127.0.0.1:8080/api/v1/version
+jq -n --rawfile yaml examples/hello-pipeline/pipeline.yaml '{yaml:$yaml}' |
+  curl -fsS http://127.0.0.1:8080/api/v1/pipelines \
+  -H 'Content-Type: application/json' --data-binary @-
+curl -fsS -X POST http://127.0.0.1:8080/api/v1/pipelines/hello/runs \
+  -H 'Content-Type: application/json' -d '{"input":{"value":42}}'
+```
+
+Development identity is unauthenticated and bound to `127.0.0.1:8080`. Remote
+binding requires deliberate `allow_remote_api` configuration and deployment-owned
+authentication. The API never accepts filesystem paths for pipeline registration.
+[API and CLI reference](docs/access.md) lists all endpoints and commands.
+
+## Native plugins
+
+```sh
+LASO_PLUGIN_DIR=build/plugins ./build/bin/laso plugin list
+LASO_PLUGIN_DIR=build/plugins ./build/bin/laso run start examples/native-plugin/pipeline.yaml
+```
+
+Plugins are loaded with `dlopen`/`dlsym`, only from configured directories.
+The SDK uses a versioned C ABI, explicit structure sizes, borrowed inputs,
+host-owned output callbacks, and no STL objects or exceptions across the boundary.
+The first operational plugin adapter registers tools. Other component kinds have
+reserved IDs and return `LASO_UNSUPPORTED` until corresponding adapters exist.
+
+**Loading a native LASO plugin grants that plugin code execution inside the LASO
+process.** Metadata validation does not isolate native code. See the
+[SDK](plugin_sdk/README.md) and [ABI contract](docs/plugin-abi.md).
+
+## Examples
+
+| Directory | Behavior |
+|---|---|
+| `hello-pipeline` | Input → deterministic function → output |
+| `agent-review` | Two offline mock model calls and a structured validator |
+| `human-approval` | Durable pause and CLI/API decision |
+| `native-plugin` | Harmless JSON echo through a native C plugin |
+| `parallel-join` | Fork, checkpoint each branch, combine results in branch order |
+| `bounded-loop` | Exactly two deterministic repetitions |
+| `subpipeline` | Invoke registered `hello`; register it first with `pipeline register` |
+| `local-openai` | Optional loopback-only OpenAI-compatible local model call |
+
+For an optional loopback-only OpenAI-compatible local model service, see
+[local model services](docs/local-models.md). It is disabled by default and does
+not download or launch models.
+
+## Development and deployment
+
+See [architecture](docs/architecture.md), [runtime semantics](docs/runtime.md),
+[Linux deployment](docs/linux-deployment.md), [security](SECURITY.md), and
+[contribution instructions](CONTRIBUTING.md). CI specifies Ubuntu GCC/Clang,
+Debian 13, ASan/UBSan, formatting, and clang-tidy jobs. Tests use GoogleTest and
+CTest, plus a shell process/restart smoke test; no external AI services are used.
+
+```sh
+docker compose -f deploy/docker/compose.yaml up --build
+```
+
+The Compose example deliberately uses Linux host networking with the API on host
+loopback. Persistent data lives in a named volume. A sample systemd unit runs the
+daemon in the foreground as an unprivileged service account.
+
+## Current limitations and deferred work
+
+- Linux builds and runtime behavior still require first execution and correction
+  of any failures found; this workspace has not provided a Linux toolchain.
+- One process owns each SQLite database; no distributed scheduling or horizontal
+  scaling. SQLite calls are short synchronous transactions.
+- Fork branches are scheduled in a deterministic round-robin sequence within a run.
+  They do not yet execute simultaneous model/tool calls within that run. Different
+  runs execute concurrently with bounded slots. Approval pauses the entire run.
+- Deadlines and cancellation are cooperative. A native plugin that blocks or
+  misbehaves can block a worker or crash the process. The v1 plugin invocation ABI
+  is for short local operations; asynchronous external plugin I/O is deferred.
+- Approval waits and history survive restart. In-flight external effects are not
+  exactly once; an explicit resume may replay an unfinished node. Operators must
+  review interrupted runs. Automatic general crash recovery is deferred.
+- Validators currently check equality of one top-level JSON field, not general
+  JSON Schema. Prompt values are inline text, not automatically read from files.
+- Mock is the default built-in provider. An optional loopback-only OpenAI-compatible
+  adapter can call an already-running local model service. No model serving, remote
+  adapters, streaming, secret persistence, sandboxing, authentication platform, or
+  GUI is included.
+- Scheduler registration is an in-process C++ interface, finite one-shot/interval
+  only. Durable schedules, cron, event backends, remote storage, and the non-tool
+  plugin adapters are deferred.
+
+Licensed under Apache License 2.0.

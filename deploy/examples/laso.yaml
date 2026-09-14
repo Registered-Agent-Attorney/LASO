@@ -1,0 +1,18 @@
+data_dir: /var/lib/laso
+db_path: /var/lib/laso/laso.db
+api_host: 127.0.0.1
+api_port: 8080
+workers: 2
+max_runs: 16
+max_nodes: 32
+max_models: 4
+max_tools: 8
+json_logs: true
+log_level: info
+allow_network: false
+allow_remote_api: false
+plugin_dirs: []
+models:
+  research: {provider: mock, model: mock-v1}
+  reviewer: {provider: mock, model: mock-v1}
+policies: []

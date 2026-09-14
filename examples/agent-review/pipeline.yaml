@@ -1,0 +1,26 @@
+laso: "1"
+name: agent-review
+version: 1
+nodes:
+  researcher:
+    type: agent
+    model: research
+    prompt: "Produce a generic structured response."
+  reviewer:
+    type: agent
+    model: reviewer
+    prompt: "Review the structured response."
+  verify:
+    type: validator
+    field: reviewed
+    value: true
+  rejected:
+    type: approval
+    reason: "The mock result did not pass validation."
+edges:
+  - {from: input, to: researcher}
+  - {from: researcher, to: reviewer}
+  - {from: reviewer, to: verify}
+  - {from: verify, condition: accepted, to: output}
+  - {from: verify, condition: rejected, to: rejected}
+  - {from: rejected, to: output}

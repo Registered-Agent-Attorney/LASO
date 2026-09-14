@@ -1,0 +1,12 @@
+/build*/
+/.laso/
+/.env
+*.db
+*.db-wal
+*.db-shm
+*.lock
+*.so
+*.o
+*.a
+compile_commands.json
+.cache/

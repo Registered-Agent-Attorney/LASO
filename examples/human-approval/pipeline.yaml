@@ -1,0 +1,18 @@
+laso: "1"
+name: human-approval
+version: 1
+nodes:
+  prepare:
+    type: function
+    function: hello
+  review:
+    type: approval
+    reason: "Review the generic greeting before continuing."
+  finish:
+    type: function
+    function: identity
+edges:
+  - {from: input, to: prepare}
+  - {from: prepare, to: review}
+  - {from: review, to: finish}
+  - {from: finish, to: output}

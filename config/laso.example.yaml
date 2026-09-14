@@ -1,0 +1,20 @@
+data_dir: .laso
+api_host: 127.0.0.1
+api_port: 8080
+workers: 2
+max_runs: 16
+max_nodes: 32
+max_models: 4
+max_tools: 8
+log_level: info
+json_logs: false
+allow_network: false
+allow_remote_api: false
+# Optional local-only OpenAI-compatible model service, for example a local
+# inference runtime bound to 127.0.0.1. Leave empty to register only Mock.
+local_openai_endpoint: ""
+plugin_dirs: []
+models:
+  research: {provider: mock, model: mock-v1}
+  reviewer: {provider: mock, model: mock-v1}
+policies: []

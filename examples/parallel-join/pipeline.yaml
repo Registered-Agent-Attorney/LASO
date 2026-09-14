@@ -1,0 +1,15 @@
+laso: "1"
+name: parallel-join
+version: 1
+nodes:
+  fork: {type: parallel, join: combine}
+  first: {type: function, function: hello}
+  second: {type: function, function: identity}
+  combine: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: first}
+  - {from: fork, to: second}
+  - {from: first, to: combine}
+  - {from: second, to: combine}
+  - {from: combine, to: output}

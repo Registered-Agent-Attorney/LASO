@@ -1,0 +1,8 @@
+laso: "1"
+name: parent
+version: 1
+nodes:
+  child: {type: subpipeline, pipeline: hello}
+edges:
+  - {from: input, to: child}
+  - {from: child, to: output}

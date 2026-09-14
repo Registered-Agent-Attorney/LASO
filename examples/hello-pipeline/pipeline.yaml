@@ -1,0 +1,10 @@
+laso: "1"
+name: hello
+version: 1
+nodes:
+  greet:
+    type: function
+    function: hello
+edges:
+  - {from: input, to: greet}
+  - {from: greet, to: output}

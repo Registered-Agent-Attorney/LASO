@@ -1,0 +1,10 @@
+laso: "1"
+name: native-plugin
+version: 1
+nodes:
+  echo:
+    type: tool
+    tool: example.echo
+edges:
+  - {from: input, to: echo}
+  - {from: echo, to: output}

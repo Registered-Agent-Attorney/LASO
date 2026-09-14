@@ -1,0 +1,12 @@
+laso: "1"
+name: local-openai
+version: 1
+timeout_ms: 120000
+nodes:
+  answer:
+    type: agent
+    model: local
+    prompt: "Answer concisely. Return plain text."
+edges:
+  - {from: input, to: answer}
+  - {from: answer, to: output}

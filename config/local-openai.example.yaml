@@ -1,0 +1,10 @@
+# Copy this file outside the source tree and replace local-model with the model
+# identifier advertised by your already-running local OpenAI-compatible service.
+data_dir: .laso-local-openai
+api_host: 127.0.0.1
+allow_network: true
+local_openai_endpoint: "http://127.0.0.1:18081"
+models:
+  local:
+    provider: local-openai
+    model: local-model
