@@ -178,6 +178,13 @@ TEST(Configuration, RejectsZeroConcurrency) {
   c.max_runs = 0;
   EXPECT_THROW(c.validate(), Error);
 }
+TEST(Configuration, ValidatesPerRunNodeLimit) {
+  Config c;
+  c.max_nodes_per_run = 0;
+  EXPECT_THROW(c.validate(), Error);
+  c.max_nodes_per_run = c.max_nodes + 1;
+  EXPECT_THROW(c.validate(), Error);
+}
 TEST(PluginABI, IsPlainCVersionedBoundary) {
   EXPECT_EQ(LASO_PLUGIN_ABI_VERSION, 1U);
   EXPECT_GE(sizeof(laso_host_api), sizeof(void *) * 2);

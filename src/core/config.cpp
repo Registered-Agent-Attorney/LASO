@@ -15,7 +15,8 @@ void Config::validate() {
   if (db_path.empty())
     db_path = data_dir / "laso.db";
   if (api_port == 0 || api_port > 65535 || workers == 0 || workers > 64 || max_runs == 0 ||
-      max_runs > 1024 || max_nodes == 0 || max_nodes > 4096 || max_models == 0 ||
+      max_runs > 1024 || max_nodes == 0 || max_nodes > 4096 || max_nodes_per_run == 0 ||
+      max_nodes_per_run > max_nodes || max_models == 0 ||
       max_models > 1024 || max_tools == 0 || max_tools > 1024)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
   if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
@@ -74,7 +75,7 @@ Config load_config(const std::filesystem::path &supplied,
     }
   }
   for (auto name : {"DATA_DIR", "DB_PATH", "PLUGIN_DIR", "LOG_LEVEL", "API_HOST", "API_PORT",
-                    "WORKERS", "MAX_RUNS", "MAX_NODES", "MAX_MODELS", "MAX_TOOLS", "JSON_LOGS",
+                    "WORKERS", "MAX_RUNS", "MAX_NODES", "MAX_NODES_PER_RUN", "MAX_MODELS", "MAX_TOOLS", "JSON_LOGS",
                     "ALLOW_NETWORK", "ALLOW_REMOTE_API", "LOCAL_OPENAI_ENDPOINT"}) {
     auto variable = std::string("LASO_") + name;
     if (auto *v = std::getenv(variable.c_str())) {
@@ -131,6 +132,8 @@ Config load_config(const std::filesystem::path &supplied,
       c.max_runs = integer(v);
     else if (k == "max_nodes")
       c.max_nodes = integer(v);
+    else if (k == "max_nodes_per_run")
+      c.max_nodes_per_run = integer(v);
     else if (k == "max_models")
       c.max_models = integer(v);
     else if (k == "max_tools")

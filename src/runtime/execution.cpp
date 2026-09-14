@@ -7,6 +7,7 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
   auto extensions = deps_.nodes.names();
   const auto pipeline = parse_pipeline(r.definition, {extensions.begin(), extensions.end()});
   const auto deadline = std::chrono::steady_clock::now() + pipeline.timeout.timeout;
+  AsyncLimiter run_nodes(config_.max_nodes_per_run);
   bool attempt_recorded = false;
   try {
     {
@@ -113,7 +114,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
         std::optional<ErrorCode> failure;
         NodeResult result;
         try {
-          auto slot = co_await nodes_.acquire(context);
+          auto global_slot = co_await nodes_.acquire(context);
+          auto run_slot = co_await run_nodes.acquire(context);
           result = co_await node->execute(context, r.message);
           context.check();
           if (result.message.payload.dump().size() > max_document_bytes)

@@ -4,6 +4,7 @@ api_port: 8080
 workers: 2
 max_runs: 16
 max_nodes: 32
+max_nodes_per_run: 8
 max_models: 4
 max_tools: 8
 log_level: info

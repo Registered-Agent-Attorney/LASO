@@ -1,0 +1,11 @@
+laso: "1"
+name: plugin-model
+version: 1
+nodes:
+  generate:
+    type: agent
+    model: plugin-model
+    prompt: Return the deterministic offline example response.
+edges:
+  - {from: input, to: generate}
+  - {from: generate, to: output}
