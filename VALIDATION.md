@@ -79,7 +79,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **PASS: Ubuntu GCC/Clang, Debian, and ASan/UBSan workflow completed successfully for the initial public commit** |
+| GitHub Actions execution | **PASS: Ubuntu GCC/Clang, Debian, and ASan/UBSan workflow completed successfully for hardening commit `042cc95`** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
