@@ -115,13 +115,11 @@ provided. The Compose example retains loopback API exposure using Linux host net
 - **Debian-tested:** GCC 14.2 build and 75/75 tests; the multi-stage runtime image
   built and served its health endpoint with host networking as the unprivileged
   `laso` user.
-- **Pending/blocked:** full systemd deployment and GitHub Actions execution remain
-  pending; TSan is blocked on this host by an `unexpected memory mapping` runtime
+- **Pending/blocked:** full systemd deployment remains pending; TSan is blocked on this host by an `unexpected memory mapping` runtime
   abort during GoogleTest discovery.
 
 CI specifies Ubuntu 24.04 GCC and Clang, Debian 13, clang-format, clang-tidy and
-ASan/UBSan. Optional TSan is a separate CMake configuration. Workflow files were
-not published or executed from this workspace.
+ASan/UBSan. Optional TSan is a separate CMake configuration. The GitHub Actions workflow completed successfully for the initial public commit.
 
 ## Known limitations and deferred work
 
