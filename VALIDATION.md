@@ -10,7 +10,7 @@ C++20 source, public headers, CMake targets, native C plugin SDK and examples,
 SQLite persistence, runtime, API/CLI, policies, scheduling and artifact interfaces,
 tests, systemd/Docker deployment files, documentation, and Linux CI are present.
 
-The test inventory contains **73 GoogleTest cases** plus **2 CTest entries** for CLI
+The test inventory contains **86 GoogleTest cases** plus **2 CTest entries** for CLI
 validation and a process smoke/restart scenario.
 
 ## Statically reviewed
@@ -53,9 +53,9 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC CTest suite | **PASS: 75/75** |
-| Clang CTest suite | **PASS: 75/75** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 75/75** |
+| GCC CTest suite | **PASS: 88/88** |
+| Clang CTest suite | **PASS: 88/88** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 88/88** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
