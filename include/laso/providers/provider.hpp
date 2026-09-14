@@ -44,7 +44,7 @@ public:
     return {true, "offline"};
   }
   ProviderMetadata metadata() const override {
-    return {.name = "mock", .version = "1"};
+    return {.name = "mock", .version = "1", .plugin = ""};
   }
 };
 // An optional adapter for an OpenAI-compatible service bound to the local host.

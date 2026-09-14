@@ -83,8 +83,11 @@ edges:
   EXPECT_EQ(r.state, RunState::Completed);
   EXPECT_EQ(r.message.payload.at("text"), "Offline plugin model response");
   EXPECT_TRUE(r.message.payload.at("reviewed"));
-  ASSERT_FALSE(r.message.provenance.empty());
-  EXPECT_EQ(r.message.provenance.back().provider, "example-model");
+  const auto provenance = std::find_if(
+      r.message.provenance.begin(), r.message.provenance.end(), [](const ProvenanceRecord &item) {
+        return item.provider == "example-model" && item.model == "offline-example";
+      });
+  EXPECT_NE(provenance, r.message.provenance.end());
 }
 TEST(Plugins, RejectsIncompatibleABI) {
   ToolRegistry r;
