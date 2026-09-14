@@ -116,6 +116,18 @@ TEST(Plugins, NoImplicitDirectories) {
   loader.discover({});
   EXPECT_TRUE(loader.plugins().empty());
 }
+TEST(Plugins, MissingConfiguredDirectoryFailsClearly) {
+  ToolRegistry tools;
+  ProviderRegistry providers;
+  PluginLoader loader(tools, providers);
+  try {
+    loader.discover({std::filesystem::temp_directory_path() / "laso-no-such-plugin-dir"});
+    FAIL() << "missing plugin directory should fail configuration";
+  } catch (const Error &error) {
+    EXPECT_EQ(error.code, ErrorCode::Configuration);
+    EXPECT_STREQ(error.what(), "Configured plugin directory is unavailable");
+  }
+}
 TEST(Plugins, SymlinksNotLoaded) {
   TemporaryDirectory dir;
   std::filesystem::create_symlink(

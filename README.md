@@ -170,9 +170,10 @@ daemon in the foreground as an unprivileged service account.
   executed. Full systemd installation and shutdown behavior remain unvalidated.
 - One process owns each SQLite database; no distributed scheduling or horizontal
   scaling. SQLite calls are short synchronous transactions.
-- Fork branches are scheduled in a deterministic round-robin sequence within a run.
-  They do not yet execute simultaneous model/tool calls within that run. Different
-  runs execute concurrently with bounded slots. Approval pauses the entire run.
+- Fork branches execute concurrently through the bounded executor when capacity is
+  available, while join results retain pipeline branch order. Global, per-run,
+  model-call, and tool-call limits bound work; cancellation is cooperative. Approval
+  pauses the entire run.
 - Deadlines and cancellation are cooperative. A native plugin that blocks or
   misbehaves can block a worker or crash the process. The v1 plugin invocation ABI
   is for short local operations; asynchronous external plugin I/O is deferred.

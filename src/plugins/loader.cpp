@@ -230,8 +230,14 @@ private:
 void PluginLoader::discover(const std::vector<std::filesystem::path> &directories) {
   std::set<std::filesystem::path> paths;
   for (const auto &directory : directories) {
-    auto canonical = std::filesystem::canonical(directory);
-    for (const auto &entry : std::filesystem::directory_iterator(canonical)) {
+    std::error_code ec;
+    auto canonical = std::filesystem::canonical(directory, ec);
+    if (ec || !std::filesystem::is_directory(canonical))
+      throw Error(ErrorCode::Configuration, "Configured plugin directory is unavailable");
+    std::filesystem::directory_iterator entries(canonical, ec);
+    if (ec)
+      throw Error(ErrorCode::Configuration, "Configured plugin directory cannot be read");
+    for (const auto &entry : entries) {
       // Do not follow symlinks outside a configured directory (or load versioned .so.* files).
       if (entry.is_symlink() || !entry.is_regular_file() || entry.path().extension() != ".so")
         continue;
