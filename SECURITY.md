@@ -1,7 +1,9 @@
 # Security boundaries
 
 LASO v0.1 is an early framework. It has not been independently audited or validated
-in production. The current snapshot still requires Linux build/runtime validation.
+in production. Ubuntu GCC/Clang, ASan/UBSan, Debian container, runtime-image, and
+hosted CI validation have been performed; full systemd deployment behavior remains
+unvalidated. See [VALIDATION.md](VALIDATION.md) for the exact record.
 
 - The only built-in model provider is offline Mock. No external AI service is
   contacted and no model is downloaded automatically.

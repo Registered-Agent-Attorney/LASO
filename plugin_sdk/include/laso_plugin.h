@@ -38,6 +38,10 @@ typedef struct laso_call_context {
 } laso_call_context;
 typedef int32_t (*laso_invoke_fn)(void *instance, const char *input_json, uint64_t input_length,
                                   const laso_call_context *context);
+/* Optional for MODEL components. The host accepts the original v1 component
+ * size, so existing tool plugins remain ABI-compatible. Health output is a
+ * bounded JSON object: {"healthy":bool,"detail":string}. */
+typedef int32_t (*laso_health_fn)(void *instance, const laso_call_context *context);
 typedef struct laso_component {
   uint32_t struct_size;
   uint32_t kind;
@@ -45,13 +49,16 @@ typedef struct laso_component {
   const char *metadata_json;
   void *instance;
   laso_invoke_fn invoke;
+  laso_health_fn health;
 } laso_component;
 typedef struct laso_host_api {
   uint32_t struct_size;
   uint32_t abi_version;
   void *host_context;
   /* Registration is only valid during init. Host copies strings and callbacks.
-   * Non-tool kinds are reserved in ABI v1 and currently return LASO_UNSUPPORTED.
+   * TOOL and MODEL kinds are supported by the v1 host. Other kinds return
+   * LASO_UNSUPPORTED. Existing components may use the original smaller v1
+   * struct size and omit `health`.
    */
   int32_t (*register_component)(void *host_context, const laso_component *component);
 } laso_host_api;

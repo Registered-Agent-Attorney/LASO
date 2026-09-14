@@ -8,10 +8,11 @@ checks, durable human approval, and execution history. Applications supply their
 own logic and integrations. Agents are one node type; pipelines are the root
 abstraction. Version **0.1.0** is a foundation, not a production-readiness claim.
 
-**Validation status:** implemented and statically reviewed in a non-Linux workspace.
-Linux compilation, executable tests, clang-tidy, and sanitizers are **PENDING**.
-The Linux CI workflows have been written but have not been run here. See
-[VALIDATION.md](VALIDATION.md) before treating this baseline as validated.
+**Validation status:** implemented, statically reviewed, and validated on Ubuntu
+with GCC and Clang, ASan/UBSan, a Debian 13 container build, a runtime image
+health check, and GitHub Actions. These are development and CI results, not a
+production-readiness claim. See [VALIDATION.md](VALIDATION.md) for exact scope,
+pending systemd deployment validation, and the blocked host TSan run.
 
 ```text
                  API / CLI
@@ -160,8 +161,8 @@ daemon in the foreground as an unprivileged service account.
 
 ## Current limitations and deferred work
 
-- Linux builds and runtime behavior still require first execution and correction
-  of any failures found; this workspace has not provided a Linux toolchain.
+- Linux builds, tests, sanitizer builds, and the Debian container path have been
+  executed. Full systemd installation and shutdown behavior remain unvalidated.
 - One process owns each SQLite database; no distributed scheduling or horizontal
   scaling. SQLite calls are short synchronous transactions.
 - Fork branches are scheduled in a deterministic round-robin sequence within a run.

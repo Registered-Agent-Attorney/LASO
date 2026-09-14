@@ -49,15 +49,47 @@ TEST(Plugins, DiscoversLoadsInvokesAndUnloadsExample) {
   auto c = config(dir.path);
   c.plugin_dirs = {LASO_PLUGIN_DIR};
   Service s(io, c);
-  ASSERT_EQ(s.plugins().size(), 1U);
+  ASSERT_EQ(s.plugins().size(), 2U);
   EXPECT_TRUE(s.plugins().at(0).at("loaded").get<bool>());
   auto r = execute(s, io, fixture("native-plugin"), {{"echo", 123}});
   EXPECT_EQ(r.state, RunState::Completed);
   EXPECT_EQ(r.message.payload.at("echo"), 123);
 }
+TEST(Plugins, ModelProviderIsDiscoverableAndServicesAgentPipeline) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.plugin_dirs = {LASO_PLUGIN_DIR};
+  c.models["plugin-model"] = {"example-model", "offline-example"};
+  Service s(io, c);
+  const auto providers = s.providers();
+  const auto found = std::find_if(providers.begin(), providers.end(), [](const Json &provider) {
+    return provider.at("name") == "example-model" &&
+           provider.at("plugin") == "example-model-provider" && provider.at("healthy") == true;
+  });
+  ASSERT_NE(found, providers.end());
+  auto r = execute(s, io, R"(laso: "1"
+name: plugin-model
+version: 1
+nodes:
+  generate:
+    type: agent
+    model: plugin-model
+    prompt: Produce a deterministic offline response.
+edges:
+  - {from: input, to: generate}
+  - {from: generate, to: output}
+)", Json{{"request", "example"}});
+  EXPECT_EQ(r.state, RunState::Completed);
+  EXPECT_EQ(r.message.payload.at("text"), "Offline plugin model response");
+  EXPECT_TRUE(r.message.payload.at("reviewed"));
+  ASSERT_FALSE(r.message.provenance.empty());
+  EXPECT_EQ(r.message.provenance.back().provider, "example-model");
+}
 TEST(Plugins, RejectsIncompatibleABI) {
   ToolRegistry r;
-  PluginLoader loader(r);
+  ProviderRegistry providers;
+  PluginLoader loader(r, providers);
   loader.discover({LASO_BAD_PLUGIN_DIR});
   ASSERT_EQ(loader.plugins().size(), 1U);
   EXPECT_FALSE(loader.plugins().front().loaded);
@@ -68,14 +100,16 @@ TEST(Plugins, RejectsNonLibraryFile) {
   TemporaryDirectory dir;
   std::ofstream(dir.path / "bad.so") << "not a library";
   ToolRegistry r;
-  PluginLoader loader(r);
+  ProviderRegistry providers;
+  PluginLoader loader(r, providers);
   loader.discover({dir.path});
   ASSERT_EQ(loader.plugins().size(), 1U);
   EXPECT_FALSE(loader.plugins().front().loaded);
 }
 TEST(Plugins, NoImplicitDirectories) {
   ToolRegistry r;
-  PluginLoader loader(r);
+  ProviderRegistry providers;
+  PluginLoader loader(r, providers);
   loader.discover({});
   EXPECT_TRUE(loader.plugins().empty());
 }
@@ -84,7 +118,8 @@ TEST(Plugins, SymlinksNotLoaded) {
   std::filesystem::create_symlink(
       std::filesystem::path(LASO_PLUGIN_DIR) / "liblaso_example_tool.so", dir.path / "redirect.so");
   ToolRegistry r;
-  PluginLoader loader(r);
+  ProviderRegistry providers;
+  PluginLoader loader(r, providers);
   loader.discover({dir.path});
   EXPECT_TRUE(loader.plugins().empty());
 }

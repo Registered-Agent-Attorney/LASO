@@ -1,5 +1,6 @@
 #pragma once
 #include <filesystem>
+#include <laso/providers/provider.hpp>
 #include <laso/tools/tool.hpp>
 
 namespace laso {
@@ -11,7 +12,8 @@ struct PluginInfo {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(PluginInfo, path, name, version, error, abi, loaded)
 class PluginLoader {
 public:
-  explicit PluginLoader(ToolRegistry &tools) : tools_(tools) {}
+  PluginLoader(ToolRegistry &tools, ProviderRegistry &providers)
+      : tools_(tools), providers_(providers) {}
   // Call during startup, before workers or consumers access the registries.
   void discover(const std::vector<std::filesystem::path> &configured_directories);
   const std::vector<PluginInfo> &plugins() const {
@@ -20,6 +22,7 @@ public:
 
 private:
   ToolRegistry &tools_;
+  ProviderRegistry &providers_;
   std::vector<PluginInfo> plugins_;
   std::vector<std::shared_ptr<void>> libraries_;
   void load(const std::filesystem::path &);

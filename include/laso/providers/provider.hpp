@@ -4,7 +4,7 @@
 
 namespace laso {
 struct ProviderMetadata {
-  std::string name, version;
+  std::string name, version, plugin;
   std::size_t context_size = 4096;
   bool remote = false, streaming = false, network = false;
   Milliseconds timeout{30000};

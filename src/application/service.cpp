@@ -10,7 +10,7 @@ Config checked(Config c) {
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), lease_(config_.db_path), storage_(config_.db_path),
-      policy_(config_.rules, config_.allow_network), plugins_(tools_),
+      policy_(config_.rules, config_.allow_network), plugins_(tools_, providers_),
       runtime_(io, config_, {storage_, events_, providers_, tools_, functions_, nodes_, policy_}),
       artifacts_(config_.data_dir / "artifacts", storage_),
       scheduler_(
@@ -60,6 +60,7 @@ Json Service::providers() const {
                       {"remote", m.remote},
                       {"streaming", m.streaming},
                       {"context_size", m.context_size},
+                      {"plugin", m.plugin},
                       {"healthy", p->health().healthy},
                       {"capabilities", m.capabilities}});
   }
