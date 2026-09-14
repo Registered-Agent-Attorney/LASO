@@ -15,7 +15,7 @@ validation and a process smoke/restart scenario.
 
 ## Statically reviewed
 
-- All 24 source paths named by CMake exist; source/header references, namespaces,
+- All 25 source paths named by CMake exist; source/header references, namespaces,
   definitions, dependency discovery, and target boundaries were reviewed.
 - GCC/Clang flags, C++20 requirements, runtime output paths, and the Linux-only
   platform check were reviewed.
