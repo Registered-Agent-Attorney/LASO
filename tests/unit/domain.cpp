@@ -50,6 +50,27 @@ TEST(Pipeline, RejectsUnknownNode) {
 TEST(Pipeline, RejectsWrongBindingField) {
   EXPECT_THROW(parse_pipeline(single("type: tool\n    function: echo")), Error);
 }
+TEST(Pipeline, ParsesExplicitSubpipelineRevision) {
+  const auto reference = parse_pipeline_reference("research@2");
+  EXPECT_EQ(reference.name, "research");
+  EXPECT_EQ(reference.version, 2U);
+  EXPECT_TRUE(reference.explicit_version);
+  EXPECT_EQ(pipeline_reference(reference.name, reference.version), "research@2");
+  const auto yaml = single("type: subpipeline\n    pipeline: research@2");
+  EXPECT_NO_THROW(parse_pipeline(yaml));
+}
+TEST(Pipeline, RejectsMalformedSubpipelineRevision) {
+  EXPECT_THROW(parse_pipeline(single("type: subpipeline\n    pipeline: research@0")), Error);
+  EXPECT_THROW(parse_pipeline(single("type: subpipeline\n    pipeline: research@2@3")), Error);
+  EXPECT_THROW(parse_pipeline(single("type: subpipeline\n    pipeline: ../research@2")), Error);
+}
+TEST(Configuration, ValidatesSubpipelineDepth) {
+  Config c;
+  c.max_subpipeline_depth = 0;
+  EXPECT_THROW(c.validate(), Error);
+  c.max_subpipeline_depth = 16;
+  EXPECT_NO_THROW(c.validate());
+}
 TEST(Pipeline, RejectsUnboundedCycle) {
   auto yaml = fixture("bounded-loop");
   auto position = yaml.find(", max_iterations: 2}");

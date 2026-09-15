@@ -99,13 +99,40 @@ std::string read_document(const std::filesystem::path &path) {
     throw Error(ErrorCode::Validation, "Configuration exceeds 1 MiB");
   return text;
 }
+PipelineReference parse_pipeline_reference(const std::string &text) {
+  const auto at = text.find('@');
+  if (at == std::string::npos) {
+    if (!identifier(text))
+      throw Error(ErrorCode::Validation, "Invalid pipeline reference");
+    return {text, 0, false};
+  }
+  if (at == 0 || at + 1 >= text.size() || text.find('@', at + 1) != std::string::npos ||
+      !identifier(text.substr(0, at)))
+    throw Error(ErrorCode::Validation, "Invalid versioned pipeline reference");
+  unsigned version = 0;
+  const auto digits = text.substr(at + 1);
+  try {
+    std::size_t end = 0;
+    const auto parsed = std::stoul(digits, &end);
+    if (end != digits.size() || parsed == 0 || parsed > 1000000)
+      throw std::out_of_range("version");
+    version = static_cast<unsigned>(parsed);
+  } catch (...) {
+    throw Error(ErrorCode::Validation, "Invalid pipeline reference version");
+  }
+  return {text.substr(0, at), version, true};
+}
+std::string pipeline_reference(const std::string &name, unsigned version) {
+  return name + "@" + std::to_string(version);
+}
 PipelineDefinition parse_pipeline(const std::string &text,
                                   const std::set<std::string> &extensions) {
   if (text.size() > max_document_bytes)
     throw Error(ErrorCode::Validation, "Configuration exceeds 1 MiB");
   try {
     const auto root = detail::load_safe_yaml(text);
-    keys(root, {"laso", "name", "version", "nodes", "edges", "max_steps", "timeout_ms"});
+    keys(root, {"laso", "name", "version", "nodes", "edges", "max_steps", "timeout_ms",
+                "input_schema", "output_schema"});
     if (!root["laso"] || !root["version"] || !root["name"] || !root["nodes"] || !root["edges"])
       throw Error(ErrorCode::Validation, "Required pipeline fields missing");
     PipelineDefinition p;
@@ -113,6 +140,8 @@ PipelineDefinition parse_pipeline(const std::string &text,
     p.name = str(root, "name");
     p.schema_version = number(root, "laso", 1, 1, 1);
     p.version = number(root, "version", 1, 1, 1000000);
+    p.input_schema = str(root, "input_schema");
+    p.output_schema = str(root, "output_schema");
     p.max_steps = number(root, "max_steps", 1000, 1, 100000);
     p.timeout.timeout = Milliseconds(number(root, "timeout_ms", 300000, 1, 86400000));
     if (!root["nodes"].IsMap() || !root["edges"].IsSequence())
@@ -187,10 +216,10 @@ void validate_pipeline(const PipelineDefinition &p, const std::set<std::string> 
       throw Error(ErrorCode::Validation, "Input/output types are reserved for boundary nodes");
     if (!identifier(id) || (!types.contains(n.type) && !extensions.contains(n.type)))
       throw Error(ErrorCode::Validation, "Invalid node ID or unknown type");
-    if ((n.type == "tool" || n.type == "function" || n.type == "agent" ||
-         n.type == "subpipeline") &&
-        !identifier(n.binding))
+    if ((n.type == "tool" || n.type == "function" || n.type == "agent") && !identifier(n.binding))
       throw Error(ErrorCode::Validation, "A logical binding is required");
+    if (n.type == "subpipeline")
+      (void)parse_pipeline_reference(n.binding);
     if (n.type == "loop" && n.max_iterations == 0)
       throw Error(ErrorCode::Validation, "Loop requires max_iterations");
     if (n.type == "parallel" && (!p.nodes.contains(n.join) || p.nodes.at(n.join).type != "join"))

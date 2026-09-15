@@ -38,18 +38,33 @@ The per-attempt deadline is capped by the current pipeline segment deadline and
 provider/tool timeout metadata, including for concurrent branches. Persisted visit,
 edge and step budgets do not reset; branch work consumes the same run step budget.
 
-Cancellation propagates via `std::stop_source`/`std::stop_token`, including child
-runs. A tool ignoring cancellation may finish its side effect before control
-returns. The daemon cannot safely kill arbitrary native code. SIGTERM/SIGINT stop
-HTTP acceptance, stop scheduler timers, request cancellation and drain workers.
-Pending approval records remain durable. systemd may eventually terminate a
-noncooperative process at its configured stop timeout.
+Cancellation propagates via `std::stop_source`/`std::stop_token`, including all
+durable child runs belonging to a parent (including parallel branch children). A
+tool ignoring cancellation may finish its side effect before control returns. The
+daemon cannot safely kill arbitrary native code. SIGTERM/SIGINT stop HTTP
+acceptance, stop scheduler timers, request cancellation and drain workers. Pending
+approval records remain durable. systemd may eventually terminate a noncooperative
+process at its configured stop timeout.
 
-Subpipeline depth is capped at eight. Children have separate run records and a
-durable parent link. Child approval waits pause the parent. Completing a child
-resumes a waiting parent, including after a restart. Parent/child creation crosses
-separate transactions; interrupted creation can leave an orphan child requiring
-operator inspection. Full atomic child dispatch and outbox recovery are deferred.
+Subpipeline revisions use immutable `name@version` registry records. A parent
+stores its resolved child references, and each child has a separate normal run
+record with `parent_id`, `parent_node_id`, `pipeline_id` and `pipeline_version`.
+The default nesting limit is 16 and is configurable as
+`max_subpipeline_depth`/`LASO_MAX_SUBPIPELINE_DEPTH` from 1 through 64. Registration
+rejects missing revisions and direct or indirect dependency recursion; runtime
+also enforces the depth limit.
+
+The child receives the parent payload directly and its output is the parent
+subpipeline node result. Child retries, provider/tool limits, policies, schemas,
+events, approvals and persistence use the same runtime as a root run. A failed
+subpipeline node retry starts a new child run and preserves the failed child for
+inspection. The parent does not hold a node permit while waiting for a child, but
+the child still consumes the shared global limiter and its own per-run limiter.
+Child approval waits pause the parent; deciding the child approval resumes the
+child and then the parent, including after a process restart. Parent cancellation
+scans and requests cancellation on every active child. Parent/child creation uses
+separate durable checkpoints; an interrupted dispatch can leave an inspectable
+child run, but there is no distributed outbox or exactly-once dispatch guarantee.
 
 Local artifacts use generated filenames, exclusive creation and fsync before
 metadata registration. User names never select filesystem paths. A crash between

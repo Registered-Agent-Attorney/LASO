@@ -1,8 +1,24 @@
 #include "../support.hpp"
 #include <atomic>
+#include <fstream>
+#include <set>
 
 using namespace laso;
 using namespace laso::test;
+namespace {
+std::string composed_pipeline(const std::string &name, unsigned version,
+                              const std::string &root_fields, const std::string &nodes,
+                              const std::string &edges) {
+  return "laso: '1'\nname: " + name + "\nversion: " + std::to_string(version) + "\n" + root_fields +
+         "nodes:\n" + nodes + "edges:\n" + edges;
+}
+std::string identity_pipeline(const std::string &name, unsigned version,
+                              const std::string &root_fields = "") {
+  return composed_pipeline(name, version, root_fields,
+                           "  action:\n    type: function\n    function: identity\n",
+                           "  - {from: input, to: action}\n  - {from: action, to: output}\n");
+}
+} // namespace
 TEST(Runtime, DeterministicExecutionAndHistory) {
   TemporaryDirectory dir;
   asio::io_context io;
@@ -505,6 +521,10 @@ TEST(Runtime, SubpipelineApprovalResumeAfterRestart) {
     ASSERT_EQ(r.state, RunState::Paused);
     parent = r.id;
     approval = s.list(RecordKind::Approval).front().at("id").get<std::string>();
+    const auto children = s.run_view(parent).at("children");
+    ASSERT_EQ(children.size(), 1U);
+    EXPECT_EQ(children.front().at("parent_node_id"), "action");
+    EXPECT_EQ(children.front().at("pipeline_version"), 1U);
   }
   {
     asio::io_context io;
@@ -513,6 +533,268 @@ TEST(Runtime, SubpipelineApprovalResumeAfterRestart) {
     io.run();
     EXPECT_EQ(s.get(RecordKind::Run, parent).get<laso::Run>().state, RunState::Completed);
   }
+}
+TEST(Runtime, ParentCancellationCoversParallelSubpipelineChildren) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add("slow-child", std::make_shared<Function>(
+                                      [](ExecutionContext &c, const Json &j) -> Task<Json> {
+                                        co_await c.delay(Milliseconds{200});
+                                        co_return j;
+                                      }));
+  s.register_pipeline(composed_pipeline(
+      "slow-composed-child", 1, "", "  action: {type: function, function: slow-child}\n",
+      "  - {from: input, to: action}\n  - {from: action, to: output}\n"));
+  const auto parent = composed_pipeline(
+      "cancel-composed-parent", 1, "",
+      "  fork: {type: parallel, join: join}\n  left: {type: subpipeline, pipeline: "
+      "slow-composed-child@1}\n  right: {type: subpipeline, pipeline: slow-composed-child@1}\n  "
+      "join: {type: join}\n",
+      "  - {from: input, to: fork}\n  - {from: fork, to: left}\n  - {from: fork, to: right}\n  - "
+      "{from: left, to: join}\n  - {from: right, to: join}\n  - {from: join, to: output}\n");
+  const auto id = s.start(s.register_pipeline(parent).at("id").get<std::string>());
+  asio::steady_timer timer(io, Milliseconds{5});
+  timer.async_wait([&](const boost::system::error_code &) { s.runtime().cancel(id); });
+  io.run();
+  EXPECT_EQ(s.get(RecordKind::Run, id).get<laso::Run>().state, RunState::Cancelled);
+  const auto children = s.run_view(id).at("children");
+  ASSERT_EQ(children.size(), 2U);
+  for (const auto &child : children)
+    EXPECT_EQ(child.at("state"), "Cancelled");
+}
+TEST(Runtime, VersionedRegistryKeepsRevisionsImmutable) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  const auto v1 = s.register_pipeline(identity_pipeline("versioned", 1));
+  const auto v2 = s.register_pipeline(identity_pipeline("versioned", 2));
+  EXPECT_EQ(v1.at("id"), "versioned@1");
+  EXPECT_EQ(v2.at("id"), "versioned@2");
+  EXPECT_EQ(s.list(RecordKind::Pipeline).size(), 2U);
+  EXPECT_NO_THROW(s.register_pipeline(identity_pipeline("versioned", 1)));
+  auto conflicting = identity_pipeline("versioned", 1);
+  conflicting.replace(conflicting.find("function: identity"), 18, "function: hello");
+  EXPECT_THROW(s.register_pipeline(conflicting), Error);
+  const auto id = s.start("versioned@1", Json{{"value", 7}});
+  io.run();
+  const auto run = s.get(RecordKind::Run, id).get<laso::Run>();
+  EXPECT_EQ(run.state, RunState::Completed);
+  EXPECT_EQ(run.pipeline_version, 1U);
+}
+TEST(Runtime, SubpipelineUsesConcreteRevisionAndPreservesProvenance) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.register_pipeline(identity_pipeline("child", 1));
+  s.register_pipeline(identity_pipeline("child", 2));
+  const auto parent = composed_pipeline(
+      "parent", 1, "", "  invoke:\n    type: subpipeline\n    pipeline: child@1\n",
+      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  const auto parent_record = s.register_pipeline(parent);
+  const auto id = s.start(parent_record.at("id").get<std::string>(), Json{{"value", 42}});
+  io.run();
+  const auto run = s.get(RecordKind::Run, id).get<laso::Run>();
+  ASSERT_EQ(run.state, RunState::Completed);
+  EXPECT_EQ(run.message.payload, (Json{{"value", 42}}));
+  ASSERT_EQ(run.child_runs.size(), 1U);
+  const auto child = s.get(RecordKind::Run, run.child_runs.front()).get<laso::Run>();
+  EXPECT_EQ(child.parent_id, run.id);
+  EXPECT_EQ(child.parent_node_id, "invoke");
+  EXPECT_EQ(child.pipeline_id, "child");
+  EXPECT_EQ(child.pipeline_version, 1U);
+  EXPECT_EQ(child.parent_message_id, run.message.provenance.front().parent_message);
+  EXPECT_TRUE(std::any_of(run.message.provenance.begin(), run.message.provenance.end(),
+                          [](const ProvenanceRecord &record) { return record.node == "invoke"; }));
+  EXPECT_EQ(s.run_view(run.id).at("children").size(), 1U);
+}
+TEST(Runtime, SubpipelineSchemasApplyAcrossBoundary) {
+  TemporaryDirectory dir;
+  auto root = dir.path / "schemas";
+  std::filesystem::create_directories(root);
+  std::ofstream(root / "object.json")
+      << R"({"type":"object","required":["value"],"properties":{"value":{"type":"integer"}}})";
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.schema_roots = {root};
+  Service s(io, c);
+  s.register_pipeline(identity_pipeline("contract-child", 1,
+                                        "input_schema: object.json\noutput_schema: object.json\n"));
+  const auto parent =
+      composed_pipeline("contract-parent", 1, "",
+                        "  invoke:\n    type: subpipeline\n    pipeline: contract-child@1\n    "
+                        "input_schema: object.json\n    output_schema: object.json\n",
+                        "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  const auto id =
+      s.start(s.register_pipeline(parent).at("id").get<std::string>(), Json{{"value", 9}});
+  io.run();
+  EXPECT_EQ(s.get(RecordKind::Run, id).get<laso::Run>().state, RunState::Completed);
+}
+TEST(Runtime, ChildPipelineOutputContractFailurePropagates) {
+  TemporaryDirectory dir;
+  auto root = dir.path / "schemas";
+  std::filesystem::create_directories(root);
+  std::ofstream(root / "integer.json") << R"({"type":"integer"})";
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.schema_roots = {root};
+  Service s(io, c);
+  s.register_pipeline(
+      identity_pipeline("contract-output-failure", 1, "output_schema: integer.json\n"));
+  const auto parent =
+      composed_pipeline("contract-output-parent", 1, "",
+                        "  invoke: {type: subpipeline, pipeline: contract-output-failure@1}\n",
+                        "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  const auto id =
+      s.start(s.register_pipeline(parent).at("id").get<std::string>(), Json{{"value", 9}});
+  io.run();
+  const auto run = s.get(RecordKind::Run, id).get<laso::Run>();
+  EXPECT_EQ(run.state, RunState::Failed);
+  ASSERT_EQ(run.child_runs.size(), 1U);
+  EXPECT_EQ(s.get(RecordKind::Run, run.child_runs.front()).get<laso::Run>().state,
+            RunState::Failed);
+}
+TEST(Runtime, SubpipelineRetryCreatesDistinctChildRuns) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add("always-fail",
+                    std::make_shared<Function>([](ExecutionContext &, const Json &) -> Task<Json> {
+                      throw Error(ErrorCode::Execution, "child failure");
+                      co_return nullptr;
+                    }));
+  s.register_pipeline(composed_pipeline(
+      "failing-child", 1, "", "  action:\n    type: function\n    function: always-fail\n",
+      "  - {from: input, to: action}\n  - {from: action, to: output}\n"));
+  const auto parent = composed_pipeline(
+      "retry-parent", 1, "",
+      "  invoke:\n    type: subpipeline\n    pipeline: failing-child@1\n    max_attempts: 2\n",
+      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  std::string id = s.start(s.register_pipeline(parent).at("id").get<std::string>());
+  io.run();
+  const auto run = s.get(RecordKind::Run, id).get<laso::Run>();
+  EXPECT_EQ(run.state, RunState::Failed);
+  ASSERT_EQ(run.child_runs.size(), 2U);
+  EXPECT_NE(run.child_runs[0], run.child_runs[1]);
+  EXPECT_EQ(s.get(RecordKind::Run, run.child_runs[0]).at("state"), "Failed");
+  EXPECT_EQ(s.get(RecordKind::Run, run.child_runs[1]).at("state"), "Failed");
+  const auto attempts = s.list(RecordKind::Attempt, run.id);
+  EXPECT_EQ(attempts.at(1).at("child_run_id"), run.child_runs[0]);
+  EXPECT_EQ(attempts.at(2).at("child_run_id"), run.child_runs[1]);
+}
+TEST(Runtime, ParallelSubpipelinesRemainNormalChildRuns) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.register_pipeline(identity_pipeline("parallel-child", 1));
+  const auto parent = composed_pipeline(
+      "parallel-parent", 1, "",
+      "  fork: {type: parallel, join: join}\n  left: {type: subpipeline, pipeline: "
+      "parallel-child@1}\n  right: {type: subpipeline, pipeline: parallel-child@1}\n  join: {type: "
+      "join}\n",
+      "  - {from: input, to: fork}\n  - {from: fork, to: left}\n  - {from: fork, to: right}\n  - "
+      "{from: left, to: join}\n  - {from: right, to: join}\n  - {from: join, to: output}\n");
+  const auto id = s.start(s.register_pipeline(parent).at("id").get<std::string>());
+  io.run();
+  const auto run = s.get(RecordKind::Run, id).get<laso::Run>();
+  EXPECT_EQ(run.state, RunState::Completed);
+  EXPECT_EQ(s.run_view(run.id).at("children").size(), 2U);
+}
+TEST(Runtime, SubpipelineMissingReferenceAndDirectRecursionAreRejected) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  const auto missing = composed_pipeline(
+      "missing-parent", 1, "", "  invoke: {type: subpipeline, pipeline: absent@4}\n",
+      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  EXPECT_THROW(s.register_pipeline(missing), Error);
+  const auto recursive = composed_pipeline(
+      "recursive", 1, "", "  invoke: {type: subpipeline, pipeline: recursive@1}\n",
+      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  EXPECT_THROW(s.register_pipeline(recursive), Error);
+}
+TEST(Runtime, IndirectSubpipelineRecursionIsRejected) {
+  TemporaryDirectory dir;
+  auto c = config(dir.path);
+  SQLiteStorage raw(c.db_path);
+  raw.commit(
+      {{RecordKind::Pipeline,
+        "stored-b@1",
+        "",
+        {{"id", "stored-b@1"},
+         {"name", "stored-b"},
+         {"version", 1},
+         {"yaml", composed_pipeline(
+                      "stored-b", 1, "", "  invoke: {type: subpipeline, pipeline: stored-a@1}\n",
+                      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n")},
+         {"resolved_subpipelines", {{"invoke", "stored-a@1"}}}}}});
+  asio::io_context io;
+  Service s(io, c);
+  const auto a =
+      composed_pipeline("stored-a", 1, "", "  invoke: {type: subpipeline, pipeline: stored-b@1}\n",
+                        "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  EXPECT_THROW(s.register_pipeline(a), Error);
+}
+TEST(Runtime, SubpipelineDepthLimitIsEnforcedAtRuntime) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.max_subpipeline_depth = 1;
+  Service s(io, c);
+  s.register_pipeline(identity_pipeline("depth-leaf", 1));
+  s.register_pipeline(composed_pipeline(
+      "depth-child", 1, "", "  invoke: {type: subpipeline, pipeline: depth-leaf@1}\n",
+      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n"));
+  const auto parent = composed_pipeline(
+      "depth-parent", 1, "", "  invoke: {type: subpipeline, pipeline: depth-child@1}\n",
+      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n");
+  std::string id = s.start(s.register_pipeline(parent).at("id").get<std::string>());
+  io.run();
+  EXPECT_EQ(s.get(RecordKind::Run, id).get<laso::Run>().state, RunState::Failed);
+}
+TEST(Runtime, HistoricalParentKeepsResolvedPipelineVersion) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.register_pipeline(identity_pipeline("historical", 1));
+  const auto parent = s.register_pipeline(composed_pipeline(
+      "historical-parent", 1, "", "  invoke: {type: subpipeline, pipeline: historical@1}\n",
+      "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n"));
+  s.register_pipeline(identity_pipeline("historical", 2));
+  const auto id = s.start(parent.at("id").get<std::string>());
+  io.run();
+  const auto run = s.get(RecordKind::Run, id).get<laso::Run>();
+  ASSERT_EQ(run.child_runs.size(), 1U);
+  EXPECT_EQ(s.get(RecordKind::Run, run.child_runs.front()).at("pipeline_version"), 1U);
+}
+TEST(Runtime, NestedSubpipelineChainPreservesTree) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.max_nodes = 1;
+  c.max_nodes_per_run = 1;
+  Service s(io, c);
+  s.register_pipeline(identity_pipeline("nested-c", 1));
+  s.register_pipeline(
+      composed_pipeline("nested-b", 1, "", "  invoke: {type: subpipeline, pipeline: nested-c@1}\n",
+                        "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n"));
+  s.register_pipeline(
+      composed_pipeline("nested-a", 1, "", "  invoke: {type: subpipeline, pipeline: nested-b@1}\n",
+                        "  - {from: input, to: invoke}\n  - {from: invoke, to: output}\n"));
+
+  const auto id = s.start("nested-a@1", Json{{"value", 42}});
+  io.run();
+  const auto root = s.get(RecordKind::Run, id).get<laso::Run>();
+  ASSERT_EQ(root.state, RunState::Completed);
+  ASSERT_EQ(root.child_runs.size(), 1U);
+  const auto child = s.get(RecordKind::Run, root.child_runs.front()).get<laso::Run>();
+  ASSERT_EQ(child.pipeline_id, "nested-b");
+  ASSERT_EQ(child.child_runs.size(), 1U);
+  const auto grandchild = s.get(RecordKind::Run, child.child_runs.front()).get<laso::Run>();
+  EXPECT_EQ(grandchild.pipeline_id, "nested-c");
+  EXPECT_EQ(grandchild.pipeline_version, 1U);
+  EXPECT_EQ(root.message.payload, (Json{{"value", 42}}));
+  EXPECT_EQ(s.run_view(child.id).at("children").size(), 1U);
 }
 TEST(Runtime, CapacityIsBounded) {
   TemporaryDirectory dir;

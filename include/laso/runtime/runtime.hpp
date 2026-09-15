@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <laso/core/config.hpp>
 #include <laso/events/events.hpp>
 #include <laso/nodes/node.hpp>
@@ -18,6 +19,7 @@ struct RuntimeDependencies {
   NodeRegistry &nodes;
   Policy &policy;
   SchemaValidator &schemas;
+  std::function<PipelineDefinition(const std::string &)> resolve_pipeline;
 };
 class Runtime {
 public:
@@ -25,7 +27,9 @@ public:
   ~Runtime();
   // Returns immediately. Execution is scheduled on the bounded Asio executor.
   std::string run(const PipelineDefinition &, Json input = Json::object(),
-                  std::string actor = "local", std::string parent_id = "");
+                  std::string actor = "local", std::string parent_id = "",
+                  std::string parent_node_id = "", unsigned subpipeline_depth = 0,
+                  std::string parent_message_id = "");
   void resume(const std::string &id);
   void cancel(const std::string &id);
   void decide(const std::string &approval_id, bool approve, const std::string &actor,
@@ -45,9 +49,9 @@ private:
   Task<void> execute(Run run, std::stop_token stop);
   Task<void> execute_branch(const PipelineDefinition &, ExecutionToken,
                             std::shared_ptr<ParallelState>, std::shared_ptr<AsyncLimiter>,
-                            std::chrono::steady_clock::time_point);
+                            std::chrono::steady_clock::time_point, unsigned);
   Task<void> execute_parallel(Run &, const PipelineDefinition &, std::shared_ptr<AsyncLimiter>,
-                              std::stop_token, std::chrono::steady_clock::time_point);
+                              std::stop_token, std::chrono::steady_clock::time_point, unsigned);
   void schedule(Run run);
   void cancel_locked(const std::string &, std::set<std::string> &);
   void transition(Run &, RunState, const std::string &event, std::vector<Record> records = {});

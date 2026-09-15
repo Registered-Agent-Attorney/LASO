@@ -1,8 +1,10 @@
 laso: "1"
-name: parent
+name: nested-a
 version: 1
 nodes:
-  child: {type: subpipeline, pipeline: hello@1}
+  child:
+    type: subpipeline
+    pipeline: nested-b@1
 edges:
   - {from: input, to: child}
   - {from: child, to: output}

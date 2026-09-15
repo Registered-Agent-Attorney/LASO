@@ -1,0 +1,14 @@
+laso: "1"
+name: process
+version: 1
+nodes:
+  normalize:
+    type: subpipeline
+    pipeline: normalize@1
+  process:
+    type: function
+    function: identity
+edges:
+  - {from: input, to: normalize}
+  - {from: normalize, to: process}
+  - {from: process, to: output}

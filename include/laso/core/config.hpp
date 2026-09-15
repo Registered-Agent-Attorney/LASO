@@ -10,7 +10,7 @@ struct Config {
   std::vector<std::filesystem::path> schema_roots;
   std::string api_host = "127.0.0.1", log_level = "info", local_openai_endpoint;
   unsigned api_port = 8080, workers = 2, max_runs = 16, max_nodes = 32, max_nodes_per_run = 8,
-           max_models = 4, max_tools = 8;
+           max_models = 4, max_tools = 8, max_subpipeline_depth = 16;
   bool json_logs = false, allow_network = false, allow_remote_api = false;
   std::map<std::string, ModelBinding> models{{"research", {"mock", "mock-v1"}},
                                              {"reviewer", {"mock", "mock-v1"}}};

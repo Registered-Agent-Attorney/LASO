@@ -52,6 +52,18 @@ The baseline performs no external network or model calls. Short SQLite calls and
 v1 native callbacks are synchronous; future external I/O implementations must
 suspend rather than hold a worker on a blocking operation.
 
+Pipeline registration is part of `laso_application` and uses the existing SQLite
+record store. A revision is keyed by `name@version`, stores the original
+definition and a non-security definition fingerprint, and rejects a conflicting
+definition for an existing key. Registration resolves explicit subpipeline
+references and checks the stored dependency graph for missing revisions and
+recursion. A parent run persists its concrete resolved references; child runs are
+ordinary runtime runs rather than a second execution engine. Global node/model/tool
+limiters are shared by the runtime, while each child receives its own per-run node
+limiter. A parent subpipeline wait does not retain a node permit, so a configured
+limit of one cannot starve the child. Thus nesting consumes global capacity and
+cannot bypass policy, schema, deadline, cancellation or step/edge budgets.
+
 ## Schema contracts
 
 The runtime uses the pinned `pboettch/json-schema-validator` Draft 7 library

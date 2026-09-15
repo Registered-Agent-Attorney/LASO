@@ -17,7 +17,7 @@ failures. Arbitrary exception text is not persisted.
 | parallel | Queue 2..16 branch tokens with a unique group and matching join |
 | join | Collect all group inputs in declared branch order into a JSON array |
 | loop | Emit repeat/done according to its finite visit budget |
-| subpipeline | Start a registered child run, await result, propagate approval waits |
+| subpipeline | Resolve an immutable registered `pipeline@version`, start a normal durable child run, await its result, and propagate approval waits |
 
 Structural node semantics are implemented by the same runtime that persists all
 node execution. Branch tokens contain their own message and group stack. The
@@ -25,9 +25,11 @@ Node input and output contracts are checked by the runtime around each invocatio
 Schemas are optional and use the same engine as `validator` nodes. Different runs
 and independent parallel branches use the bounded concurrent executor.
 
-Policy-denied work is rejected in parallel branches before invocation. Approval
-boundaries inside concurrent branches are rejected rather than bypassed; place an
-explicit approval boundary around work that requires approval.
+Policy-denied work is rejected in parallel branches before invocation. A
+subpipeline child uses the normal runtime, so approvals inside that child remain
+durable and inspectable. Approval nodes directly in a parent concurrent branch
+retain the existing restriction; place an explicit approval boundary around work
+that requires approval.
 
 Register C++ custom node factories in `Service::node_registry()` before registering
 pipelines that use them. Register deterministic functions similarly with

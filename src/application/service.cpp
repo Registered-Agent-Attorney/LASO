@@ -1,5 +1,10 @@
+#include <functional>
+#include <iomanip>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
+#include <limits>
+#include <set>
+#include <sstream>
 
 namespace laso {
 namespace {
@@ -7,13 +12,43 @@ Config checked(Config c) {
   c.validate();
   return c;
 }
+std::vector<Json> all_pipeline_records(const Storage &storage) {
+  constexpr std::size_t page_size = 10000;
+  std::vector<Json> result;
+  for (std::size_t offset = 0;;) {
+    auto page = storage.list(RecordKind::Pipeline, "", page_size, offset);
+    result.insert(result.end(), page.begin(), page.end());
+    if (page.size() < page_size)
+      return result;
+    if (offset > std::numeric_limits<std::size_t>::max() - page_size)
+      throw Error(ErrorCode::Storage, "Pipeline registry is too large to inspect");
+    offset += page_size;
+  }
+}
+std::string definition_fingerprint(const std::string &text) {
+  // This is an identity aid, not a security primitive.  The immutable source
+  // remains in the record and is compared on an idempotent registration.
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (const auto byte : text) {
+    hash ^= static_cast<unsigned char>(byte);
+    hash *= 1099511628211ULL;
+  }
+  std::ostringstream out;
+  out << std::hex << std::setw(16) << std::setfill('0') << hash;
+  return out.str();
+}
+bool same_source(const Json &record, const std::string &yaml) {
+  return record.contains("yaml") && record.at("yaml").is_string() &&
+         record.at("yaml").get<std::string>() == yaml;
+}
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), lease_(config_.db_path), storage_(config_.db_path),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       plugins_(tools_, providers_),
       runtime_(io, config_,
-               {storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_}),
+               {storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
+                [this](const std::string &reference) { return resolve_pipeline(reference); }}),
       artifacts_(config_.data_dir / "artifacts", storage_),
       scheduler_(
           io, [this](const ScheduledPipeline &s) { start(s.pipeline_id, s.input, "scheduler"); }) {
@@ -30,6 +65,10 @@ Service::Service(asio::io_context &io, Config config)
 Json Service::register_pipeline(const std::string &yaml) {
   auto extensions = nodes_.names();
   auto p = parse_pipeline(yaml, {extensions.begin(), extensions.end()});
+  if (!p.input_schema.empty())
+    schemas_.validate_declaration(p.input_schema);
+  if (!p.output_schema.empty())
+    schemas_.validate_declaration(p.output_schema);
   for (const auto &[id, node] : p.nodes) {
     if (!node.input_schema.empty())
       schemas_.validate_declaration(node.input_schema);
@@ -38,14 +77,147 @@ Json Service::register_pipeline(const std::string &yaml) {
     if (!node.schema.empty())
       schemas_.validate_declaration(node.schema);
   }
-  Json record = {{"id", p.name},         {"name", p.name},
-                 {"version", p.version}, {"laso", p.schema_version},
-                 {"yaml", yaml},         {"registered_at", timestamp()}};
+
+  const auto key = pipeline_reference(p.name, p.version);
+  auto existing = Json();
+  bool has_existing = false;
+  try {
+    existing = storage_.get(RecordKind::Pipeline, key);
+    has_existing = true;
+  } catch (const Error &error) {
+    if (error.code != ErrorCode::NotFound)
+      throw;
+  }
+  // Read records written by the pre-versioned registry as the v1 identity.
+  if (!has_existing && p.version == 1) {
+    try {
+      existing = storage_.get(RecordKind::Pipeline, p.name);
+      has_existing = true;
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::NotFound)
+        throw;
+    }
+  }
+  if (has_existing) {
+    if (!same_source(existing, yaml))
+      throw Error(ErrorCode::Conflict, "Pipeline revision is immutable",
+                  {{"pipeline", key}, {"reason", "definition differs"}});
+    return existing;
+  }
+
+  const auto records = all_pipeline_records(storage_);
+  const auto candidate_key = key;
+  auto revisions = [&](const std::string &name) {
+    std::vector<Json> found;
+    for (const auto &record : records)
+      if (record.value("name", std::string{}) == name)
+        found.push_back(record);
+    if (p.name == name)
+      found.push_back({{"id", candidate_key},
+                       {"name", p.name},
+                       {"version", p.version},
+                       {"yaml", yaml},
+                       {"resolved_subpipelines", Json::object()}});
+    return found;
+  };
+  auto resolve_reference = [&](const std::string &reference) {
+    const auto parsed = parse_pipeline_reference(reference);
+    if (parsed.explicit_version) {
+      const auto resolved = pipeline_reference(parsed.name, parsed.version);
+      if (resolved == candidate_key)
+        return resolved;
+      for (const auto &record : records)
+        if (record.value("id", std::string{}) == resolved ||
+            (record.value("name", std::string{}) == parsed.name &&
+             record.value("version", 1U) == parsed.version))
+          return resolved;
+      throw Error(ErrorCode::NotFound, "Referenced pipeline revision is not registered",
+                  {{"pipeline", resolved}});
+    }
+    auto found = revisions(parsed.name);
+    if (found.empty())
+      throw Error(ErrorCode::NotFound, "Referenced pipeline is not registered",
+                  {{"pipeline", parsed.name}});
+    if (found.size() != 1)
+      throw Error(ErrorCode::Conflict, "Unversioned pipeline reference is ambiguous",
+                  {{"pipeline", parsed.name}, {"reason", "use name@version"}});
+    return pipeline_reference(parsed.name, found.front().value("version", 1U));
+  };
+  for (const auto &[node_id, node] : p.nodes)
+    if (node.type == "subpipeline")
+      p.resolved_subpipelines[node_id] = resolve_reference(node.binding);
+
+  std::set<std::string> active, visited;
+  std::function<void(const std::string &)> visit = [&](const std::string &revision) {
+    if (!active.insert(revision).second)
+      throw Error(ErrorCode::Validation, "Recursive subpipeline dependency",
+                  {{"pipeline", revision}});
+    if (!visited.insert(revision).second) {
+      active.erase(revision);
+      return;
+    }
+    Json record;
+    if (revision == candidate_key) {
+      record = {{"yaml", yaml}, {"resolved_subpipelines", p.resolved_subpipelines}};
+    } else {
+      for (const auto &item : records)
+        if (item.value("id", std::string{}) == revision ||
+            (item.value("name", std::string{}) + "@" + std::to_string(item.value("version", 1U))) ==
+                revision)
+          record = item;
+      if (record.is_null())
+        throw Error(ErrorCode::NotFound, "Referenced pipeline revision is not registered",
+                    {{"pipeline", revision}});
+    }
+    std::map<std::string, std::string> dependencies;
+    if (record.contains("resolved_subpipelines")) {
+      dependencies = record.at("resolved_subpipelines").get<std::map<std::string, std::string>>();
+    } else {
+      auto child = parse_pipeline(record.at("yaml").get<std::string>(),
+                                  {extensions.begin(), extensions.end()});
+      for (const auto &[node_id, node] : child.nodes)
+        if (node.type == "subpipeline")
+          dependencies[node_id] = resolve_reference(node.binding);
+    }
+    for (const auto &[node_id, child] : dependencies) {
+      (void)node_id;
+      visit(child);
+    }
+    active.erase(revision);
+  };
+  visit(candidate_key);
+
+  Json record = {{"id", key},
+                 {"name", p.name},
+                 {"version", p.version},
+                 {"laso", p.schema_version},
+                 {"yaml", yaml},
+                 {"definition_fingerprint", definition_fingerprint(yaml)},
+                 {"resolved_subpipelines", p.resolved_subpipelines},
+                 {"registered_at", timestamp()}};
   Event e;
   e.pipeline_id = p.name;
+  e.metadata["pipeline_version"] = p.version;
   e.type = "pipeline.registered";
-  storage_.commit(
-      {{RecordKind::Pipeline, p.name, "", record}, {RecordKind::Event, e.id, "", Json(e)}});
+  try {
+    storage_.commit(
+        {{RecordKind::Pipeline, key, "", record}, {RecordKind::Event, e.id, "", Json(e)}});
+  } catch (const Error &error) {
+    // Another registration may have won the SQLite transaction between the
+    // initial lookup and this commit. Preserve idempotence for the same
+    // immutable source while still rejecting a conflicting revision.
+    if (error.code != ErrorCode::Conflict)
+      throw;
+    try {
+      const auto concurrent = storage_.get(RecordKind::Pipeline, key);
+      if (same_source(concurrent, yaml))
+        return concurrent;
+    } catch (const Error &lookup_error) {
+      if (lookup_error.code != ErrorCode::NotFound)
+        throw;
+    }
+    throw;
+  }
   events_.publish(e);
   return record;
 }
@@ -53,12 +225,80 @@ std::string Service::start(const std::string &name_or_path, const Json &input,
                            const std::string &actor, bool allow_file) {
   std::string name = name_or_path;
   if (allow_file && std::filesystem::is_regular_file(name_or_path))
-    name = register_pipeline(read_document(name_or_path)).at("name").get<std::string>();
+    name = register_pipeline(read_document(name_or_path)).at("id").get<std::string>();
   auto extensions = nodes_.names();
-  const auto p =
-      parse_pipeline(storage_.get(RecordKind::Pipeline, name).at("yaml").get<std::string>(),
-                     {extensions.begin(), extensions.end()});
+  auto record = pipeline_record(name);
+  auto p =
+      parse_pipeline(record.at("yaml").get<std::string>(), {extensions.begin(), extensions.end()});
+  if (record.contains("resolved_subpipelines"))
+    p.resolved_subpipelines =
+        record.at("resolved_subpipelines").get<std::map<std::string, std::string>>();
   return runtime_.run(p, input, actor);
+}
+Json Service::pipeline_record(const std::string &reference) const {
+  const auto parsed = parse_pipeline_reference(reference);
+  if (parsed.explicit_version) {
+    const auto key = pipeline_reference(parsed.name, parsed.version);
+    try {
+      return storage_.get(RecordKind::Pipeline, key);
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::NotFound)
+        throw;
+      if (parsed.version != 1)
+        throw;
+      // Compatibility for a database created before versioned registry keys.
+      return storage_.get(RecordKind::Pipeline, parsed.name);
+    }
+  }
+  try {
+    return storage_.get(RecordKind::Pipeline, parsed.name);
+  } catch (const Error &error) {
+    if (error.code != ErrorCode::NotFound)
+      throw;
+  }
+  Json found;
+  for (const auto &record : all_pipeline_records(storage_)) {
+    if (record.value("name", std::string{}) != parsed.name)
+      continue;
+    if (!found.is_null())
+      throw Error(ErrorCode::Conflict, "Unversioned pipeline reference is ambiguous",
+                  {{"pipeline", parsed.name}, {"reason", "use name@version"}});
+    found = record;
+  }
+  if (found.is_null())
+    throw Error(ErrorCode::NotFound, "Pipeline is not registered", {{"pipeline", parsed.name}});
+  return found;
+}
+PipelineDefinition Service::resolve_pipeline(const std::string &reference) const {
+  const auto record = pipeline_record(reference);
+  auto extensions = nodes_.names();
+  auto p =
+      parse_pipeline(record.at("yaml").get<std::string>(), {extensions.begin(), extensions.end()});
+  if (record.contains("resolved_subpipelines"))
+    p.resolved_subpipelines =
+        record.at("resolved_subpipelines").get<std::map<std::string, std::string>>();
+  return p;
+}
+Json Service::run_view(const std::string &id) const {
+  auto result = storage_.get(RecordKind::Run, id);
+  Json children = Json::array();
+  for (std::size_t offset = 0;;) {
+    auto page = storage_.list(RecordKind::Run, "", 10000, offset);
+    for (const auto &item : page) {
+      const auto child = item.get<Run>();
+      if (child.parent_id == id)
+        children.push_back({{"id", child.id},
+                            {"pipeline_id", child.pipeline_id},
+                            {"pipeline_version", child.pipeline_version},
+                            {"parent_node_id", child.parent_node_id},
+                            {"state", child.state}});
+    }
+    if (page.size() < 10000)
+      break;
+    offset += 10000;
+  }
+  result["children"] = std::move(children);
+  return result;
 }
 Json Service::providers() const {
   Json result = Json::array();

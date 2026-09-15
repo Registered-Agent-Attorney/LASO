@@ -106,6 +106,8 @@ struct EdgeDefinition {
 };
 struct PipelineDefinition {
   std::string name, source;
+  std::string input_schema, output_schema;
+  std::map<std::string, std::string> resolved_subpipelines;
   unsigned schema_version = 1, version = 1, max_steps = 1000;
   TimeoutPolicy timeout{Milliseconds{300000}};
   std::map<std::string, NodeDefinition> nodes;
@@ -128,7 +130,9 @@ struct JoinCheckpoint {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(JoinCheckpoint, messages)
 struct Run {
   std::string id = uuid(), pipeline_id, definition, active_node = "input", created_at = timestamp(),
-              updated_at = created_at, actor = "local", error;
+              updated_at = created_at, actor = "local", error, parent_id, parent_node_id,
+              parent_message_id, child_id, child_pipeline_id;
+  unsigned pipeline_version = 1, child_pipeline_version = 0, subpipeline_depth = 0;
   RunState state = RunState::Queued;
   bool cancellation_requested = false;
   Message message;
@@ -137,22 +141,116 @@ struct Run {
   std::vector<ExecutionToken> ready;
   std::map<std::string, JoinCheckpoint> joins;
   // A nested pipeline returns to this durable parent; empty for root runs.
-  std::string parent_id, child_id, prepared_join;
+  std::vector<std::string> child_runs;
+  std::map<std::string, std::string> resolved_subpipelines;
+  std::string prepared_join;
   std::string provider, model, tool, plugin;
   unsigned steps = 0;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Run, id, pipeline_id, definition, active_node, created_at,
-                                   updated_at, actor, error, state, cancellation_requested, message,
-                                   edge_visits, node_visits, frames, ready, joins, parent_id,
-                                   child_id, prepared_join, provider, model, tool, plugin, steps)
+inline void to_json(Json &j, const Run &r) {
+  j = {{"id", r.id},
+       {"pipeline_id", r.pipeline_id},
+       {"pipeline_version", r.pipeline_version},
+       {"definition", r.definition},
+       {"active_node", r.active_node},
+       {"created_at", r.created_at},
+       {"updated_at", r.updated_at},
+       {"actor", r.actor},
+       {"error", r.error},
+       {"parent_id", r.parent_id},
+       {"parent_node_id", r.parent_node_id},
+       {"parent_message_id", r.parent_message_id},
+       {"child_id", r.child_id},
+       {"child_pipeline_id", r.child_pipeline_id},
+       {"child_pipeline_version", r.child_pipeline_version},
+       {"subpipeline_depth", r.subpipeline_depth},
+       {"child_runs", r.child_runs},
+       {"resolved_subpipelines", r.resolved_subpipelines},
+       {"state", r.state},
+       {"cancellation_requested", r.cancellation_requested},
+       {"message", r.message},
+       {"edge_visits", r.edge_visits},
+       {"node_visits", r.node_visits},
+       {"frames", r.frames},
+       {"ready", r.ready},
+       {"joins", r.joins},
+       {"prepared_join", r.prepared_join},
+       {"provider", r.provider},
+       {"model", r.model},
+       {"tool", r.tool},
+       {"plugin", r.plugin},
+       {"steps", r.steps}};
+}
+inline void from_json(const Json &j, Run &r) {
+  j.at("id").get_to(r.id);
+  j.at("pipeline_id").get_to(r.pipeline_id);
+  r.pipeline_version = j.value("pipeline_version", 1U);
+  j.at("definition").get_to(r.definition);
+  j.at("active_node").get_to(r.active_node);
+  j.at("created_at").get_to(r.created_at);
+  j.at("updated_at").get_to(r.updated_at);
+  j.at("actor").get_to(r.actor);
+  j.at("error").get_to(r.error);
+  j.at("parent_id").get_to(r.parent_id);
+  r.parent_node_id = j.value("parent_node_id", std::string{});
+  r.parent_message_id = j.value("parent_message_id", std::string{});
+  j.at("child_id").get_to(r.child_id);
+  r.child_pipeline_id = j.value("child_pipeline_id", std::string{});
+  r.child_pipeline_version = j.value("child_pipeline_version", 0U);
+  r.subpipeline_depth = j.value("subpipeline_depth", 0U);
+  r.child_runs = j.value("child_runs", std::vector<std::string>{});
+  r.resolved_subpipelines = j.value("resolved_subpipelines", std::map<std::string, std::string>{});
+  j.at("state").get_to(r.state);
+  j.at("cancellation_requested").get_to(r.cancellation_requested);
+  j.at("message").get_to(r.message);
+  j.at("edge_visits").get_to(r.edge_visits);
+  j.at("node_visits").get_to(r.node_visits);
+  j.at("frames").get_to(r.frames);
+  j.at("ready").get_to(r.ready);
+  j.at("joins").get_to(r.joins);
+  j.at("prepared_join").get_to(r.prepared_join);
+  j.at("provider").get_to(r.provider);
+  j.at("model").get_to(r.model);
+  j.at("tool").get_to(r.tool);
+  j.at("plugin").get_to(r.plugin);
+  j.at("steps").get_to(r.steps);
+}
 struct NodeExecution {
-  std::string id = uuid(), run_id, node_id, started_at = timestamp(), finished_at, error;
+  std::string id = uuid(), run_id, node_id, started_at = timestamp(), finished_at, error,
+              child_run_id, child_pipeline_id;
+  unsigned child_pipeline_version = 0;
   unsigned attempt = 1;
   NodeState state = NodeState::Running;
   double duration_ms = 0;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NodeExecution, id, run_id, node_id, started_at, finished_at,
-                                   error, attempt, state, duration_ms)
+inline void to_json(Json &j, const NodeExecution &a) {
+  j = {{"id", a.id},
+       {"run_id", a.run_id},
+       {"node_id", a.node_id},
+       {"started_at", a.started_at},
+       {"finished_at", a.finished_at},
+       {"error", a.error},
+       {"child_run_id", a.child_run_id},
+       {"child_pipeline_id", a.child_pipeline_id},
+       {"child_pipeline_version", a.child_pipeline_version},
+       {"attempt", a.attempt},
+       {"state", a.state},
+       {"duration_ms", a.duration_ms}};
+}
+inline void from_json(const Json &j, NodeExecution &a) {
+  j.at("id").get_to(a.id);
+  j.at("run_id").get_to(a.run_id);
+  j.at("node_id").get_to(a.node_id);
+  j.at("started_at").get_to(a.started_at);
+  j.at("finished_at").get_to(a.finished_at);
+  j.at("error").get_to(a.error);
+  a.child_run_id = j.value("child_run_id", std::string{});
+  a.child_pipeline_id = j.value("child_pipeline_id", std::string{});
+  a.child_pipeline_version = j.value("child_pipeline_version", 0U);
+  j.at("attempt").get_to(a.attempt);
+  j.at("state").get_to(a.state);
+  j.at("duration_ms").get_to(a.duration_ms);
+}
 struct Approval {
   std::string id = uuid(), run_id, node_id, reason, action, created_at = timestamp(),
               decision = "pending", decided_at, actor, comment;

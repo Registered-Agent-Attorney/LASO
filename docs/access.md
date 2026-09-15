@@ -47,6 +47,12 @@ laso provider list
 laso tool list
 ```
 
+Pipeline IDs may be explicit revisions such as `research@2`; `pipeline show` and
+`run start` accept that identity. A run response includes its `pipeline_version`,
+parent fields when nested, and a `children` array containing child run IDs,
+pipeline revisions, parent node IDs and states. `run show` uses the same view as
+the API.
+
 CLI run commands wait until execution finishes or reaches a durable wait. JSON
 results go to stdout; logs/errors go to stderr. Failed/timed-out runs return status
 2. The CLI opens local services and requires exclusive database ownership; it must

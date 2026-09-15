@@ -2,7 +2,9 @@
 
 Required root fields: `laso: "1"`, `name`, `version`, `nodes` mapping, and `edges`
 sequence. Optional root limits are `max_steps` (1..100000, default 1000) and
-`timeout_ms` (1..86400000, default 300000). Unknown fields are rejected.
+`timeout_ms` (1..86400000, default 300000). Optional root
+`input_schema`/`output_schema` fields expose JSON Schema contracts for a complete
+pipeline. Unknown fields are rejected.
 
 Names use letters, digits, `.`, `_`, or `-`, begin with a letter/digit, and are at
 most 128 characters. `input` and `output` exist implicitly and may only be declared
@@ -47,6 +49,23 @@ they look like booleans or numbers.
 This format intentionally does not evaluate expressions, execute code strings,
 read prompt files, expand environment variables, or embed credentials. Extend the
 schema explicitly in a later version instead of relying on ignored fields.
+
+## Versioned pipeline composition
+
+`name` and `version` form a stable registered revision. Registering a definition
+with `name: research` and `version: 2` stores the immutable revision `research@2`.
+The `pipeline` binding of a `subpipeline` node accepts `name@version`.
+
+Different revisions coexist; a conflicting re-registration of the same revision
+is rejected. An unversioned reference remains compatible only when exactly one
+revision is registered for that name. Explicit versions are preferred and are
+resolved and persisted with the parent definition when it is registered.
+
+The child receives the parent node payload directly and its final payload becomes
+the parent node result. Each invocation is a normal durable run with parent/child
+identifiers, attempts, events, pipeline version and message provenance. Parent
+node contracts surround the invocation and child pipeline root contracts run
+inside the child. No expression or field-mapping language is evaluated.
 
 ## JSON Schema contracts
 

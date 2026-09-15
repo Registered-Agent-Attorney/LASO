@@ -82,7 +82,11 @@ int cli_main(int argc, char **argv) {
         if (!node.schema.empty())
           schemas.validate_declaration(node.schema);
       }
-      std::cout << Json{{"valid", true}, {"name", p.name}}.dump(2) << '\n';
+      if (!p.input_schema.empty())
+        schemas.validate_declaration(p.input_schema);
+      if (!p.output_schema.empty())
+        schemas.validate_declaration(p.output_schema);
+      std::cout << Json{{"valid", true}, {"name", p.name}, {"version", p.version}}.dump(2) << '\n';
       return 0;
     }
     std::map<std::string, std::string> overrides;
@@ -104,7 +108,7 @@ int cli_main(int argc, char **argv) {
     else if (*run_list)
       result = service.list(RecordKind::Run);
     else if (*show)
-      result = service.get(RecordKind::Run, target);
+      result = service.run_view(target);
     else if (*start)
       run_id = service.start(target, Json::parse(input), actor, true);
     else if (*cancel) {
@@ -127,7 +131,7 @@ int cli_main(int argc, char **argv) {
     executor.start();
     executor.join();
     if (!run_id.empty())
-      result = service.get(RecordKind::Run, run_id);
+      result = service.run_view(run_id);
     std::cout << result.dump(2) << '\n';
     return result.is_object() && (result.value("state", std::string{}) == "Failed" ||
                                   result.value("state", std::string{}) == "TimedOut")

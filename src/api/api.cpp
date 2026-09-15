@@ -86,7 +86,7 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {200, service_.plugins()};
   std::smatch match;
   static const std::regex route_pattern(
-      "/api/v1/(pipelines|runs|approvals)(?:/([A-Za-z0-9_.-]{1,128}))?(?:/"
+      "/api/v1/(pipelines|runs|approvals)(?:/([A-Za-z0-9_.@-]{1,128}))?(?:/"
       "(runs|cancel|resume|events|attempts|messages|approve|reject))?");
   if (!std::regex_match(target, match, route_pattern))
     return {404, {{"error", "Endpoint not found"}}};
@@ -97,7 +97,7 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
   if (method == "GET" && id.empty())
     return {200, service_.list(kind, "", limit, offset)};
   if (method == "GET" && action.empty())
-    return {200, service_.get(kind, id)};
+    return {200, collection == "runs" ? service_.run_view(id) : service_.get(kind, id)};
   if (method == "POST" && collection == "pipelines" && id.empty())
     return {201, service_.register_pipeline(body.at("yaml").get<std::string>())};
   if (method == "POST" && collection == "pipelines" && action == "runs")

@@ -8,6 +8,10 @@
 - Hardened terminal-state recovery, concurrent branch policy and budget enforcement,
   plugin exception boundaries, paginated recovery scans, and adversarial regression
   coverage without changing the scheduler architecture.
+- Added durable immutable `name@version` pipeline revisions and first-class
+  `subpipeline` child runs with persisted parent/child relationships, direct payload
+  passing, retry-distinct child attempts, approval recovery, recursion detection,
+  depth limits, and API/CLI run inspection.
 
 ## 0.2.0 — Framework Milestone 1 (in progress)
 

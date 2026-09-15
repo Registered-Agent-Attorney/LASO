@@ -1,0 +1,10 @@
+laso: "1"
+name: nested-c
+version: 1
+nodes:
+  action:
+    type: function
+    function: identity
+edges:
+  - {from: input, to: action}
+  - {from: action, to: output}

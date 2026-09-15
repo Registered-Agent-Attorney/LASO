@@ -53,7 +53,8 @@ struct Runtime::ParallelState {
 Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, ExecutionToken token,
                                    std::shared_ptr<ParallelState> state,
                                    std::shared_ptr<AsyncLimiter> run_nodes,
-                                   std::chrono::steady_clock::time_point pipeline_deadline) {
+                                   std::chrono::steady_clock::time_point pipeline_deadline,
+                                   unsigned subpipeline_depth) {
   try {
     Run branch;
     branch.id = token.message.run_id;
@@ -63,6 +64,7 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
     branch.message = std::move(token.message);
     branch.frames = std::move(token.frames);
     branch.actor = "parallel";
+    branch.subpipeline_depth = subpipeline_depth;
     for (;;) {
       const auto &definition = pipeline.nodes.at(branch.active_node);
       if (definition.type == "join") {
@@ -117,14 +119,48 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
         attempt.attempt = attempt_number;
         deps_.storage.commit({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
         try {
-          auto global_slot = co_await nodes_.acquire(context);
-          auto run_slot = co_await run_nodes->acquire(context);
-          deps_.schemas.validate(definition.input_schema, branch.message.payload, definition.id,
-                                 "input");
-          auto result = co_await node->execute(context, branch.message);
+          NodeResult result;
+          if (definition.type == "subpipeline") {
+            deps_.schemas.validate(definition.input_schema, branch.message.payload, definition.id,
+                                   "input");
+            if (subpipeline_depth >= config_.max_subpipeline_depth)
+              throw Error(ErrorCode::Execution, "Subpipeline nesting limit exceeded");
+            const auto resolved = pipeline.resolved_subpipelines.contains(definition.id)
+                                      ? pipeline.resolved_subpipelines.at(definition.id)
+                                      : definition.binding;
+            if (!deps_.resolve_pipeline)
+              throw Error(ErrorCode::Execution, "Pipeline resolver is unavailable");
+            auto child_pipeline = deps_.resolve_pipeline(resolved);
+            const auto child_id =
+                run(child_pipeline, branch.message.payload, branch.actor, branch.id, definition.id,
+                    subpipeline_depth + 1, branch.message.id);
+            attempt.child_run_id = child_id;
+            attempt.child_pipeline_id = child_pipeline.name;
+            attempt.child_pipeline_version = child_pipeline.version;
+            for (;;) {
+              context.check();
+              const auto child = deps_.storage.get(RecordKind::Run, child_id).get<Run>();
+              if (terminal(child.state)) {
+                if (child.state != RunState::Completed)
+                  throw Error(ErrorCode::Execution, "Subpipeline did not complete successfully");
+                result.message = child.message;
+                break;
+              }
+              co_await context.delay(Milliseconds{5});
+            }
+          } else {
+            auto global_slot = co_await nodes_.acquire(context);
+            auto run_slot = co_await run_nodes->acquire(context);
+            deps_.schemas.validate(definition.input_schema, branch.message.payload, definition.id,
+                                   "input");
+            result = co_await node->execute(context, branch.message);
+          }
           context.check();
           deps_.schemas.validate(definition.output_schema, result.message.payload, definition.id,
                                  "output");
+          if (definition.type == "output")
+            deps_.schemas.validate(pipeline.output_schema, result.message.payload, pipeline.name,
+                                   "pipeline_output");
           attempt.state = NodeState::Completed;
           attempt.finished_at = timestamp();
           attempt.duration_ms =
@@ -205,14 +241,16 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
 Task<void> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipeline,
                                      std::shared_ptr<AsyncLimiter> run_nodes,
                                      std::stop_token parent,
-                                     std::chrono::steady_clock::time_point pipeline_deadline) {
+                                     std::chrono::steady_clock::time_point pipeline_deadline,
+                                     unsigned subpipeline_depth) {
   std::vector<ExecutionToken> tokens;
   tokens.swap(run.ready);
   auto state = std::make_shared<ParallelState>(tokens.size(), run.steps);
   std::stop_callback parent_stop(parent, [state] { state->stop.request_stop(); });
   for (auto &token : tokens)
     asio::co_spawn(io_,
-                   execute_branch(pipeline, std::move(token), state, run_nodes, pipeline_deadline),
+                   execute_branch(pipeline, std::move(token), state, run_nodes, pipeline_deadline,
+                                  subpipeline_depth),
                    asio::detached);
   while (true) {
     {
@@ -243,7 +281,8 @@ Task<void> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipelin
 
 Task<void> Runtime::execute(Run r, std::stop_token stop) {
   auto extensions = deps_.nodes.names();
-  const auto pipeline = parse_pipeline(r.definition, {extensions.begin(), extensions.end()});
+  auto pipeline = parse_pipeline(r.definition, {extensions.begin(), extensions.end()});
+  pipeline.resolved_subpipelines = r.resolved_subpipelines;
   const auto deadline = std::chrono::steady_clock::now() + pipeline.timeout.timeout;
   auto run_nodes = std::make_shared<AsyncLimiter>(config_.max_nodes_per_run);
   bool attempt_recorded = false;
@@ -289,37 +328,6 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
                       definition.type == "approval" ? definition.reason : policy.reason);
         co_return;
       }
-      if (definition.type == "subpipeline") {
-        if (r.child_id.empty()) {
-          unsigned depth = 0;
-          auto ancestor = r;
-          while (!ancestor.parent_id.empty()) {
-            ancestor = deps_.storage.get(RecordKind::Run, ancestor.parent_id).get<Run>();
-            if (++depth >= 8)
-              throw Error(ErrorCode::Execution, "Subpipeline nesting limit exceeded");
-          }
-          auto registration = deps_.storage.get(RecordKind::Pipeline, definition.binding);
-          r.child_id = run(parse_pipeline(registration.at("yaml").get<std::string>(),
-                                          {extensions.begin(), extensions.end()}),
-                           r.message.payload, r.actor, r.id);
-          checkpoint(r, "subpipeline.started");
-        }
-        for (;;) {
-          auto child = deps_.storage.get(RecordKind::Run, r.child_id).get<Run>();
-          if (terminal(child.state)) {
-            if (child.state != RunState::Completed)
-              throw Error(ErrorCode::Execution, "Subpipeline did not complete successfully");
-            r.message.payload = child.message.payload;
-            break;
-          }
-          if (child.state == RunState::WaitingApproval || child.state == RunState::Paused) {
-            std::lock_guard lock(mutex_);
-            transition(r, RunState::Paused, "subpipeline.waiting");
-            co_return;
-          }
-          co_await context.delay(Milliseconds{5});
-        }
-      }
       auto node = make_node(definition);
       bool completed = false;
       for (unsigned attempt_number = 1; attempt_number <= definition.retry.max_attempts;
@@ -352,21 +360,98 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
         std::optional<ErrorCode> failure;
         std::string failure_detail;
         NodeResult result;
+        bool child_result = false;
         try {
-          auto global_slot = co_await nodes_.acquire(context);
-          auto run_slot = co_await run_nodes->acquire(context);
-          deps_.schemas.validate(definition.input_schema, r.message.payload, definition.id,
-                                 "input");
-          result = co_await node->execute(context, r.message);
+          if (definition.type == "subpipeline") {
+            deps_.schemas.validate(definition.input_schema, r.message.payload, definition.id,
+                                   "input");
+            bool child_active = false;
+            if (!r.child_id.empty()) {
+              const auto existing_child = deps_.storage.get(RecordKind::Run, r.child_id).get<Run>();
+              if (existing_child.state == RunState::Completed) {
+                result.message = existing_child.message;
+                child_result = true;
+                attempt.child_run_id = existing_child.id;
+                attempt.child_pipeline_id = existing_child.pipeline_id;
+                attempt.child_pipeline_version = existing_child.pipeline_version;
+              } else if (terminal(existing_child.state)) {
+                // Retries create a new immutable child run rather than
+                // mutating the failed child execution.
+                r.child_id.clear();
+              } else {
+                child_active = true;
+                attempt.child_run_id = existing_child.id;
+                attempt.child_pipeline_id = existing_child.pipeline_id;
+                attempt.child_pipeline_version = existing_child.pipeline_version;
+              }
+            }
+            if (!child_result && !child_active) {
+              if (r.subpipeline_depth >= config_.max_subpipeline_depth)
+                throw Error(ErrorCode::Execution, "Subpipeline nesting limit exceeded");
+              const auto resolved = pipeline.resolved_subpipelines.contains(definition.id)
+                                        ? pipeline.resolved_subpipelines.at(definition.id)
+                                        : definition.binding;
+              if (!deps_.resolve_pipeline)
+                throw Error(ErrorCode::Execution, "Pipeline resolver is unavailable");
+              auto child_pipeline = deps_.resolve_pipeline(resolved);
+              const auto child_id = run(child_pipeline, r.message.payload, r.actor, r.id,
+                                        definition.id, r.subpipeline_depth + 1, r.message.id);
+              r.child_id = child_id;
+              r.child_pipeline_id = child_pipeline.name;
+              r.child_pipeline_version = child_pipeline.version;
+              r.child_runs.push_back(child_id);
+              attempt.child_run_id = child_id;
+              attempt.child_pipeline_id = child_pipeline.name;
+              attempt.child_pipeline_version = child_pipeline.version;
+              checkpoint(r, "subpipeline.started",
+                         {{RecordKind::Attempt, attempt.id, r.id, Json(attempt)}});
+            }
+            if (!child_result) {
+              for (;;) {
+                context.check();
+                const auto child = deps_.storage.get(RecordKind::Run, r.child_id).get<Run>();
+                if (terminal(child.state)) {
+                  if (child.state != RunState::Completed)
+                    throw Error(ErrorCode::Execution, "Subpipeline did not complete successfully",
+                                {{"child_run_id", child.id},
+                                 {"child_pipeline", child.pipeline_id},
+                                 {"child_pipeline_version", child.pipeline_version}});
+                  result.message = child.message;
+                  child_result = true;
+                  break;
+                }
+                if (child.state == RunState::WaitingApproval || child.state == RunState::Paused) {
+                  attempt.state = NodeState::WaitingApproval;
+                  checkpoint(r, "subpipeline.waiting",
+                             {{RecordKind::Attempt, attempt.id, r.id, Json(attempt)}});
+                  std::lock_guard lock(mutex_);
+                  transition(r, RunState::Paused, "subpipeline.waiting");
+                  co_return;
+                }
+                co_await context.delay(Milliseconds{5});
+              }
+            }
+          } else {
+            auto global_slot = co_await nodes_.acquire(context);
+            auto run_slot = co_await run_nodes->acquire(context);
+            deps_.schemas.validate(definition.input_schema, r.message.payload, definition.id,
+                                   "input");
+            result = co_await node->execute(context, r.message);
+          }
           context.check();
           deps_.schemas.validate(definition.output_schema, result.message.payload, definition.id,
                                  "output");
+          if (definition.type == "output")
+            deps_.schemas.validate(pipeline.output_schema, result.message.payload, pipeline.name,
+                                   "pipeline_output");
           if (result.message.payload.dump().size() > max_document_bytes)
             throw Error(ErrorCode::Execution, "Node result exceeds 1 MiB");
         } catch (const Error &e) {
           failure = e.code;
-          if (e.code == ErrorCode::Validation)
+          if (e.code == ErrorCode::Validation || definition.type == "subpipeline")
             failure_detail = validation_detail(e);
+          if (failure_detail.empty() && definition.type == "subpipeline")
+            failure_detail = e.what();
         } catch (...) {
           failure = ErrorCode::Execution;
         }
@@ -427,7 +512,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
               // Approval branches need the existing durable pause/resume protocol.
               continuing = next_ready(r);
             } else {
-              co_await execute_parallel(r, pipeline, run_nodes, stop, deadline);
+              co_await execute_parallel(r, pipeline, run_nodes, stop, deadline,
+                                        r.subpipeline_depth);
               result.message = r.message;
               for (auto &record : records)
                 if (record.kind == RecordKind::Message && record.id == r.message.id) {

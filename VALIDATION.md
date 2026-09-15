@@ -10,8 +10,11 @@ C++20 source, public headers, CMake targets, native C plugin SDK and examples,
 SQLite persistence, runtime, API/CLI, policies, scheduling and artifact interfaces,
 tests, systemd/Docker deployment files, documentation, and Linux CI are present.
 
-The test inventory contains **99 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario.
+The test inventory contains **114 GoogleTest cases** plus **2 CTest entries** for CLI
+validation and a process smoke/restart scenario. Composition coverage includes
+revision immutability, cross-boundary payload and schema behavior, child retry
+identity, approval-compatible persistence, parallel children, recursion, depth,
+and run inspection.
 
 ## Statically reviewed
 
@@ -38,7 +41,8 @@ The release-hardening audit additionally corrected terminal checkpoint immutabil
 recovery pagination beyond one record page, concurrent-branch policy and shared step
 and edge budgets, branch deadline inheritance, plugin callback exception containment,
 and safe relative `$ref` resolution from the declaring schema document. Regression
-tests cover these failure paths and schema diagnostics.
+tests cover these failure paths and schema diagnostics. Composition coverage also
+includes nested A → B → C execution and child output-contract failure propagation.
 
 ## Tested on this development workstation
 
@@ -60,17 +64,20 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC CTest suite | **PASS: 89/89** |
-| Clang CTest suite | **PASS: 89/89** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 89/89** |
+| GCC Debug CTest suite | **PASS: 116/116** |
+| GCC Release CTest suite | **PASS: 116/116** |
+| Clang Debug CTest suite | **PASS: 116/116** |
+| Clang Release CTest suite | **PASS: 116/116** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 116/116** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
-| Debian 13 container CTest suite | **PASS: 75/75** |
+| Debian 13 container CTest suite | **PRIOR BASELINE: 75/75; not rerun for composition** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
 | CLI and process restart smoke tests | **PASS** |
+| Offline shipped examples | **PASS: deterministic, schema, approval, plugin, and composition examples; optional local-openai not run** |
 | HTTP health/run integration tests | **PASS** |
 | valid, invalid, incompatible, and symlinked `.so` plugin tests | **PASS** |
 | Loopback-only local model provider and GPU inference | **PASS: completed LASO agent run with GPU memory allocation and active utilization observed** |

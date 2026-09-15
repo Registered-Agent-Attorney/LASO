@@ -1,0 +1,7 @@
+data_dir: .laso
+plugin_dirs:
+  - build/plugins
+models:
+  research: {provider: mock, model: mock-v1}
+  reviewer: {provider: mock, model: mock-v1}
+  plugin-model: {provider: example-model, model: offline-example}

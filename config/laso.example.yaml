@@ -7,6 +7,7 @@ max_nodes: 32
 max_nodes_per_run: 8
 max_models: 4
 max_tools: 8
+max_subpipeline_depth: 16
 log_level: info
 json_logs: false
 allow_network: false

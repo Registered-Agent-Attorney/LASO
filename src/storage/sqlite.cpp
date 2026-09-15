@@ -89,6 +89,15 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
       const auto body = r.value.dump();
       if (body.size() > std::size_t{4} * 1024 * 1024)
         throw Error(ErrorCode::Storage, "Stored record exceeds limit");
+      if (r.kind == RecordKind::Pipeline) {
+        auto existing = prepare(db, "SELECT body FROM pipelines WHERE id=?");
+        bind(existing.get(), 1, r.id);
+        if (sqlite3_step(existing.get()) == SQLITE_ROW) {
+          const auto *stored = sqlite3_column_text(existing.get(), 0);
+          if (!stored || body != reinterpret_cast<const char *>(stored))
+            throw Error(ErrorCode::Conflict, "Pipeline revision is immutable");
+        }
+      }
       bind(s.get(), 1, r.id);
       bind(s.get(), 2, r.run_id);
       bind(s.get(), 3, body);

@@ -82,6 +82,9 @@ through registries; no shell command interpretation occurs. See
 ./build/bin/laso run start examples/hello-pipeline/pipeline.yaml --input '{"value":42}'
 ./build/bin/laso run start examples/agent-review/pipeline.yaml
 ./build/bin/laso run start examples/human-approval/pipeline.yaml
+./build/bin/laso pipeline register examples/composition/normalize.yaml
+./build/bin/laso pipeline register examples/composition/process.yaml
+./build/bin/laso run start process@1 --input '{"value":42}'
 ./build/bin/laso approval list
 ./build/bin/laso approval approve APPROVAL_ID --actor operator --comment Reviewed
 ```
@@ -102,7 +105,7 @@ curl -fsS http://127.0.0.1:8080/api/v1/version
 jq -n --rawfile yaml examples/hello-pipeline/pipeline.yaml '{yaml:$yaml}' |
   curl -fsS http://127.0.0.1:8080/api/v1/pipelines \
   -H 'Content-Type: application/json' --data-binary @-
-curl -fsS -X POST http://127.0.0.1:8080/api/v1/pipelines/hello/runs \
+curl -fsS -X POST http://127.0.0.1:8080/api/v1/pipelines/hello@1/runs \
   -H 'Content-Type: application/json' -d '{"input":{"value":42}}'
 ```
 
@@ -116,6 +119,8 @@ authentication. The API never accepts filesystem paths for pipeline registration
 ```sh
 LASO_PLUGIN_DIR=build/plugins ./build/bin/laso plugin list
 LASO_PLUGIN_DIR=build/plugins ./build/bin/laso run start examples/native-plugin/pipeline.yaml
+LASO_PLUGIN_DIR=build/plugins ./build/bin/laso --config examples/plugin-model/config.yaml \
+  run start examples/plugin-model/pipeline.yaml
 ```
 
 Plugins are loaded with `dlopen`/`dlsym`, only from configured directories.
@@ -141,7 +146,8 @@ process.** Metadata validation does not isolate native code. See the
 | `parallel-join` | Fork, checkpoint each branch, combine results in branch order |
 | `schema-contract` | Offline function pipeline with input/output JSON Schema contracts |
 | `bounded-loop` | Exactly two deterministic repetitions |
-| `subpipeline` | Invoke registered `hello`; register it first with `pipeline register` |
+| `subpipeline` | Invoke registered `hello@1`; register it first with `pipeline register` |
+| `composition` | Offline versioned child pipeline and A → B → C composition |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 
 For an optional loopback-only OpenAI-compatible local model service, see
@@ -151,6 +157,7 @@ not download or launch models.
 ## Development and deployment
 
 See [architecture](docs/architecture.md), [runtime semantics](docs/runtime.md),
+[pipeline composition](docs/pipelines.md),
 [Linux deployment](docs/linux-deployment.md), [security](SECURITY.md), and
 [contribution instructions](CONTRIBUTING.md). CI specifies Ubuntu GCC/Clang,
 Debian 13, ASan/UBSan, formatting, and clang-tidy jobs. Tests use GoogleTest and
@@ -174,6 +181,10 @@ daemon in the foreground as an unprivileged service account.
   available, while join results retain pipeline branch order. Global, per-run,
   model-call, and tool-call limits bound work; cancellation is cooperative. Approval
   pauses the entire run.
+- Registered pipeline revisions are immutable `name@version` records. Subpipeline
+  nodes execute normal durable child runs with persisted parent/child links,
+  version resolution, approval/retry/recovery behavior, and a configurable maximum
+  depth. There is no distributed execution or package registry.
 - Deadlines and cancellation are cooperative. A native plugin that blocks or
   misbehaves can block a worker or crash the process. The v1 plugin invocation ABI
   is for short local operations; asynchronous external plugin I/O is deferred.

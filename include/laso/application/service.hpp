@@ -16,6 +16,7 @@ public:
   Json register_pipeline(const std::string &yaml);
   std::string start(const std::string &name_or_path, const Json &input = Json::object(),
                     const std::string &actor = "local", bool allow_file = false);
+  Json run_view(const std::string &id) const;
   Json get(RecordKind kind, const std::string &id) const {
     return storage_.get(kind, id);
   }
@@ -67,6 +68,8 @@ private:
   Runtime runtime_;
   LocalArtifactStore artifacts_;
   LocalScheduler scheduler_;
+  Json pipeline_record(const std::string &reference) const;
+  PipelineDefinition resolve_pipeline(const std::string &reference) const;
   void recover_history();
 };
 } // namespace laso

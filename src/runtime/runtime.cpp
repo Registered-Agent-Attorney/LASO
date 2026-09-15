@@ -43,6 +43,12 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
   event.metadata["model"] = r.model;
   event.metadata["tool"] = r.tool;
   event.metadata["plugin"] = r.plugin;
+  event.metadata["pipeline_version"] = r.pipeline_version;
+  event.metadata["parent_run_id"] = r.parent_id;
+  event.metadata["parent_node_id"] = r.parent_node_id;
+  event.metadata["child_run_id"] = r.child_id;
+  event.metadata["child_pipeline_id"] = r.child_pipeline_id;
+  event.metadata["child_pipeline_version"] = r.child_pipeline_version;
   for (const auto &record : records)
     if (record.kind == RecordKind::Attempt)
       event.node_id = record.value.at("node_id").get<std::string>();
@@ -60,7 +66,8 @@ void Runtime::transition(Run &r, RunState state, const std::string &event,
   checkpoint(r, event, std::move(records));
 }
 std::string Runtime::run(const PipelineDefinition &p, Json input, std::string actor,
-                         std::string parent_id) {
+                         std::string parent_id, std::string parent_node_id,
+                         unsigned subpipeline_depth, std::string parent_message_id) {
   std::lock_guard lock(mutex_);
   if (stopping_ || active_.size() >= config_.max_runs)
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
@@ -68,16 +75,28 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
     throw Error(ErrorCode::Validation, "Run input exceeds 1 MiB");
   // Do not execute a caller-modified graph that differs from the durable source.
   auto names = deps_.nodes.names();
-  const auto checked = parse_pipeline(p.source, {names.begin(), names.end()});
+  auto checked = parse_pipeline(p.source, {names.begin(), names.end()});
+  checked.resolved_subpipelines = p.resolved_subpipelines;
+  if (subpipeline_depth > config_.max_subpipeline_depth)
+    throw Error(ErrorCode::Execution, "Subpipeline nesting limit exceeded");
+  deps_.schemas.validate(checked.input_schema, input, checked.name, "pipeline_input");
   Run r;
   r.pipeline_id = checked.name;
+  r.pipeline_version = checked.version;
   r.definition = checked.source;
   r.actor = std::move(actor);
   r.parent_id = std::move(parent_id);
+  r.parent_node_id = std::move(parent_node_id);
+  r.parent_message_id = std::move(parent_message_id);
+  r.subpipeline_depth = subpipeline_depth;
+  r.resolved_subpipelines = checked.resolved_subpipelines;
   r.message.run_id = r.id;
   r.message.pipeline_id = r.pipeline_id;
   r.message.node_id = "input";
   r.message.payload = std::move(input);
+  if (!r.parent_message_id.empty())
+    r.message.provenance.push_back(
+        {r.parent_node_id, "", "", "", "", r.parent_message_id, "", timestamp()});
   checkpoint(r, "run.created");
   auto id = r.id;
   schedule(std::move(r));
@@ -153,8 +172,19 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
     }
   }
   checkpoint(r, "run.cancellation_requested", std::move(cancellation_records));
-  if (!r.child_id.empty()) {
-    auto child = deps_.storage.get(RecordKind::Run, r.child_id).get<Run>();
+  std::set<std::string> children;
+  if (!r.child_id.empty())
+    children.insert(r.child_id);
+  // A parent can have several active branch children.  The relationship is
+  // persisted on each child, so cancellation does not depend on a single
+  // mutable pointer in the parent checkpoint.
+  for (const auto &record : list_all(deps_.storage, RecordKind::Run, "")) {
+    const auto child = record.get<Run>();
+    if (child.parent_id == id)
+      children.insert(child.id);
+  }
+  for (const auto &child_id : children) {
+    auto child = deps_.storage.get(RecordKind::Run, child_id).get<Run>();
     if (!terminal(child.state))
       cancel_locked(child.id, visited);
   }

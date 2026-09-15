@@ -46,3 +46,11 @@ schema, reference, nesting, payload and cache limits bound validation work. Exte
 reference cycles are rejected during declaration validation, and parsed schemas are
 shared only through a mutex-protected bounded cache; validator instances remain
 per-call.
+
+Pipeline composition is local-only as well. Subpipeline references resolve only to
+registered immutable `name@version` records; no package registry, URL, DNS lookup,
+or remote worker is involved. Registration rejects missing revisions and recursive
+dependency graphs, while runtime enforces the configured maximum depth (16 by
+default). Child runs use the normal policy, schema, provider/tool, cancellation,
+deadline and resource-limit paths, and parent/child identifiers are persisted
+without logging payload contents.
