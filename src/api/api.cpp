@@ -5,6 +5,8 @@
 #include <set>
 
 namespace laso {
+// NOLINTBEGIN(bugprone-exception-escape): this noexcept boundary converts all exceptions to HTTP
+// responses.
 ApiResponse Api::handle(const std::string &method, const std::string &target,
                         const std::string &body, const std::string &credential) noexcept {
   try {
@@ -47,7 +49,7 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
       }
     }
     auto response = route(method, path, input, actor, limit, offset);
-    if (response.body.dump().size() > 4 * 1024 * 1024)
+    if (response.body.dump().size() > std::size_t{4} * 1024 * 1024)
       return {413, {{"error", "Response exceeds limit; request a smaller page"}}};
     return response;
   } catch (const Error &e) {
@@ -69,6 +71,7 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
     return {500, {{"error", "Internal service error"}}};
   }
 }
+// NOLINTEND(bugprone-exception-escape)
 ApiResponse Api::route(const std::string &method, const std::string &target, const Json &body,
                        const Actor &actor, std::size_t limit, std::size_t offset) {
   if (method == "GET" && target == "/api/v1/health")

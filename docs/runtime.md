@@ -35,7 +35,8 @@ is cooperative and checked before/after node calls and during framework delays.
 Each active execution segment has a pipeline deadline; time spent waiting for an
 approval or across a restart is excluded. A resumed segment gets a fresh deadline.
 The per-attempt deadline is capped by the current pipeline segment deadline and
-provider/tool timeout metadata. Persisted visit, edge and step budgets do not reset.
+provider/tool timeout metadata, including for concurrent branches. Persisted visit,
+edge and step budgets do not reset; branch work consumes the same run step budget.
 
 Cancellation propagates via `std::stop_source`/`std::stop_token`, including child
 runs. A tool ignoring cancellation may finish its side effect before control

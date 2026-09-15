@@ -59,6 +59,8 @@ through `SchemaValidator`. `input_schema` is checked immediately before a node i
 invoked and `output_schema` immediately after it produces a payload. `validator`
 nodes call the same service explicitly. Parsed documents are cached by canonical
 path behind a mutex, while each validation owns its validator instance, so branch
-validation is safe concurrently. Configured `schema_roots`, canonical path checks,
-disabled remote references, and bounded document/depth/payload limits protect the
-filesystem and runtime.
+validation is safe concurrently. The cache stops retaining new documents after its
+configured bound. Configured `schema_roots`, canonical path checks, disabled remote
+references, rejected external reference cycles, and bounded document/depth/payload
+limits protect the filesystem and runtime. Relative local references resolve from
+the declaring schema document; absolute and parent-traversing references are rejected.

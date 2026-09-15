@@ -39,6 +39,11 @@ TEST(Pipeline, RejectsMalformedEdge) {
   yaml.replace(yaml.find("to: output"), 10, "target: output");
   EXPECT_THROW(parse_pipeline(yaml), Error);
 }
+TEST(Pipeline, RejectsMalformedEdgeIdentifiers) {
+  auto yaml = single();
+  yaml.replace(yaml.find("to: output"), 10, "to: ../output");
+  EXPECT_THROW(parse_pipeline(yaml), Error);
+}
 TEST(Pipeline, RejectsUnknownNode) {
   EXPECT_THROW(parse_pipeline(single("type: unknown")), Error);
 }
@@ -84,6 +89,9 @@ TEST(State, ValidTransitionsAndTerminalImmutability) {
   EXPECT_TRUE(valid_transition(RunState::WaitingApproval, RunState::Queued));
   EXPECT_FALSE(valid_transition(RunState::Completed, RunState::Running));
   EXPECT_FALSE(valid_transition(RunState::Queued, RunState::Completed));
+  EXPECT_FALSE(valid_transition(RunState::Queued, RunState::Paused));
+  EXPECT_FALSE(valid_transition(RunState::WaitingTool, RunState::WaitingApproval));
+  EXPECT_TRUE(valid_transition(RunState::Running, RunState::Cancelled));
 }
 TEST(Message, RoundTripsEnvelope) {
   Message m;

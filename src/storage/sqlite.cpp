@@ -87,7 +87,7 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
               "(id,run_id,body,sequence) VALUES(?,?,?,(SELECT COALESCE(MAX(sequence),0)+1 FROM " +
               name + ")) ON CONFLICT(id) DO UPDATE SET body=excluded.body,run_id=excluded.run_id");
       const auto body = r.value.dump();
-      if (body.size() > 4 * 1024 * 1024)
+      if (body.size() > std::size_t{4} * 1024 * 1024)
         throw Error(ErrorCode::Storage, "Stored record exceeds limit");
       bind(s.get(), 1, r.id);
       bind(s.get(), 2, r.run_id);

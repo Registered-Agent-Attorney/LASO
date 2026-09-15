@@ -1,8 +1,24 @@
 #include <algorithm>
 #include <laso/pipeline/parser.hpp>
 #include <laso/runtime/runtime.hpp>
+#include <limits>
 
 namespace laso {
+namespace {
+std::vector<Json> list_all(const Storage &storage, RecordKind kind, const std::string &run_id) {
+  constexpr std::size_t page_size = 10000;
+  std::vector<Json> records;
+  for (std::size_t offset = 0;;) {
+    auto page = storage.list(kind, run_id, page_size, offset);
+    records.insert(records.end(), page.begin(), page.end());
+    if (page.size() < page_size)
+      return records;
+    if (offset > std::numeric_limits<std::size_t>::max() - page_size)
+      throw Error(ErrorCode::Storage, "Record history is too large to inspect");
+    offset += page_size;
+  }
+}
+} // namespace
 Runtime::Runtime(asio::io_context &io, Config config, RuntimeDependencies dependencies)
     : io_(io), config_(std::move(config)), deps_(dependencies), nodes_(config_.max_nodes),
       models_(config_.max_models), tools_(config_.max_tools) {}
@@ -16,8 +32,6 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
     if (error.code != ErrorCode::NotFound)
       throw;
   }
-  if (r.cancellation_requested && r.state == RunState::Completed)
-    r.state = RunState::Cancelled;
   r.updated_at = timestamp();
   Event event;
   event.run_id = r.id;
@@ -78,7 +92,7 @@ void Runtime::schedule(Run r) {
   auto [it, inserted] = active_.emplace(id, std::stop_source{});
   (void)inserted;
   auto stop = it->second.get_token();
-  asio::co_spawn(io_, execute(std::move(r), stop), [this, id](std::exception_ptr error) {
+  asio::co_spawn(io_, execute(std::move(r), stop), [this, id](const std::exception_ptr &error) {
     std::lock_guard lock(mutex_);
     active_.erase(id);
     try {
@@ -109,6 +123,8 @@ void Runtime::resume(const std::string &id) {
     throw Error(ErrorCode::Conflict, "Run cannot resume from this state");
   if (r.state == RunState::WaitingApproval && !approved(r))
     throw Error(ErrorCode::Policy, "Approval is pending");
+  if (r.cancellation_requested)
+    throw Error(ErrorCode::Conflict, "Run cancellation has already been requested");
   if (stopping_ || active_.size() >= config_.max_runs)
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
   if (r.state != RunState::Queued)
@@ -117,12 +133,18 @@ void Runtime::resume(const std::string &id) {
 }
 void Runtime::cancel(const std::string &id) {
   std::lock_guard lock(mutex_);
+  std::set<std::string> visited;
+  cancel_locked(id, visited);
+}
+void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visited) {
+  if (!visited.insert(id).second)
+    throw Error(ErrorCode::Conflict, "Run cancellation cycle detected");
   auto r = deps_.storage.get(RecordKind::Run, id).get<Run>();
   if (terminal(r.state))
     throw Error(ErrorCode::Conflict, "Run is already terminal");
   r.cancellation_requested = true;
   std::vector<Record> cancellation_records;
-  for (const auto &record : deps_.storage.list(RecordKind::Approval, id, 10000)) {
+  for (const auto &record : list_all(deps_.storage, RecordKind::Approval, id)) {
     auto approval = record.get<Approval>();
     if (approval.decision == "pending") {
       approval.decision = "cancelled";
@@ -134,7 +156,7 @@ void Runtime::cancel(const std::string &id) {
   if (!r.child_id.empty()) {
     auto child = deps_.storage.get(RecordKind::Run, r.child_id).get<Run>();
     if (!terminal(child.state))
-      cancel(child.id);
+      cancel_locked(child.id, visited);
   }
   auto found = active_.find(id);
   if (found != active_.end()) {
@@ -157,7 +179,7 @@ bool Runtime::idle() const {
   return active_.empty();
 }
 bool Runtime::approved(const Run &r) const {
-  for (const auto &item : deps_.storage.list(RecordKind::Approval, r.id, 10000)) {
+  for (const auto &item : list_all(deps_.storage, RecordKind::Approval, r.id)) {
     auto a = item.get<Approval>();
     auto found = r.node_visits.find(r.active_node);
     auto visit = found == r.node_visits.end() ? 0 : found->second;
@@ -199,7 +221,7 @@ void Runtime::decide(const std::string &id, bool approve, const std::string &act
   a.actor = actor;
   a.comment = comment;
   std::vector<Record> records{{RecordKind::Approval, a.id, r.id, Json(a)}};
-  for (const auto &item : deps_.storage.list(RecordKind::Attempt, r.id, 10000)) {
+  for (const auto &item : list_all(deps_.storage, RecordKind::Attempt, r.id)) {
     auto attempt = item.get<NodeExecution>();
     if (attempt.node_id == a.node_id && attempt.state == NodeState::WaitingApproval) {
       attempt.state = approve ? NodeState::Completed : NodeState::Failed;

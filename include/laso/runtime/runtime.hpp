@@ -6,6 +6,7 @@
 #include <laso/storage/storage.hpp>
 #include <memory>
 #include <mutex>
+#include <set>
 
 namespace laso {
 struct RuntimeDependencies {
@@ -43,10 +44,12 @@ private:
   bool stopping_ = false;
   Task<void> execute(Run run, std::stop_token stop);
   Task<void> execute_branch(const PipelineDefinition &, ExecutionToken,
-                            std::shared_ptr<ParallelState>, std::shared_ptr<AsyncLimiter>);
+                            std::shared_ptr<ParallelState>, std::shared_ptr<AsyncLimiter>,
+                            std::chrono::steady_clock::time_point);
   Task<void> execute_parallel(Run &, const PipelineDefinition &, std::shared_ptr<AsyncLimiter>,
-                              std::stop_token);
+                              std::stop_token, std::chrono::steady_clock::time_point);
   void schedule(Run run);
+  void cancel_locked(const std::string &, std::set<std::string> &);
   void transition(Run &, RunState, const std::string &event, std::vector<Record> records = {});
   void checkpoint(Run &, const std::string &event, std::vector<Record> records = {});
   std::unique_ptr<Node> make_node(const NodeDefinition &);

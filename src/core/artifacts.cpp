@@ -5,7 +5,7 @@
 
 namespace laso {
 Artifact LocalArtifactStore::put(Artifact a, std::span<const std::byte> bytes) {
-  if (bytes.size() > 16 * 1024 * 1024)
+  if (bytes.size() > std::size_t{16} * 1024 * 1024)
     throw Error(ErrorCode::Validation, "Artifact exceeds 16 MiB");
   std::filesystem::create_directories(root_);
   // Never incorporate untrusted artifact names, IDs or run IDs into a filesystem path.

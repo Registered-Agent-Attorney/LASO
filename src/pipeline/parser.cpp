@@ -202,8 +202,8 @@ void validate_pipeline(const PipelineDefinition &p, const std::set<std::string> 
   std::map<std::string, std::vector<const EdgeDefinition *>> outgoing;
   std::set<std::pair<std::string, std::string>> paths;
   for (const auto &e : p.edges) {
-    if (!p.nodes.contains(e.from) || !p.nodes.contains(e.to) || e.to == "input" ||
-        e.from == "output")
+    if (!identifier(e.from) || !identifier(e.to) || !p.nodes.contains(e.from) ||
+        !p.nodes.contains(e.to) || e.to == "input" || e.from == "output")
       throw Error(ErrorCode::Validation, "Invalid edge reference");
     if (!e.condition.empty() && e.condition != "accepted" && e.condition != "rejected" &&
         e.condition != "repeat" && e.condition != "done")

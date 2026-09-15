@@ -48,8 +48,75 @@ TEST(Schema, SecureLocalRefsAndRejectedRemoteRefs) {
   EXPECT_NO_THROW(validator.validate_declaration("value.json"));
   write_schema(root, "remote.json", {{"$ref", "https://example.invalid/schema.json"}});
   EXPECT_THROW(validator.validate_declaration("remote.json"), Error);
+  write_schema(root, "remote-http.json", {{"$ref", "http://example.invalid/schema.json"}});
+  EXPECT_THROW(validator.validate_declaration("remote-http.json"), Error);
+  write_schema(root, "absolute.json", {{"$ref", "/etc/passwd"}});
+  EXPECT_THROW(validator.validate_declaration("absolute.json"), Error);
   EXPECT_THROW(validator.validate_declaration("../schemas/value.json"), Error);
   EXPECT_THROW(validator.validate_declaration("/etc/passwd"), Error);
+}
+TEST(Schema, RelativeRefsResolveFromDeclaringSchema) {
+  TemporaryDirectory dir;
+  auto root = dir.path / "schemas";
+  write_schema(root / "nested" / "common", "person.json",
+               {{"type", "object"},
+                {"required", {"name"}},
+                {"properties", {{"name", {{"type", "string"}}}}}});
+  write_schema(
+      root, "nested/root.json",
+      {{"type", "object"}, {"properties", {{"person", {{"$ref", "common/person.json"}}}}}});
+  SchemaValidator validator({root});
+  EXPECT_NO_THROW(validator.validate_declaration("nested/root.json"));
+  EXPECT_NO_THROW(
+      validator.validate("nested/root.json", {{"person", {{"name", "Ada"}}}}, "consumer", "input"));
+  EXPECT_THROW(
+      validator.validate("nested/root.json", {{"person", {{"name", 7}}}}, "consumer", "input"),
+      Error);
+}
+TEST(Schema, ExternalCyclesAreRejectedSafely) {
+  TemporaryDirectory dir;
+  auto root = dir.path / "schemas";
+  write_schema(root, "a.json", {{"$ref", "b.json"}});
+  write_schema(root, "b.json", {{"$ref", "a.json"}});
+  SchemaValidator validator({root});
+  EXPECT_THROW(validator.validate_declaration("a.json"), Error);
+}
+TEST(Schema, SymlinkEscapeIsRejected) {
+#ifdef __linux__
+  TemporaryDirectory dir;
+  auto root = dir.path / "schemas";
+  auto outside = dir.path / "outside.json";
+  write_schema(root, "entry.json", {{"$ref", "escape.json"}});
+  write_schema(dir.path, "outside.json", {{"type", "integer"}});
+  std::error_code ec;
+  std::filesystem::create_symlink(outside, root / "escape.json", ec);
+  if (ec)
+    GTEST_SKIP() << "symlink creation unavailable";
+  SchemaValidator validator({root});
+  EXPECT_THROW(validator.validate_declaration("entry.json"), Error);
+#else
+  GTEST_SKIP() << "symlink escape test is Linux-specific";
+#endif
+}
+TEST(Schema, SchemaSizeAndDiagnosticsAreBounded) {
+  TemporaryDirectory dir;
+  auto root = dir.path / "schemas";
+  write_schema(root, "large.json", {{"description", std::string(64, 'x')}});
+  SchemaLimits limits;
+  limits.max_schema_bytes = 8;
+  SchemaValidator limited({root}, limits);
+  EXPECT_THROW(limited.validate_declaration("large.json"), Error);
+
+  SchemaValidator validator({root});
+  try {
+    validator.validate("missing.json", 7, "node", "input");
+    FAIL() << "missing schema should fail";
+  } catch (const Error &error) {
+    EXPECT_EQ(error.code, ErrorCode::Validation);
+    EXPECT_EQ(error.details.at("schema"), "missing.json");
+    EXPECT_EQ(error.details.at("node"), "node");
+    EXPECT_EQ(error.details.at("direction"), "input");
+  }
 }
 TEST(Schema, RuntimeOutputContractFailure) {
   TemporaryDirectory dir;

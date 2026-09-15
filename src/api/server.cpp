@@ -1,5 +1,6 @@
 #include <atomic>
 #include <boost/beast.hpp>
+#include <cstddef>
 #include <laso/api/api.hpp>
 #include <set>
 
@@ -23,9 +24,9 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
   }
   Task<void> serve(std::shared_ptr<beast::tcp_stream> stream) {
     try {
-      beast::flat_buffer buffer(1024 * 1024 + 16384);
+      beast::flat_buffer buffer(std::size_t{1024} * 1024 + 16384);
       http::request_parser<http::string_body> parser;
-      parser.body_limit(1024 * 1024);
+      parser.body_limit(std::size_t{1024} * 1024);
       parser.header_limit(16384);
       stream->expires_after(std::chrono::seconds(15));
       co_await http::async_read(*stream, buffer, parser, asio::use_awaitable);
@@ -40,10 +41,12 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
       response.prepare_payload();
       stream->expires_after(std::chrono::seconds(15));
       co_await http::async_write(*stream, response, asio::use_awaitable);
-    } catch (...) { /* Bad/incomplete/oversized requests close the connection. */
+    } catch (...) { // NOLINT(bugprone-empty-catch): malformed requests close the connection.
     }
     boost::system::error_code ec;
+    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
     stream->socket().shutdown(Tcp::socket::shutdown_both, ec);
+    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
     stream->socket().close(ec);
     sessions.erase(stream);
   }
@@ -57,13 +60,14 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
         continue;
       }
       if (sessions.size() >= 128) {
+        // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
         socket.close(ec);
         continue;
       }
       auto stream = std::make_shared<beast::tcp_stream>(std::move(socket));
       sessions.insert(stream);
       auto self = shared_from_this();
-      asio::co_spawn(strand, serve(stream), [self](std::exception_ptr) {});
+      asio::co_spawn(strand, serve(stream), [self](const std::exception_ptr &) {});
     }
   }
 };
@@ -72,18 +76,26 @@ HttpServer::HttpServer(asio::io_context &io, Api &api, const std::string &host, 
 HttpServer::~HttpServer() = default;
 void HttpServer::start() {
   auto self = impl_;
-  asio::co_spawn(self->strand, self->listen(), [self](std::exception_ptr) {});
+  asio::co_spawn(self->strand, self->listen(), [self](const std::exception_ptr &) {});
 }
 void HttpServer::stop() {
   auto self = impl_;
   asio::post(self->strand, [self] {
     self->stopping = true;
     boost::system::error_code ec;
-    self->acceptor.cancel(ec);
-    self->acceptor.close(ec);
+    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
+    self->acceptor.cancel(
+        ec); // NOLINT(bugprone-unused-return-value): error_code overload reports via ec.
+    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
+    self->acceptor.close(
+        ec); // NOLINT(bugprone-unused-return-value): error_code overload reports via ec.
     for (const auto &session : self->sessions) {
-      session->socket().cancel(ec);
-      session->socket().close(ec);
+      // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
+      session->socket().cancel(
+          ec); // NOLINT(bugprone-unused-return-value): error_code overload reports via ec.
+      // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
+      session->socket().close(
+          ec); // NOLINT(bugprone-unused-return-value): error_code overload reports via ec.
     }
   });
 }

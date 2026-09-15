@@ -104,7 +104,11 @@ void Service::recover_history() {
     auto records = storage_.list(RecordKind::Run, "", 1000, offset);
     for (const auto &record : records) {
       auto r = record.get<Run>();
-      if (r.cancellation_requested && !terminal(r.state)) {
+      // A terminal checkpoint is immutable.  A stale cancellation flag must not
+      // turn a completed run into a different terminal state during recovery.
+      if (terminal(r.state))
+        continue;
+      if (r.cancellation_requested) {
         r.state = RunState::Cancelled;
         r.updated_at = timestamp();
         Event event;
@@ -114,9 +118,10 @@ void Service::recover_history() {
         event.type = "run.cancelled";
         storage_.commit({{RecordKind::Run, r.id, r.id, Json(r)},
                          {RecordKind::Event, event.id, r.id, Json(event)}});
+        continue;
       }
-      if (terminal(r.state) || r.state == RunState::WaitingApproval ||
-          r.state == RunState::Paused || r.state == RunState::Queued)
+      if (r.state == RunState::WaitingApproval || r.state == RunState::Paused ||
+          r.state == RunState::Queued)
         continue;
       r.state = RunState::Paused;
       r.error = "Process stopped during execution; explicit resume may replay the unfinished node";
@@ -128,14 +133,21 @@ void Service::recover_history() {
       event.type = "run.recovery_required";
       std::vector<Record> checkpoint{{RecordKind::Run, r.id, r.id, Json(r)},
                                      {RecordKind::Event, event.id, r.id, Json(event)}};
-      for (const auto &item : storage_.list(RecordKind::Attempt, r.id, 10000)) {
-        auto a = item.get<NodeExecution>();
-        if (a.state == NodeState::Running) {
-          a.state = NodeState::Failed;
-          a.error = "Interrupted by process termination";
-          a.finished_at = timestamp();
-          checkpoint.push_back({RecordKind::Attempt, a.id, r.id, Json(a)});
+      for (std::size_t attempt_offset = 0;;) {
+        constexpr std::size_t page_size = 10000;
+        auto attempts = storage_.list(RecordKind::Attempt, r.id, page_size, attempt_offset);
+        for (const auto &item : attempts) {
+          auto a = item.get<NodeExecution>();
+          if (a.state == NodeState::Running) {
+            a.state = NodeState::Failed;
+            a.error = "Interrupted by process termination";
+            a.finished_at = timestamp();
+            checkpoint.push_back({RecordKind::Attempt, a.id, r.id, Json(a)});
+          }
         }
+        if (attempts.size() < page_size)
+          break;
+        attempt_offset += page_size;
       }
       storage_.commit(checkpoint);
     }

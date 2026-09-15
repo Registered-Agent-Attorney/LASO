@@ -47,25 +47,25 @@ bool terminal(RunState state) {
 bool valid_transition(RunState from, RunState to) {
   if (terminal(from))
     return false;
-  if (to == RunState::Failed || to == RunState::Cancelled || to == RunState::TimedOut ||
-      to == RunState::Paused)
-    return true;
   switch (from) {
   case RunState::Queued:
-    return to == RunState::Starting;
+    return to == RunState::Starting || to == RunState::Cancelled || to == RunState::Failed;
   case RunState::Starting:
-    return to == RunState::Running;
+    return to == RunState::Running || to == RunState::Failed || to == RunState::Cancelled ||
+           to == RunState::TimedOut;
   case RunState::Running:
     return to == RunState::Completed || to == RunState::WaitingModel ||
            to == RunState::WaitingTool || to == RunState::WaitingApproval ||
-           to == RunState::Retrying;
+           to == RunState::Retrying || to == RunState::Paused || to == RunState::Failed ||
+           to == RunState::Cancelled || to == RunState::TimedOut;
   case RunState::WaitingApproval:
   case RunState::Paused:
-    return to == RunState::Queued;
+    return to == RunState::Queued || to == RunState::Failed || to == RunState::Cancelled;
   case RunState::WaitingTool:
   case RunState::WaitingModel:
   case RunState::Retrying:
-    return to == RunState::Running;
+    return to == RunState::Running || to == RunState::Failed || to == RunState::Cancelled ||
+           to == RunState::TimedOut;
   default:
     return false;
   }

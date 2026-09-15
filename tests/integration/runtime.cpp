@@ -96,6 +96,45 @@ TEST(Runtime, CooperativeCancellation) {
   io.run();
   EXPECT_EQ(s.get(RecordKind::Run, id).get<laso::Run>().state, RunState::Cancelled);
 }
+TEST(Runtime, CancellingParentCancelsActiveChild) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  s.functions().add(
+      "delay", std::make_shared<Function>([](ExecutionContext &c, const Json &j) -> Task<Json> {
+        co_await c.delay(Milliseconds{100});
+        co_return j;
+      }));
+  const auto child = R"(laso: "1"
+name: cancel-child
+version: 1
+nodes:
+  action: {type: function, function: delay}
+edges:
+  - {from: input, to: action}
+  - {from: action, to: output}
+)";
+  const auto parent = R"(laso: "1"
+name: cancel-parent
+version: 1
+nodes:
+  child: {type: subpipeline, pipeline: cancel-child}
+edges:
+  - {from: input, to: child}
+  - {from: child, to: output}
+)";
+  s.register_pipeline(child);
+  s.register_pipeline(parent);
+  const auto id = s.start("cancel-parent");
+  asio::steady_timer timer(io, Milliseconds{5});
+  timer.async_wait([&](const boost::system::error_code &) { s.runtime().cancel(id); });
+  io.run();
+  const auto parent_run = s.get(RecordKind::Run, id).get<laso::Run>();
+  EXPECT_EQ(parent_run.state, RunState::Cancelled);
+  ASSERT_FALSE(parent_run.child_id.empty());
+  EXPECT_EQ(s.get(RecordKind::Run, parent_run.child_id).get<laso::Run>().state,
+            RunState::Cancelled);
+}
 TEST(Runtime, LoopBoundsAndStepLimit) {
   TemporaryDirectory dir;
   asio::io_context io;
@@ -282,6 +321,95 @@ edges:
   auto r = execute(s, io, yaml);
   EXPECT_EQ(r.state, RunState::Completed);
   EXPECT_EQ(maximum->load(), 2U);
+}
+TEST(Runtime, ParallelBranchesRespectGlobalStepLimit) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  const auto yaml = R"(laso: "1"
+name: parallel-step-limit
+version: 1
+max_steps: 4
+nodes:
+  fork: {type: parallel, join: join}
+  a: {type: function, function: identity}
+  b: {type: function, function: identity}
+  c: {type: function, function: identity}
+  join: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: a}
+  - {from: fork, to: b}
+  - {from: fork, to: c}
+  - {from: a, to: join}
+  - {from: b, to: join}
+  - {from: c, to: join}
+  - {from: join, to: output}
+)";
+  auto r = execute(s, io, yaml);
+  EXPECT_EQ(r.state, RunState::Failed);
+  EXPECT_LE(r.steps, 4U);
+}
+TEST(Runtime, ParallelBranchesEnforceEdgeBudgets) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  const auto yaml = R"(laso: "1"
+name: parallel-edge-limit
+version: 1
+max_steps: 20
+nodes:
+  fork: {type: parallel, join: join}
+  repeat: {type: loop, max_iterations: 3}
+  action: {type: function, function: identity}
+  safe: {type: function, function: identity}
+  join: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: repeat}
+  - {from: fork, to: safe}
+  - {from: repeat, condition: repeat, to: action, max_iterations: 1}
+  - {from: repeat, condition: done, to: join}
+  - {from: action, to: repeat}
+  - {from: safe, to: join}
+  - {from: join, to: output}
+)";
+  auto r = execute(s, io, yaml);
+  EXPECT_EQ(r.state, RunState::Failed);
+}
+TEST(Runtime, ParallelBranchesEnforcePolicyBeforeInvocation) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto c = config(dir.path);
+  c.rules = {{"echo", PolicyDecision::Deny}};
+  Service s(io, c);
+  const auto yaml = R"(laso: "1"
+name: parallel-policy
+version: 1
+nodes:
+  fork: {type: parallel, join: join}
+  blocked: {type: tool, tool: echo}
+  safe: {type: function, function: identity}
+  join: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: blocked}
+  - {from: fork, to: safe}
+  - {from: blocked, to: join}
+  - {from: safe, to: join}
+  - {from: join, to: output}
+)";
+  auto r = execute(s, io, yaml);
+  EXPECT_EQ(r.state, RunState::Failed);
+}
+TEST(Runtime, SuccessfulAttemptsHaveCompletionTimestamps) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  auto r = execute(s, io, fixture("hello-pipeline"));
+  ASSERT_EQ(r.state, RunState::Completed);
+  for (const auto &record : s.list(RecordKind::Attempt, r.id))
+    EXPECT_FALSE(record.at("finished_at").get<std::string>().empty());
 }
 TEST(Runtime, ParallelCancellationStopsActiveBranches) {
   TemporaryDirectory dir;

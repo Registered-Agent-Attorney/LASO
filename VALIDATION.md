@@ -1,6 +1,6 @@
 # Validation record
 
-Snapshot validated: 2026-09-14. The Windows development workstation was used for
+Snapshot validated: 2026-09-15. The Windows development workstation was used for
 source review and packaging. Native validation was performed over SSH in an isolated
 directory on a remote Ubuntu 24.04.5 LTS (x86-64) host.
 
@@ -10,7 +10,7 @@ C++20 source, public headers, CMake targets, native C plugin SDK and examples,
 SQLite persistence, runtime, API/CLI, policies, scheduling and artifact interfaces,
 tests, systemd/Docker deployment files, documentation, and Linux CI are present.
 
-The test inventory contains **87 GoogleTest cases** plus **2 CTest entries** for CLI
+The test inventory contains **99 GoogleTest cases** plus **2 CTest entries** for CLI
 validation and a process smoke/restart scenario.
 
 ## Statically reviewed
@@ -33,6 +33,12 @@ lengths, cancelled approval records, cancellation persistence, join resume state
 scheduler stop-before-start handling, completed-attempt recording on edge-budget
 failure, a GoogleTest name lookup collision, Boost discovery under CMake 3.31, and
 unclear failures for unavailable configured plugin directories.
+
+The release-hardening audit additionally corrected terminal checkpoint immutability,
+recovery pagination beyond one record page, concurrent-branch policy and shared step
+and edge budgets, branch deadline inheritance, plugin callback exception containment,
+and safe relative `$ref` resolution from the declaring schema document. Regression
+tests cover these failure paths and schema diagnostics.
 
 ## Tested on this development workstation
 

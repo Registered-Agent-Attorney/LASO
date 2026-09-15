@@ -5,6 +5,9 @@
 - Added optional JSON Schema contracts for node inputs and outputs.
 - Added shared schema validation for explicit `validator` nodes, safe local `$ref`
   loading, bounded schema/payload resources, and structured validation errors.
+- Hardened terminal-state recovery, concurrent branch policy and budget enforcement,
+  plugin exception boundaries, paginated recovery scans, and adversarial regression
+  coverage without changing the scheduler architecture.
 
 ## 0.2.0 — Framework Milestone 1 (in progress)
 

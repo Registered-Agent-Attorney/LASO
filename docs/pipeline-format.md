@@ -57,7 +57,10 @@ boundaries. A failed contract is a normal validation failure and follows the
 node's retry policy. `validator` nodes may set `schema` to run the same validator
 explicitly. Schemas are optional, so existing pipelines remain compatible.
 
-Only local files below an approved root are accepted. Remote `$ref` values and
-parent traversal are rejected. Local file references are canonicalized and
-symlink escapes are rejected. Schema documents and payloads are limited to 1 MiB,
-nesting is limited to 64 levels, and at most 64 referenced documents are loaded.
+Only local files below an approved root are accepted. Remote `$ref` values, absolute
+references, parent traversal and external reference cycles are rejected. Local file
+references are canonicalized from the declaring schema's directory and symlink
+escapes are rejected. Schema documents and payloads are limited to 1 MiB, nesting is
+limited to 64 levels, at most 64 referenced documents are loaded, and at most 256
+parsed schema documents are retained in the process cache. A cache limit of zero
+disables retention without changing validation behavior.

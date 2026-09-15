@@ -32,10 +32,10 @@ public:
       for (const auto &s : copy) {
         try {
           s->receive(e);
-        } catch (...) { /* Subscriber failures cannot roll back committed state. */
+        } catch (...) { // NOLINT(bugprone-empty-catch): committed state must remain durable.
         }
       }
-    } catch (...) { /* Durable events remain available for replay. */
+    } catch (...) { // NOLINT(bugprone-empty-catch): durable events remain available for replay.
     }
   }
 

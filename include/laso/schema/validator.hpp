@@ -8,10 +8,11 @@
 
 namespace laso {
 struct SchemaLimits {
-  std::size_t max_schema_bytes = 1024 * 1024;
-  std::size_t max_payload_bytes = 1024 * 1024;
+  std::size_t max_schema_bytes = std::size_t{1024} * 1024;
+  std::size_t max_payload_bytes = std::size_t{1024} * 1024;
   unsigned max_depth = 64;
   unsigned max_reference_documents = 64;
+  std::size_t max_cached_schemas = 256;
 };
 
 class SchemaValidator {
@@ -33,6 +34,6 @@ private:
   std::filesystem::path resolve_uri(const std::string &, const std::filesystem::path &) const;
   std::shared_ptr<const Loaded> load(const std::filesystem::path &) const;
   void inspect_schema(const Json &, const std::filesystem::path &, std::set<std::string> &,
-                      unsigned, unsigned &) const;
+                      std::set<std::string> &, unsigned, unsigned &) const;
 };
 } // namespace laso

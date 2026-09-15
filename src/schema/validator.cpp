@@ -5,6 +5,9 @@
 
 namespace laso {
 namespace {
+std::string bounded_text(const std::string &value, std::size_t maximum) {
+  return value.size() <= maximum ? value : value.substr(0, maximum);
+}
 bool remote(const std::string &ref) {
   return ref.rfind("http://", 0) == 0 || ref.rfind("https://", 0) == 0 ||
          ref.rfind("ftp://", 0) == 0 || ref.find("://") != std::string::npos;
@@ -26,7 +29,8 @@ public:
              const std::string &message) override {
     if (message_.empty()) {
       instance_ = instance.to_string();
-      message_ = message;
+      instance_ = bounded_text(instance_, 1024);
+      message_ = bounded_text(message, 512);
     }
   }
   std::string instance_, message_;
@@ -52,14 +56,19 @@ struct SchemaValidator::Loaded {
 
 SchemaValidator::SchemaValidator(std::vector<std::filesystem::path> roots, SchemaLimits limits)
     : limits_(limits) {
+  if (limits_.max_schema_bytes == 0 || limits_.max_payload_bytes == 0 || limits_.max_depth == 0 ||
+      limits_.max_reference_documents == 0)
+    throw Error(ErrorCode::Configuration, "Schema resource limits must be positive");
   if (roots.empty())
     roots.push_back(std::filesystem::current_path());
+  std::set<std::string> seen_roots;
   for (const auto &root : roots) {
     std::error_code ec;
     auto canonical = std::filesystem::weakly_canonical(root, ec);
     if (ec || !std::filesystem::is_directory(canonical))
       throw Error(ErrorCode::Configuration, "Schema root is not an existing directory");
-    roots_.push_back(std::move(canonical));
+    if (seen_roots.insert(canonical.generic_string()).second)
+      roots_.push_back(std::move(canonical));
   }
 }
 
@@ -84,28 +93,19 @@ std::filesystem::path SchemaValidator::resolve_root_reference(const std::string 
 
 std::filesystem::path SchemaValidator::resolve_uri(const std::string &reference,
                                                    const std::filesystem::path &base) const {
-  if (reference.empty() || remote(reference))
+  if (reference.empty())
+    return base;
+  if (remote(reference))
     throw Error(ErrorCode::Validation, "Remote schema references are forbidden");
   const auto hash = reference.find('#');
   const auto path_part = reference.substr(0, hash);
   if (path_part.empty())
     return base;
   std::filesystem::path requested(path_part);
-  if (traversal(requested))
-    throw Error(ErrorCode::Validation, "Schema references may not contain parent traversal");
+  if (requested.is_absolute() || traversal(requested))
+    throw Error(ErrorCode::Validation, "Schema references may not escape the allowed roots");
   std::error_code ec;
-  auto candidate = std::filesystem::weakly_canonical(
-      requested.is_absolute() ? requested : base.parent_path() / requested, ec);
-  if ((!std::filesystem::is_regular_file(candidate) || ec) && requested.is_absolute()) {
-    const auto relative = requested.relative_path();
-    for (const auto &root : roots_) {
-      auto rooted = std::filesystem::weakly_canonical(root / relative, ec);
-      if (!ec && std::filesystem::is_regular_file(rooted)) {
-        candidate = std::move(rooted);
-        break;
-      }
-    }
-  }
+  auto candidate = std::filesystem::weakly_canonical(base.parent_path() / requested, ec);
   if (ec || !std::filesystem::is_regular_file(candidate))
     throw Error(ErrorCode::Validation, "Referenced schema file is missing");
   bool allowed = false;
@@ -138,13 +138,16 @@ SchemaValidator::load(const std::filesystem::path &path) const {
   inspect_depth(document, 0, limits_.max_depth);
   auto loaded = std::make_shared<Loaded>(Loaded{path, std::move(document)});
   std::lock_guard lock(cache_mutex_);
-  auto [it, inserted] = cache_.emplace(key, loaded);
-  return inserted ? loaded : it->second;
+  if (auto it = cache_.find(key); it != cache_.end())
+    return it->second;
+  if (cache_.size() < limits_.max_cached_schemas)
+    cache_.emplace(key, loaded);
+  return loaded;
 }
 
 void SchemaValidator::inspect_schema(const Json &schema, const std::filesystem::path &base,
-                                     std::set<std::string> &seen, unsigned depth,
-                                     unsigned &documents) const {
+                                     std::set<std::string> &seen, std::set<std::string> &active,
+                                     unsigned depth, unsigned &documents) const {
   inspect_depth(schema, depth, limits_.max_depth);
   if (schema.is_object()) {
     if (schema.contains("$ref")) {
@@ -155,16 +158,26 @@ void SchemaValidator::inspect_schema(const Json &schema, const std::filesystem::
         throw Error(ErrorCode::Validation, "Remote schema references are forbidden");
       if (!ref.empty() && ref.front() != '#') {
         auto target = resolve_uri(ref, base);
-        if (seen.insert(target.generic_string()).second) {
+        const auto key = target.generic_string();
+        if (active.contains(key))
+          throw Error(ErrorCode::Validation, "Cyclic external schema reference is forbidden");
+        if (seen.insert(key).second) {
           if (++documents > limits_.max_reference_documents)
             throw Error(ErrorCode::Validation, "Schema reference limit exceeded");
-          inspect_schema(load(target)->document, target, seen, depth + 1, documents);
+          active.insert(key);
+          try {
+            inspect_schema(load(target)->document, target, seen, active, depth + 1, documents);
+          } catch (...) {
+            active.erase(key);
+            throw;
+          }
+          active.erase(key);
         }
       }
     }
     for (const auto &[key, child] : schema.items()) {
       (void)key;
-      inspect_schema(child, base, seen, depth + 1, documents);
+      inspect_schema(child, base, seen, active, depth + 1, documents);
     }
     if (schema.contains("type")) {
       static const std::set<std::string> types = {"null",   "boolean", "object", "array",
@@ -178,17 +191,23 @@ void SchemaValidator::inspect_schema(const Json &schema, const std::filesystem::
     }
   } else if (schema.is_array())
     for (const auto &child : schema)
-      inspect_schema(child, base, seen, depth + 1, documents);
+      inspect_schema(child, base, seen, active, depth + 1, documents);
 }
 
 void SchemaValidator::validate_declaration(const std::string &reference) const {
   auto root = resolve_root_reference(reference);
   std::set<std::string> seen{root.generic_string()};
+  std::set<std::string> active{root.generic_string()};
   unsigned documents = 1;
   auto loaded = load(root);
-  inspect_schema(loaded->document, root, seen, 0, documents);
-  auto loader = [this](const nlohmann::json_uri &uri, Json &value) {
-    auto path = resolve_uri(uri.path(), std::filesystem::path(uri.path()));
+  inspect_schema(loaded->document, root, seen, active, 0, documents);
+  auto loader = [this, root](const nlohmann::json_uri &uri, Json &value) {
+    if (!uri.scheme().empty() || !uri.authority().empty())
+      throw Error(ErrorCode::Validation, "Remote schema references are forbidden");
+    auto reference = uri.path();
+    if (reference.starts_with('/'))
+      reference.erase(0, 1);
+    auto path = resolve_uri(reference, root);
     value = load(path)->document;
   };
   try {
@@ -203,19 +222,25 @@ void SchemaValidator::validate(const std::string &reference, const Json &payload
                                const std::string &node_id, const std::string &direction) const {
   if (reference.empty())
     return;
-  if (payload.dump().size() > limits_.max_payload_bytes)
-    throw Error(ErrorCode::Validation, "Payload exceeds schema validation size limit",
-                {{"schema", reference}, {"node", node_id}, {"direction", direction}});
-  auto root = resolve_root_reference(reference);
-  std::set<std::string> seen{root.generic_string()};
-  unsigned documents = 1;
-  auto loaded = load(root);
-  inspect_schema(loaded->document, root, seen, 0, documents);
-  auto loader = [this](const nlohmann::json_uri &uri, Json &value) {
-    auto path = resolve_uri(uri.path(), std::filesystem::path(uri.path()));
-    value = load(path)->document;
-  };
   try {
+    if (payload.dump().size() > limits_.max_payload_bytes)
+      throw Error(ErrorCode::Validation, "Payload exceeds schema validation size limit");
+    inspect_depth(payload, 0, limits_.max_depth);
+    auto root = resolve_root_reference(reference);
+    std::set<std::string> seen{root.generic_string()};
+    std::set<std::string> active{root.generic_string()};
+    unsigned documents = 1;
+    auto loaded = load(root);
+    inspect_schema(loaded->document, root, seen, active, 0, documents);
+    auto loader = [this, root](const nlohmann::json_uri &uri, Json &value) {
+      if (!uri.scheme().empty() || !uri.authority().empty())
+        throw Error(ErrorCode::Validation, "Remote schema references are forbidden");
+      auto reference = uri.path();
+      if (reference.starts_with('/'))
+        reference.erase(0, 1);
+      auto path = resolve_uri(reference, root);
+      value = load(path)->document;
+    };
     nlohmann::json_schema::json_validator validator(loader);
     validator.set_root_schema(loaded->document);
     Handler handler;
@@ -227,11 +252,20 @@ void SchemaValidator::validate(const std::string &reference, const Json &payload
                    {"direction", direction},
                    {"instance_path", handler.instance_},
                    {"message", handler.message_}});
-  } catch (const Error &) {
-    throw;
+  } catch (const Error &error) {
+    Json details{{"schema", bounded_text(reference, 512)},
+                 {"node", bounded_text(node_id, 128)},
+                 {"direction", bounded_text(direction, 32)}};
+    if (error.details.is_object())
+      for (const auto &[key, value] : error.details.items())
+        if (key == "instance_path" || key == "schema_path" || key == "message")
+          details[key] = value;
+    throw Error(ErrorCode::Validation, error.what(), std::move(details));
   } catch (const std::exception &) {
     throw Error(ErrorCode::Validation, "Schema validation failed",
-                {{"schema", reference}, {"node", node_id}, {"direction", direction}});
+                {{"schema", bounded_text(reference, 512)},
+                 {"node", bounded_text(node_id, 128)},
+                 {"direction", bounded_text(direction, 32)}});
   }
 }
 } // namespace laso

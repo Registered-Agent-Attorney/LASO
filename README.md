@@ -180,8 +180,9 @@ daemon in the foreground as an unprivileged service account.
 - Approval waits and history survive restart. In-flight external effects are not
   exactly once; an explicit resume may replay an unfinished node. Operators must
   review interrupted runs. Automatic general crash recovery is deferred.
-- Validators currently check equality of one top-level JSON field, not general
-  JSON Schema. Prompt values are inline text, not automatically read from files.
+- Validator nodes retain the legacy field/value routing mode when no `schema` is
+  declared; declared schemas use the shared local JSON Schema engine. Prompt values
+  are inline text, not automatically read from files.
 - Mock is the default built-in provider. An optional loopback-only OpenAI-compatible
   adapter can call an already-running local model service. No model serving, remote
   adapters, streaming, secret persistence, sandboxing, authentication platform, or

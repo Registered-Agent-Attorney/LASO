@@ -95,9 +95,10 @@ Task<ModelResponse> LocalOpenAICompatibleProvider::generate(const ModelRequest &
     context.check();
     if (http_response.result() != http::status::ok)
       throw Error(ErrorCode::Provider, "Local model service returned an unsuccessful response");
-    boost::system::error_code ignored;
-    stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
-    if (ignored && ignored != asio::error::not_connected)
+    boost::system::error_code shutdown_error;
+    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via shutdown_error.
+    stream.socket().shutdown(tcp::socket::shutdown_both, shutdown_error);
+    if (shutdown_error && shutdown_error != asio::error::not_connected)
       throw Error(ErrorCode::Provider, "Local model connection did not close cleanly");
     co_return ModelResponse{response_payload(Json::parse(http_response.body())), request.model,
                             "local-openai"};

@@ -60,7 +60,7 @@ required by the project.
 - Declarative typed YAML parsing, duplicate/unknown-field detection, graph and
   reference checks, conditional routing and finite cycle/step budgets.
 - Common interfaces for all twelve node types, registered deterministic functions,
-  mock models, tools, equality validators, durable approvals, branch/join tokens,
+  mock models, tools, schema validators, durable approvals, branch/join tokens,
   bounded loops and registered subpipelines.
 - Async execution across runs with explicit run/node/model/tool limits, bounded
   retry attempts/delays, cooperative timeouts and stop-token cancellation.
@@ -123,12 +123,13 @@ ASan/UBSan. Optional TSan is a separate CMake configuration. The GitHub Actions 
 
 ## Known limitations and deferred work
 
-This is a single-process SQLite skeleton. Branches are scheduled sequentially
-within a run; concurrency exists across runs. Cancellation is cooperative; a
+This is a single-process SQLite skeleton. Branches execute concurrently within
+the bounded run scheduler. Cancellation is cooperative; a
 noncooperative native plugin can block or crash the process. In-flight effects
 are not exactly once, child creation is not one transaction with its parent, and
-general automatic crash replay is deferred. Validation checks simple field equality,
-not full JSON Schema. Only Mock models and the native tool adapter ship. Durable
+general automatic crash replay is deferred. JSON Schema validation uses the pinned
+Draft 7 library with local-root and resource-limit enforcement; remote references
+and external recursive reference cycles are rejected. Only Mock models and the native tool adapter ship. Durable
 cron schedules, remote model/storage adapters, streaming, distributed execution,
 authentication implementations and plugin sandboxing belong to later releases.
 Deployment validation may expose environment-specific issues outside the executed

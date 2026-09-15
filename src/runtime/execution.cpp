@@ -3,11 +3,47 @@
 #include <laso/runtime/runtime.hpp>
 
 namespace laso {
+namespace {
+std::string validation_detail(const Error &error) {
+  if (error.code != ErrorCode::Validation || !error.details.is_object())
+    return {};
+  auto bounded = [](const Json &value, std::size_t maximum) {
+    if (!value.is_string())
+      return std::string{};
+    auto result = value.get<std::string>();
+    if (result.size() > maximum)
+      result.resize(maximum);
+    return result;
+  };
+  std::string result = error.what();
+  const auto schema = bounded(error.details.value("schema", Json{}), 512);
+  const auto direction = bounded(error.details.value("direction", Json{}), 32);
+  const auto instance = bounded(error.details.value("instance_path", Json{}), 1024);
+  const auto schema_path = bounded(error.details.value("schema_path", Json{}), 1024);
+  const auto message = bounded(error.details.value("message", Json{}), 512);
+  if (!schema.empty())
+    result += " (schema=" + schema;
+  else
+    result += " (";
+  if (!direction.empty())
+    result += ", direction=" + direction;
+  if (!instance.empty())
+    result += ", instance_path=" + instance;
+  if (!schema_path.empty())
+    result += ", schema_path=" + schema_path;
+  if (!message.empty())
+    result += ", message=" + message;
+  result += ")";
+  return result;
+}
+} // namespace
+
 struct Runtime::ParallelState {
-  explicit ParallelState(std::size_t width) : outputs(width) {}
+  ParallelState(std::size_t width, unsigned initial_steps) : outputs(width), steps(initial_steps) {}
   std::mutex mutex;
   std::vector<std::optional<Message>> outputs;
   std::size_t completed = 0;
+  unsigned steps = 0;
   bool failed = false;
   std::string error;
   ErrorCode code = ErrorCode::Execution;
@@ -16,7 +52,8 @@ struct Runtime::ParallelState {
 
 Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, ExecutionToken token,
                                    std::shared_ptr<ParallelState> state,
-                                   std::shared_ptr<AsyncLimiter> run_nodes) {
+                                   std::shared_ptr<AsyncLimiter> run_nodes,
+                                   std::chrono::steady_clock::time_point pipeline_deadline) {
   try {
     Run branch;
     branch.id = token.message.run_id;
@@ -37,28 +74,42 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
         ++state->completed;
         co_return;
       }
-      ExecutionContext context{branch.id, branch.pipeline_id, definition.id,
-                               state->stop.get_token(),
-                               std::chrono::steady_clock::now() + definition.timeout.timeout};
-      context.visit = branch.node_visits[definition.id] + 1;
-      if (definition.type == "tool") {
-        const auto metadata = deps_.tools.get(definition.binding)->metadata();
-        context.deadline =
-            std::min(context.deadline, std::chrono::steady_clock::now() + metadata.timeout);
-      } else if (definition.type == "agent") {
-        const auto binding = config_.models.find(definition.binding);
-        if (binding == config_.models.end())
-          throw Error(ErrorCode::Provider, "Logical model not configured");
-        context.deadline =
-            std::min(context.deadline,
-                     std::chrono::steady_clock::now() +
-                         deps_.providers.get(binding->second.provider)->metadata().timeout);
+      {
+        std::lock_guard lock(state->mutex);
+        if (state->steps >= pipeline.max_steps)
+          throw Error(ErrorCode::Execution, "Pipeline step limit exceeded");
+        ++state->steps;
       }
+      ExecutionContext context{branch.id, branch.pipeline_id, definition.id,
+                               state->stop.get_token(), pipeline_deadline};
+      context.check();
+      const auto policy = permission(definition, branch);
+      if (policy.decision == PolicyDecision::Deny)
+        throw Error(ErrorCode::Policy, "Operation denied by policy");
+      if (policy.decision == PolicyDecision::RequireApproval || definition.type == "approval")
+        throw Error(ErrorCode::Policy, "Approval is not supported inside a concurrent branch");
+      context.visit = branch.node_visits[definition.id] + 1;
       auto node = make_node(definition);
       bool succeeded = false;
       for (unsigned attempt_number = 1; attempt_number <= definition.retry.max_attempts;
            ++attempt_number) {
+        const auto started = std::chrono::steady_clock::now();
         context.attempt = attempt_number;
+        context.deadline = std::min(pipeline_deadline,
+                                    std::chrono::steady_clock::now() + definition.timeout.timeout);
+        if (definition.type == "tool")
+          context.deadline = std::min(context.deadline,
+                                      std::chrono::steady_clock::now() +
+                                          deps_.tools.get(definition.binding)->metadata().timeout);
+        if (definition.type == "agent") {
+          const auto binding = config_.models.find(definition.binding);
+          if (binding == config_.models.end())
+            throw Error(ErrorCode::Provider, "Logical model not configured");
+          context.deadline =
+              std::min(context.deadline,
+                       std::chrono::steady_clock::now() +
+                           deps_.providers.get(binding->second.provider)->metadata().timeout);
+        }
         bool retry = false;
         NodeExecution attempt;
         attempt.run_id = branch.id;
@@ -75,6 +126,10 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           deps_.schemas.validate(definition.output_schema, result.message.payload, definition.id,
                                  "output");
           attempt.state = NodeState::Completed;
+          attempt.finished_at = timestamp();
+          attempt.duration_ms =
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                  .count();
           ++branch.node_visits[definition.id];
           auto parent = branch.message.id;
           branch.message = std::move(result.message);
@@ -95,17 +150,26 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
               edges.push_back(&edge);
           if (edges.size() != 1)
             throw Error(ErrorCode::Execution, "Parallel branch has ambiguous routing");
-          branch.active_node = edges.front()->to;
+          const auto &edge = *edges.front();
+          const auto key = edge.from + "->" + edge.to;
+          if (edge.max_iterations && ++branch.edge_visits[key] > edge.max_iterations)
+            throw Error(ErrorCode::Execution, "Edge iteration limit exceeded");
+          branch.active_node = edge.to;
           succeeded = true;
           break;
         } catch (const Error &error) {
           attempt.state = error.code == ErrorCode::Cancellation ? NodeState::Cancelled
                           : error.code == ErrorCode::Timeout    ? NodeState::TimedOut
                                                                 : NodeState::Failed;
+          const auto detail = validation_detail(error);
           attempt.error = attempt.state == NodeState::Cancelled  ? "Node cancelled"
                           : attempt.state == NodeState::TimedOut ? "Node deadline exceeded"
-                          : error.code == ErrorCode::Validation  ? "Schema validation failed"
-                                                                 : "Node execution failed";
+                          : detail.empty()                       ? "Node execution failed"
+                                                                 : detail;
+          attempt.finished_at = timestamp();
+          attempt.duration_ms =
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                  .count();
           deps_.storage.commit({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
           if (attempt.state == NodeState::Cancelled || attempt.state == NodeState::TimedOut ||
               attempt_number == definition.retry.max_attempts)
@@ -140,18 +204,21 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
 
 Task<void> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipeline,
                                      std::shared_ptr<AsyncLimiter> run_nodes,
-                                     std::stop_token parent) {
+                                     std::stop_token parent,
+                                     std::chrono::steady_clock::time_point pipeline_deadline) {
   std::vector<ExecutionToken> tokens;
   tokens.swap(run.ready);
-  auto state = std::make_shared<ParallelState>(tokens.size());
+  auto state = std::make_shared<ParallelState>(tokens.size(), run.steps);
   std::stop_callback parent_stop(parent, [state] { state->stop.request_stop(); });
   for (auto &token : tokens)
-    asio::co_spawn(io_, execute_branch(pipeline, std::move(token), state, run_nodes),
+    asio::co_spawn(io_,
+                   execute_branch(pipeline, std::move(token), state, run_nodes, pipeline_deadline),
                    asio::detached);
   while (true) {
     {
       std::lock_guard lock(state->mutex);
       if (state->completed == state->outputs.size()) {
+        run.steps = state->steps;
         if (state->failed)
           throw Error(state->code, state->error);
         break;
@@ -298,17 +365,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
             throw Error(ErrorCode::Execution, "Node result exceeds 1 MiB");
         } catch (const Error &e) {
           failure = e.code;
-          if (e.code == ErrorCode::Validation && e.details.is_object()) {
-            failure_detail = e.what();
-            if (e.details.contains("schema"))
-              failure_detail += " (schema=" + e.details.at("schema").get<std::string>();
-            if (e.details.contains("direction"))
-              failure_detail += ", direction=" + e.details.at("direction").get<std::string>();
-            if (e.details.contains("instance_path"))
-              failure_detail +=
-                  ", instance_path=" + e.details.at("instance_path").get<std::string>();
-            failure_detail += ")";
-          }
+          if (e.code == ErrorCode::Validation)
+            failure_detail = validation_detail(e);
         } catch (...) {
           failure = ErrorCode::Execution;
         }
@@ -369,8 +427,13 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
               // Approval branches need the existing durable pause/resume protocol.
               continuing = next_ready(r);
             } else {
-              co_await execute_parallel(r, pipeline, run_nodes, stop);
+              co_await execute_parallel(r, pipeline, run_nodes, stop, deadline);
               result.message = r.message;
+              for (auto &record : records)
+                if (record.kind == RecordKind::Message && record.id == r.message.id) {
+                  record.value = Json(r.message);
+                  break;
+                }
             }
           } else {
             continuing = advance(r, pipeline, definition, result.condition);

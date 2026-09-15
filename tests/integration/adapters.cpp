@@ -264,6 +264,48 @@ TEST(Storage, PersistedCancellationSurvivesRestart) {
   Service s(io, c);
   EXPECT_EQ(s.get(RecordKind::Run, r.id).get<laso::Run>().state, RunState::Cancelled);
 }
+TEST(Storage, RecoveryDoesNotRewriteTerminalRuns) {
+  TemporaryDirectory dir;
+  auto c = config(dir.path);
+  laso::Run r;
+  r.state = RunState::Completed;
+  r.cancellation_requested = true;
+  r.pipeline_id = "completed";
+  r.definition = fixture("hello-pipeline");
+  {
+    SQLiteStorage storage(c.db_path);
+    storage.commit({{RecordKind::Run, r.id, r.id, Json(r)}});
+  }
+  asio::io_context io;
+  Service service(io, c);
+  EXPECT_EQ(service.get(RecordKind::Run, r.id).get<laso::Run>().state, RunState::Completed);
+}
+TEST(Storage, RecoveryScansAttemptsBeyondOnePage) {
+  TemporaryDirectory dir;
+  auto c = config(dir.path);
+  laso::Run r;
+  r.state = RunState::Running;
+  r.pipeline_id = "recovery";
+  r.definition = fixture("hello-pipeline");
+  std::vector<Record> records{{RecordKind::Run, r.id, r.id, Json(r)}};
+  std::string interrupted;
+  for (unsigned i = 0; i < 10001; ++i) {
+    NodeExecution attempt;
+    attempt.run_id = r.id;
+    attempt.node_id = "action";
+    attempt.state = i == 10000 ? NodeState::Running : NodeState::Completed;
+    if (i == 10000)
+      interrupted = attempt.id;
+    records.push_back({RecordKind::Attempt, attempt.id, r.id, Json(attempt)});
+  }
+  {
+    SQLiteStorage storage(c.db_path);
+    storage.commit(records);
+  }
+  asio::io_context io;
+  Service service(io, c);
+  EXPECT_EQ(service.get(RecordKind::Attempt, interrupted).at("state"), "Failed");
+}
 TEST(Api, PaginationBounds) {
   TemporaryDirectory dir;
   asio::io_context io;

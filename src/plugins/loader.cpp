@@ -23,8 +23,16 @@ struct Library {
   laso_plugin_handle handle = nullptr;
   void (*shutdown)(laso_plugin_handle) = nullptr;
   ~Library() {
-    if (shutdown && handle)
-      shutdown(handle);
+    if (shutdown && handle) {
+      try {
+        shutdown(handle);
+        // NOLINTNEXTLINE(bugprone-empty-catch): plugin shutdown cannot throw from this RAII path.
+      } catch (
+          ...) { // NOLINT(bugprone-empty-catch): shutdown must not throw from the RAII destructor.
+        // A plugin must not throw across the C ABI; destruction is noexcept even
+        // when a non-conforming plugin violates that contract.
+      }
+    }
     if (library)
       dlclose(library);
   }
@@ -109,7 +117,7 @@ int32_t should_stop(void *opaque) noexcept {
 int32_t write_json(void *opaque, const char *bytes, uint64_t length) noexcept {
   auto &call = *static_cast<Call *>(opaque);
   try {
-    if (!bytes || length > 1024 * 1024 || call.written) {
+    if (!bytes || length > std::uint64_t{1024} * 1024 || call.written) {
       call.failed = true;
       return LASO_BUFFER_LIMIT;
     }
@@ -129,25 +137,37 @@ public:
     return registration_.metadata;
   }
   Task<ToolResult> invoke(const ToolRequest &r, ToolContext &c) override {
-    c.execution.check();
-    // ABI v1 callbacks are short, cooperative local calls, serialized per component.
-    // Remote/nonblocking provider adapters belong in a future async ABI revision.
-    std::unique_lock lock(mutex_, std::try_to_lock);
-    if (!lock.owns_lock())
-      throw Error(ErrorCode::Tool, "Plugin component is busy");
-    Call call{c.execution, {}, false, false};
-    laso_call_context context{sizeof(laso_call_context), LASO_PLUGIN_ABI_VERSION, &call,
-                              should_stop, write_json};
-    auto input = r.input.dump();
-    auto status =
-        registration_.invoke(registration_.instance, input.data(), input.size(), &context);
-    c.execution.check();
-    if (status != LASO_OK || call.failed || !call.written)
+    try {
+      c.execution.check();
+      // ABI v1 callbacks are short, cooperative local calls, serialized per component.
+      // Remote/nonblocking provider adapters belong in a future async ABI revision.
+      std::unique_lock lock(mutex_, std::try_to_lock);
+      if (!lock.owns_lock())
+        throw Error(ErrorCode::Tool, "Plugin component is busy");
+      Call call{c.execution, {}, false, false};
+      laso_call_context context{sizeof(laso_call_context), LASO_PLUGIN_ABI_VERSION, &call,
+                                should_stop, write_json};
+      auto input = r.input.dump();
+      if (input.size() > std::size_t{1024} * 1024)
+        throw Error(ErrorCode::Tool, "Plugin input exceeds limit");
+      int32_t status = LASO_FAILED;
+      try {
+        status = registration_.invoke(registration_.instance, input.data(), input.size(), &context);
+      } catch (...) {
+        throw Error(ErrorCode::Tool, "Plugin invocation failed");
+      }
+      c.execution.check();
+      if (status != LASO_OK || call.failed || !call.written)
+        throw Error(ErrorCode::Tool, "Plugin invocation failed");
+      auto output = Json::parse(call.output, nullptr, false);
+      if (output.is_discarded())
+        throw Error(ErrorCode::Tool, "Plugin returned invalid JSON");
+      co_return ToolResult{std::move(output)};
+    } catch (const Error &) {
+      throw;
+    } catch (...) {
       throw Error(ErrorCode::Tool, "Plugin invocation failed");
-    auto output = Json::parse(call.output, nullptr, false);
-    if (output.is_discarded())
-      throw Error(ErrorCode::Tool, "Plugin returned invalid JSON");
-    co_return ToolResult{std::move(output)};
+    }
   }
 
 private:
@@ -185,41 +205,53 @@ public:
     }
   }
   Task<ModelResponse> generate(const ModelRequest &request, ExecutionContext &execution) override {
-    execution.check();
-    std::unique_lock lock(mutex_, std::try_to_lock);
-    if (!lock.owns_lock())
-      throw Error(ErrorCode::Provider, "Plugin provider is busy");
-    Call call{execution, {}, false, false};
-    laso_call_context context{sizeof(laso_call_context), LASO_PLUGIN_ABI_VERSION, &call,
-                              should_stop, write_json};
-    const Json input{{"operation", "generate"},
-                     {"logical_model", registration_.metadata.name},
-                     {"model", request.model},
-                     {"prompt", request.prompt},
-                     {"input", request.input},
-                     {"options", request.options},
-                     {"timeout_ms", std::chrono::duration_cast<Milliseconds>(
-                                        execution.deadline - std::chrono::steady_clock::now())
-                                        .count()}};
-    const auto wire = input.dump();
-    const auto status =
-        registration_.invoke(registration_.instance, wire.data(), wire.size(), &context);
-    execution.check();
-    if (status != LASO_OK || call.failed || !call.written)
+    try {
+      execution.check();
+      std::unique_lock lock(mutex_, std::try_to_lock);
+      if (!lock.owns_lock())
+        throw Error(ErrorCode::Provider, "Plugin provider is busy");
+      Call call{execution, {}, false, false};
+      laso_call_context context{sizeof(laso_call_context), LASO_PLUGIN_ABI_VERSION, &call,
+                                should_stop, write_json};
+      const Json input{{"operation", "generate"},
+                       {"logical_model", registration_.metadata.name},
+                       {"model", request.model},
+                       {"prompt", request.prompt},
+                       {"input", request.input},
+                       {"options", request.options},
+                       {"timeout_ms", std::chrono::duration_cast<Milliseconds>(
+                                          execution.deadline - std::chrono::steady_clock::now())
+                                          .count()}};
+      const auto wire = input.dump();
+      if (wire.size() > std::size_t{1024} * 1024)
+        throw Error(ErrorCode::Provider, "Plugin provider input exceeds limit");
+      int32_t status = LASO_FAILED;
+      try {
+        status = registration_.invoke(registration_.instance, wire.data(), wire.size(), &context);
+      } catch (...) {
+        throw Error(ErrorCode::Provider, "Plugin provider generation failed");
+      }
+      execution.check();
+      if (status != LASO_OK || call.failed || !call.written)
+        throw Error(ErrorCode::Provider, "Plugin provider generation failed");
+      const auto response = Json::parse(call.output, nullptr, false);
+      if (response.is_discarded() || !response.is_object())
+        throw Error(ErrorCode::Provider, "Plugin provider returned invalid JSON");
+      if (!response.value("ok", true))
+        throw Error(ErrorCode::Provider, "Plugin provider reported a generation failure");
+      if (!response.contains("output"))
+        throw Error(ErrorCode::Provider, "Plugin provider response has no output");
+      const auto model = response.value("model", request.model);
+      const auto provider = response.value("provider", registration_.metadata.name);
+      if ((response.contains("model") && !response.at("model").is_string()) ||
+          (response.contains("provider") && !response.at("provider").is_string()))
+        throw Error(ErrorCode::Provider, "Plugin provider response has invalid fields");
+      co_return ModelResponse{response.at("output"), model, provider};
+    } catch (const Error &) {
+      throw;
+    } catch (...) {
       throw Error(ErrorCode::Provider, "Plugin provider generation failed");
-    const auto response = Json::parse(call.output, nullptr, false);
-    if (response.is_discarded() || !response.is_object())
-      throw Error(ErrorCode::Provider, "Plugin provider returned invalid JSON");
-    if (!response.value("ok", true))
-      throw Error(ErrorCode::Provider, "Plugin provider reported a generation failure");
-    if (!response.contains("output"))
-      throw Error(ErrorCode::Provider, "Plugin provider response has no output");
-    const auto model = response.value("model", request.model);
-    const auto provider = response.value("provider", registration_.metadata.name);
-    if ((response.contains("model") && !response.at("model").is_string()) ||
-        (response.contains("provider") && !response.at("provider").is_string()))
-      throw Error(ErrorCode::Provider, "Plugin provider response has invalid fields");
-    co_return ModelResponse{response.at("output"), model, provider};
+    }
   }
 
 private:
@@ -316,7 +348,10 @@ void PluginLoader::load(const std::filesystem::path &path) {
   } catch (...) {
     info.error = "Plugin load failed";
   }
-  log_diagnostic(info.loaded ? "plugin.loaded" : "plugin.failed", Json(info));
+  // PluginInfo.path and exception text may contain deployment-specific details;
+  // keep them available to the API but out of the default diagnostic log.
+  log_diagnostic(info.loaded ? "plugin.loaded" : "plugin.failed",
+                 {{"plugin", info.name}, {"loaded", info.loaded}, {"abi", info.abi}});
   plugins_.push_back(std::move(info));
 }
 } // namespace laso
