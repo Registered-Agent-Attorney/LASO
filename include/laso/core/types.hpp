@@ -280,6 +280,9 @@ struct Event {
   std::string id = uuid(), run_id, pipeline_id, node_id, type, time = timestamp();
   std::string causation_id, root_event_id;
   unsigned trigger_depth = 0;
+  std::string source_id, source_plugin, source_component, external_event_id, occurred_at,
+      ingested_at;
+  Json payload = Json::object();
   Json metadata = Json::object();
 };
 inline void to_json(Json &j, const Event &e) {
@@ -292,6 +295,13 @@ inline void to_json(Json &j, const Event &e) {
        {"causation_id", e.causation_id},
        {"root_event_id", e.root_event_id},
        {"trigger_depth", e.trigger_depth},
+       {"source_id", e.source_id},
+       {"source_plugin", e.source_plugin},
+       {"source_component", e.source_component},
+       {"external_event_id", e.external_event_id},
+       {"occurred_at", e.occurred_at},
+       {"ingested_at", e.ingested_at},
+       {"payload", e.payload},
        {"metadata", e.metadata}};
 }
 inline void from_json(const Json &j, Event &e) {
@@ -304,6 +314,13 @@ inline void from_json(const Json &j, Event &e) {
   e.causation_id = j.value("causation_id", std::string{});
   e.root_event_id = j.value("root_event_id", std::string{});
   e.trigger_depth = j.value("trigger_depth", 0U);
+  e.source_id = j.value("source_id", std::string{});
+  e.source_plugin = j.value("source_plugin", std::string{});
+  e.source_component = j.value("source_component", std::string{});
+  e.external_event_id = j.value("external_event_id", std::string{});
+  e.occurred_at = j.value("occurred_at", std::string{});
+  e.ingested_at = j.value("ingested_at", std::string{});
+  e.payload = j.value("payload", Json::object());
   e.metadata = j.value("metadata", Json::object());
 }
 struct Artifact {

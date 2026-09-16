@@ -1,7 +1,7 @@
 # Architecture and ownership
 
 The public API is C++20. The shared-library extension boundary is C. The framework
-version (0.1.0), YAML format (1), SQLite schema (2), and plugin ABI (1) are distinct.
+version (0.1.0), YAML format (1), SQLite schema (3), and plugin ABI (1) are distinct.
 
 | Target | Responsibility and dependencies |
 |---|---|
@@ -9,7 +9,7 @@ version (0.1.0), YAML format (1), SQLite schema (2), and plugin ABI (1) are dist
 | `laso_storage` | Backend-neutral storage factory and `Storage` boundary |
 | `laso_storage_sqlite` | Native SQLite C API behind `Storage`, transactional checkpoints |
 | `laso_storage_postgres` | Optional libpqxx backend behind `Storage`, transactional checkpoints |
-| `laso_plugin_loader` | Linux dynamic loader and C adapters for tools and model providers |
+| `laso_plugin_loader` | Linux dynamic loader and C adapters for tools, model providers, and event sources |
 | `laso_runtime` | Async node execution, state transitions, durable scheduling and checkpoint decisions |
 | `laso_application` | Owns dependencies, registration, recovery inspection and shared services |
 | `laso_api` | Versioned JSON routes and Boost.Beast asynchronous HTTP |
@@ -102,3 +102,11 @@ Event triggers match an event type and optional scalar metadata fields. Delivery
 records keyed by `trigger_id|event_id` provide restart deduplication. Trigger depth
 and pending delivery limits bound event loops and storms. See [scheduling](scheduling.md)
 for the supported policies and API/CLI surface.
+
+Native event-source plugins use the same stable C ABI and are loaded only from
+explicit directories. Their lifecycle callbacks submit bounded JSON through a
+thread-safe host callback; the host assigns source identity, validates optional
+payload schemas, durably claims external IDs, and publishes ordinary Events only
+after persistence. Plugin shutdown drains ingress before library unload. Event
+sources never create runs directly, so existing trigger, policy, provenance,
+concurrency, and recovery paths remain authoritative. See [event sources](event-sources.md).

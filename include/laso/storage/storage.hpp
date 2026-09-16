@@ -17,7 +17,9 @@ enum class RecordKind {
   Schedule,
   Trigger,
   ScheduleOccurrence,
-  TriggerDelivery
+  TriggerDelivery,
+  EventSource,
+  ExternalEventClaim
 };
 struct Record {
   RecordKind kind;
@@ -30,8 +32,10 @@ public:
   // An entire checkpoint commits atomically, or none of it does.
   virtual void commit(const std::vector<Record> &records) = 0;
   // Atomically inserts a durable claim.  An existing id is never overwritten.
-  // This is used for schedule occurrences and event-trigger deliveries.
-  virtual bool claim(const Record &record) = 0;
+  // This is used for schedule occurrences, event-trigger deliveries, and
+  // external event identities. Associated records are inserted in the same
+  // transaction only when the claim is new.
+  virtual bool claim(const Record &record, const std::vector<Record> &associated = {}) = 0;
   virtual Json get(RecordKind kind, const std::string &id) const = 0;
   virtual std::vector<Json> list(RecordKind kind, const std::string &run_id = "",
                                  std::size_t limit = 1000, std::size_t offset = 0) const = 0;
@@ -45,7 +49,7 @@ public:
   SQLiteStorage(const SQLiteStorage &) = delete;
   SQLiteStorage &operator=(const SQLiteStorage &) = delete;
   void commit(const std::vector<Record> &) override;
-  bool claim(const Record &) override;
+  bool claim(const Record &, const std::vector<Record> &associated = {}) override;
   Json get(RecordKind, const std::string &) const override;
   std::vector<Json> list(RecordKind, const std::string &run_id = "", std::size_t limit = 1000,
                          std::size_t offset = 0) const override;

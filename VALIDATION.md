@@ -7,16 +7,19 @@ directory on a remote Ubuntu 24.04.5 LTS (x86-64) host.
 ## Implemented
 
 C++20 source, public headers, CMake targets, native C plugin SDK and examples,
-SQLite persistence, runtime, API/CLI, policies, scheduling and artifact interfaces,
-tests, systemd/Docker deployment files, documentation, and Linux CI are present.
+SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress,
+and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
+Linux CI are present.
 
-The test inventory contains **135 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario, for **137 CTest entries**. Composition and
-storage coverage includes
+The test inventory contains **147 GoogleTest cases** plus **2 CTest entries** for CLI
+validation and a process smoke/restart scenario, for **149 CTest entries**. Composition,
+storage, and event-ingress coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
 run inspection, backend conformance, pagination, rollback, concurrent persistence,
-and PostgreSQL runtime/reopen behavior.
+PostgreSQL runtime/reopen behavior, event-source ABI/lifecycle, bounded host ingress,
+source schema validation, durable external-event deduplication, source-state restart,
+and offline plugin-to-trigger-to-pipeline execution.
 
 ## Statically reviewed
 
@@ -30,6 +33,9 @@ and PostgreSQL runtime/reopen behavior.
   finite edge/loop/retry limits, join state, and subpipeline waits were reviewed.
 - HTTP isolation and limits, loopback defaults, policy checks, error/log contents,
   and deployment configuration were reviewed.
+- Event-source lifecycle isolation, thread-safe host emission, source identity checks,
+  bounded ingress, durable external-event claims, callback shutdown behavior, and
+  trigger provenance/depth integration were reviewed.
 - Ubuntu GCC/Clang, Debian 13, PostgreSQL, clang-tidy, formatting, and ASan/UBSan
   CI jobs are defined in `.github/workflows/linux.yml`.
 
@@ -50,7 +56,7 @@ includes nested A → B → C execution and child output-contract failure propag
 
 | Check | Result |
 |---|---|
-| clang-format 18.1.8, `--dry-run --Werror` | PASS: 48 C/C++ files |
+| clang-format 18.1.8, `--dry-run --Werror` | PASS: all discovered C/C++ files |
 | CMake source paths | PASS: all referenced source files present |
 | LASO include resolution and documentation links | PASS |
 | Safe YAML/configuration document scan | PASS: 13 documents |
@@ -66,12 +72,12 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 137/137** |
-| GCC Release CTest suite | **PASS: 137/137** |
-| Clang Debug CTest suite | **PASS: 137/137** |
-| Clang Release CTest suite | **PASS: 137/137** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 137/137** |
-| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 137/137; all PostgreSQL cases executed against isolated PostgreSQL 16** |
+| GCC Debug CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| GCC Release CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Debug CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Release CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 149/149; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
@@ -80,7 +86,7 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
 | CLI and process restart smoke tests | **PASS** |
-| Offline shipped examples | **PASS: deterministic, schema, approval, plugin, and composition examples; optional local-openai not run** |
+| Offline shipped examples | **PASS: all shipped offline pipeline definitions validated; event-source plugin → durable event trigger → completed run exercised; optional local-openai not run** |
 | HTTP health/run integration tests | **PASS** |
 | valid, invalid, incompatible, and symlinked `.so` plugin tests | **PASS** |
 | Loopback-only local model provider and GPU inference | **PASS: completed LASO agent run with GPU memory allocation and active utilization observed** |
@@ -95,7 +101,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **Workflow configured for Ubuntu GCC/Clang, Debian, ASan/UBSan, and PostgreSQL service jobs; public status is authoritative for each pushed commit** |
+| GitHub Actions execution | **Workflow includes event-source coverage in the full suite plus Ubuntu GCC/Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL 16 service jobs; public status is authoritative for the pushed commit** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating

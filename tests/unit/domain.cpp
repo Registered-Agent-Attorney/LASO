@@ -1,4 +1,5 @@
 #include "../support.hpp"
+#include <fstream>
 #include <laso/policies/policy.hpp>
 #include <laso_plugin.h>
 #include <type_traits>
@@ -79,6 +80,18 @@ TEST(Configuration, RejectsUnsupportedStorageBackend) {
   EXPECT_THROW(c.validate(), Error);
   c.storage_backend = "sqlite";
   EXPECT_NO_THROW(c.validate());
+}
+TEST(Configuration, ParsesDeclarativeEventSource) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "laso.yaml";
+  std::ofstream(path) << "event_sources:\n  offline:\n    plugin: example-event-source\n"
+                         "    component: example-event\n    enabled: true\n    config:\n"
+                         "      mode: once\n";
+  const auto c = load_config(path);
+  ASSERT_EQ(c.event_sources.size(), 1U);
+  EXPECT_EQ(c.event_sources.at("offline").plugin, "example-event-source");
+  EXPECT_TRUE(c.event_sources.at("offline").enabled);
+  EXPECT_EQ(c.event_sources.at("offline").config.at("mode"), "once");
 }
 TEST(Pipeline, RejectsUnboundedCycle) {
   auto yaml = fixture("bounded-loop");

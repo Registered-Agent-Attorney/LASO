@@ -86,11 +86,23 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {200, service_.plugins()};
   std::smatch match;
   static const std::regex route_pattern(
-      "/api/v1/(pipelines|runs|approvals|schedules|triggers)(?:/([A-Za-z0-9_.@-]{1,128}))?(?:/"
+      "/api/v1/(pipelines|runs|approvals|schedules|triggers|event-sources)(?:/"
+      "([A-Za-z0-9_.@-]{1,128}))?(?:/"
       "(runs|cancel|resume|events|attempts|messages|approve|reject|enable|disable))?");
   if (!std::regex_match(target, match, route_pattern))
     return {404, {{"error", "Endpoint not found"}}};
   auto collection = match[1].str(), id = match[2].str(), action = match[3].str();
+  if (collection == "event-sources") {
+    if (method == "GET" && id.empty())
+      return {200, service_.event_sources()};
+    if (method == "GET" && action.empty())
+      return {200, service_.event_source(id)};
+    if (method == "POST" && !id.empty() && (action == "enable" || action == "disable")) {
+      service_.set_event_source_enabled(id, action == "enable");
+      return {202, service_.event_source(id)};
+    }
+    return {405, {{"error", "Method not supported"}}};
+  }
   auto kind = collection == "pipelines"   ? RecordKind::Pipeline
               : collection == "runs"      ? RecordKind::Run
               : collection == "approvals" ? RecordKind::Approval

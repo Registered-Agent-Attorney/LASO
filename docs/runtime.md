@@ -7,8 +7,9 @@ Node attempts have separate states, start/end timestamps, attempt numbers, safe
 error categories, and duration. Messages and events are durable.
 
 The configured storage adapter maintains separate records for pipelines, runs,
-attempts, messages, approvals, artifacts and events. Each row has an ID, indexed
-run ID, insertion sequence and JSON representation of the typed record. SQLite
+attempts, messages, approvals, artifacts, events, event-source state, and durable
+external-event claims. Each row has an ID, indexed run ID, insertion sequence and
+JSON representation of the typed record. SQLite
 uses WAL, `synchronous=FULL`, a busy timeout, prepared parameter bindings and
 explicit transactions; its schema version is stored using `PRAGMA user_version`.
 The optional PostgreSQL adapter uses equivalent tables, identity-backed sequence

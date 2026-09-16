@@ -18,14 +18,16 @@ oversized bodies are rejected consistently by both adapters.
 `get` returns the JSON body or `ErrorCode::NotFound`. `list` optionally filters by
 `run_id`, orders by the durable insertion sequence, and supports bounded limit/offset
 pagination. The application stores typed runs, attempts, messages, approvals,
-artifacts, events, schedules, triggers, schedule occurrences, and trigger deliveries
-as JSON records; the storage layer does not duplicate those domain objects into
-backend-specific tables.
+artifacts, events, event-source state, external-event claims, schedules, triggers,
+schedule occurrences, and trigger deliveries as JSON records; the storage layer
+does not duplicate those domain objects into backend-specific tables.
 
-`claim` is an atomic insert-only operation for a schedule occurrence or trigger
-delivery. It returns true only for the first claim of an ID and never overwrites
-the winning body. This is the durable deduplication boundary used by the scheduler.
-It is not a distributed exactly-once guarantee.
+`claim` is an atomic insert-only operation for a schedule occurrence, trigger
+delivery, or external event identity. It returns true only for the first claim of
+an ID and never overwrites the winning body. For external events, the associated
+normal Event record is inserted in the same transaction, so a successful claim
+cannot expose a dedupe record without its event. This is a durable deduplication
+boundary, not a distributed exactly-once guarantee.
 
 ## SQLite
 
@@ -38,8 +40,9 @@ format. `Service` acquires a filesystem process lease before opening the databas
 
 PostgreSQL uses one bounded connection per `PostgresStorage`, protected by a mutex;
 transactions are scoped to individual operations and checkpoint batches. Startup
-creates the configured validated schema and applies idempotent version-1 and version-2 migrations
-in a transaction. A session-held advisory lock prevents two LASO services from
+creates the configured validated schema and applies idempotent version-1 through
+version-3 migrations in a transaction. Version 3 adds event-source state and
+external-event claim records. A session-held advisory lock prevents two LASO services from
 owning the same database at once. Schema identifiers are validated before being
 quoted; table names come only from the internal `RecordKind` mapping and values use
 parameterized queries. DSNs and raw driver diagnostics are not returned to API

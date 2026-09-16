@@ -24,6 +24,16 @@ allow_remote_api: false
 # inference runtime bound to 127.0.0.1. Leave empty to register only Mock.
 local_openai_endpoint: ""
 plugin_dirs: []
+# Generic native event sources are opt-in. Uncomment and point at a trusted,
+# explicitly built directory; source configuration is not a secret store.
+# plugin_dirs: [build/plugins]
+# event_sources:
+#   offline:
+#     plugin: example-event-source
+#     component: example-event
+#     enabled: false
+#     schema: event.schema.json
+#     config: {mode: deterministic}
 # Optional approved roots for node JSON Schemas. Empty uses the process directory.
 schema_roots: []
 models:

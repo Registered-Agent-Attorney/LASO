@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <laso/core/config.hpp>
 #include <laso/pipeline/parser.hpp>
+#include <regex>
 #include <set>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -38,6 +39,15 @@ void Config::validate() {
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
   if (log_level != "debug" && log_level != "info" && log_level != "warn" && log_level != "error")
     throw Error(ErrorCode::Configuration, "Invalid log level");
+  if (event_sources.size() > 64)
+    throw Error(ErrorCode::Configuration, "Too many event sources");
+  static const std::regex source_id_pattern("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}");
+  for (const auto &[id, source] : event_sources) {
+    if (!std::regex_match(id, source_id_pattern) || source.plugin.empty() ||
+        source.plugin.size() > 128 || source.component.size() > 128 || source.schema.size() > 512 ||
+        source.config.dump().size() > std::size_t{1024} * 1024)
+      throw Error(ErrorCode::Configuration, "Invalid event source configuration");
+  }
 }
 Config load_config(const std::filesystem::path &supplied,
                    const std::map<std::string, std::string> &overrides) {
@@ -86,6 +96,39 @@ Config load_config(const std::filesystem::path &supplied,
                                decision == "deny"       ? PolicyDecision::Deny
                                : decision == "approval" ? PolicyDecision::RequireApproval
                                                         : PolicyDecision::Allow});
+          }
+        } else if (key == "event_sources") {
+          if (!pair.second.IsMap())
+            throw Error(ErrorCode::Configuration, "event_sources must be a map");
+          for (const auto &source : pair.second) {
+            const auto id = source.first.as<std::string>();
+            if (!std::regex_match(id, std::regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")))
+              throw Error(ErrorCode::Configuration, "Invalid event source id");
+            const auto node = source.second;
+            if (!node.IsMap())
+              throw Error(ErrorCode::Configuration, "Event source must be a map");
+            std::set<std::string> fields;
+            for (const auto &field : node)
+              if (!fields.insert(field.first.as<std::string>()).second)
+                throw Error(ErrorCode::Configuration, "Duplicate event source field");
+            for (const auto &field : fields)
+              if (field != "plugin" && field != "component" && field != "schema" &&
+                  field != "enabled" && field != "config")
+                throw Error(ErrorCode::Configuration, "Unknown event source field");
+            EventSourceConfig cfg;
+            if (!node["plugin"])
+              throw Error(ErrorCode::Configuration, "Event source plugin is required");
+            cfg.plugin = node["plugin"].as<std::string>();
+            if (node["component"])
+              cfg.component = node["component"].as<std::string>();
+            if (node["schema"])
+              cfg.schema = node["schema"].as<std::string>();
+            if (node["enabled"])
+              cfg.enabled = node["enabled"].as<bool>();
+            if (node["config"])
+              cfg.config = detail::yaml_value(node["config"]);
+            if (!c.event_sources.emplace(id, std::move(cfg)).second)
+              throw Error(ErrorCode::Configuration, "Duplicate event source id");
           }
         } else
           values[key] = pair.second.as<std::string>();

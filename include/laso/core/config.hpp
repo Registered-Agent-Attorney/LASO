@@ -4,6 +4,11 @@
 #include <laso/providers/provider.hpp>
 
 namespace laso {
+struct EventSourceConfig {
+  std::string plugin, component, schema;
+  bool enabled = false;
+  Json config = Json::object();
+};
 struct Config {
   std::filesystem::path data_dir = ".laso", db_path;
   std::string storage_backend = "sqlite";
@@ -16,6 +21,7 @@ struct Config {
            max_pending_scheduler_launches = 128, max_event_trigger_depth = 16,
            max_event_trigger_deliveries = 1024;
   bool json_logs = false, allow_network = false, allow_remote_api = false;
+  std::map<std::string, EventSourceConfig> event_sources;
   std::map<std::string, ModelBinding> models{{"research", {"mock", "mock-v1"}},
                                              {"reviewer", {"mock", "mock-v1"}}};
   std::vector<PolicyRule> rules;
