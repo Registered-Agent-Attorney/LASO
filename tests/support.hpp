@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
+#include <laso/storage/sqlite.hpp>
 
 namespace laso::test {
 struct TemporaryDirectory {
@@ -19,6 +20,9 @@ inline Config config(const std::filesystem::path &dir) {
   c.data_dir = dir;
   c.validate();
   return c;
+}
+inline std::unique_ptr<Storage> make_storage(const std::filesystem::path &path) {
+  return std::make_unique<SQLiteStorage>(path);
 }
 inline std::string fixture(const std::string &name) {
   return read_document(std::filesystem::path(LASO_SOURCE_DIR) / "examples" / name /
