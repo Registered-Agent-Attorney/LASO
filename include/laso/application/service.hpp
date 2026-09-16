@@ -56,7 +56,7 @@ public:
 
 private:
   Config config_;
-  ProcessLease lease_;
+  std::unique_ptr<ProcessLease> lease_;
   std::unique_ptr<Storage> storage_;
   InProcessEventBus events_;
   ProviderRegistry providers_;

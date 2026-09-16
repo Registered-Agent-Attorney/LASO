@@ -1,4 +1,9 @@
 data_dir: .laso
+# SQLite is the default embedded backend. PostgreSQL is optional:
+# storage_backend: postgres
+# postgres_dsn: "host=127.0.0.1 port=5432 dbname=laso user=laso"
+# postgres_schema: public
+storage_backend: sqlite
 api_host: 127.0.0.1
 api_port: 8080
 workers: 2
