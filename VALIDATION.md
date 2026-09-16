@@ -20,7 +20,7 @@ and PostgreSQL runtime/reopen behavior.
 
 ## Statically reviewed
 
-- All 25 source paths named by CMake exist; source/header references, namespaces,
+- All source paths named by CMake exist; source/header references, namespaces,
   definitions, dependency discovery, and target boundaries were reviewed.
 - GCC/Clang flags, C++20 requirements, runtime output paths, and the Linux-only
   platform check were reviewed.
@@ -51,7 +51,7 @@ includes nested A → B → C execution and child output-contract failure propag
 | Check | Result |
 |---|---|
 | clang-format 18.1.8, `--dry-run --Werror` | PASS: 48 C/C++ files |
-| CMake source paths | PASS: 24 referenced source files present |
+| CMake source paths | PASS: all referenced source files present |
 | LASO include resolution and documentation links | PASS |
 | Safe YAML/configuration document scan | PASS: 13 documents |
 | Git whitespace check | PASS |
