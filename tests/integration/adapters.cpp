@@ -36,9 +36,12 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
   for_each_storage_backend([](const auto &backend) {
     TemporaryDirectory dir;
     auto s = backend.open(dir.path / "state.db");
-    constexpr std::array kinds = {RecordKind::Pipeline, RecordKind::Run,      RecordKind::Attempt,
-                                  RecordKind::Message,  RecordKind::Approval, RecordKind::Artifact,
-                                  RecordKind::Event};
+    constexpr std::array kinds = {RecordKind::Pipeline,       RecordKind::Run,
+                                  RecordKind::Attempt,        RecordKind::Message,
+                                  RecordKind::Approval,       RecordKind::Artifact,
+                                  RecordKind::Event,          RecordKind::Schedule,
+                                  RecordKind::Trigger,        RecordKind::ScheduleOccurrence,
+                                  RecordKind::TriggerDelivery};
     std::vector<Record> records;
     for (std::size_t i = 0; i < kinds.size(); ++i)
       records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});
@@ -189,6 +192,38 @@ TEST(Storage, ConformanceSerializesConcurrentCommits) {
     writers.clear();
     EXPECT_FALSE(failed);
     EXPECT_EQ(s->list(RecordKind::Event, "run-1").size(), 128U);
+  });
+}
+TEST(Storage, ConformanceClaimsDurableOccurrenceOnce) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    const Record first{RecordKind::ScheduleOccurrence,
+                       "schedule|due",
+                       "",
+                       {{"status", "claimed"}, {"attempt", 1}}};
+    EXPECT_TRUE(s->claim(first));
+    EXPECT_FALSE(s->claim(
+        {RecordKind::ScheduleOccurrence, first.id, "", {{"status", "claimed"}, {"attempt", 2}}}));
+    EXPECT_EQ(s->get(RecordKind::ScheduleOccurrence, first.id).at("attempt"), 1);
+    EXPECT_TRUE(
+        s->claim({RecordKind::TriggerDelivery, "trigger|event", "", {{"status", "claimed"}}}));
+  });
+}
+TEST(Storage, ConformanceSerializesConcurrentClaims) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    std::atomic<unsigned> winners = 0;
+    std::vector<std::jthread> claimers;
+    for (unsigned i = 0; i < 8; ++i) {
+      claimers.emplace_back([&, i] {
+        if (s->claim({RecordKind::ScheduleOccurrence, "same-occurrence", "", {{"claimer", i}}}))
+          ++winners;
+      });
+    }
+    claimers.clear();
+    EXPECT_EQ(winners, 1U);
   });
 }
 TEST(Storage, PostgresRejectsSecondOwner) {

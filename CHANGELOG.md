@@ -15,6 +15,10 @@
   `subpipeline` child runs with persisted parent/child relationships, direct payload
   passing, retry-distinct child attempts, approval recovery, recursion detection,
   depth limits, and API/CLI run inspection.
+- Added durable UTC one-time, interval, and five-field cron schedules plus internal
+  event triggers. Occurrence claims, misfire/overlap policies, restart recovery,
+  bounded trigger delivery, event-depth protection, trigger-origin provenance, and
+  schedule/trigger API and CLI operations use the normal runtime and storage paths.
 
 ## 0.2.0 — Framework Milestone 1 (in progress)
 

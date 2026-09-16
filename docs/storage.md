@@ -18,8 +18,14 @@ oversized bodies are rejected consistently by both adapters.
 `get` returns the JSON body or `ErrorCode::NotFound`. `list` optionally filters by
 `run_id`, orders by the durable insertion sequence, and supports bounded limit/offset
 pagination. The application stores typed runs, attempts, messages, approvals,
-artifacts, and events as JSON records; the storage layer does not duplicate those
-domain objects into backend-specific tables.
+artifacts, events, schedules, triggers, schedule occurrences, and trigger deliveries
+as JSON records; the storage layer does not duplicate those domain objects into
+backend-specific tables.
+
+`claim` is an atomic insert-only operation for a schedule occurrence or trigger
+delivery. It returns true only for the first claim of an ID and never overwrites
+the winning body. This is the durable deduplication boundary used by the scheduler.
+It is not a distributed exactly-once guarantee.
 
 ## SQLite
 
@@ -32,7 +38,7 @@ format. `Service` acquires a filesystem process lease before opening the databas
 
 PostgreSQL uses one bounded connection per `PostgresStorage`, protected by a mutex;
 transactions are scoped to individual operations and checkpoint batches. Startup
-creates the configured validated schema and applies an idempotent version-1 migration
+creates the configured validated schema and applies idempotent version-1 and version-2 migrations
 in a transaction. A session-held advisory lock prevents two LASO services from
 owning the same database at once. Schema identifiers are validated before being
 quoted; table names come only from the internal `RecordKind` mapping and values use
@@ -46,5 +52,7 @@ also verifies normal pipeline and child-run persistence on PostgreSQL.
 
 The backend choice does not change pipeline revision immutability, checkpoint
 atomicity, event ordering, approvals, recovery, artifacts, cancellation, or
-parent/child persistence. PostgreSQL is not a distributed worker or registry
-service; it is an optional storage adapter for one LASO service owner.
+parent/child persistence, schedule occurrence claims, or trigger delivery deduplication.
+PostgreSQL is not a distributed worker or registry service; it is an optional
+storage adapter for one LASO service owner. Scheduler processes use the same
+service ownership coordination as the rest of LASO.

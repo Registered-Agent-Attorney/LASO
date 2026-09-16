@@ -131,8 +131,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(JoinCheckpoint, messages)
 struct Run {
   std::string id = uuid(), pipeline_id, definition, active_node = "input", created_at = timestamp(),
               updated_at = created_at, actor = "local", error, parent_id, parent_node_id,
-              parent_message_id, child_id, child_pipeline_id;
+              parent_message_id, child_id, child_pipeline_id, initiation_type = "manual",
+              schedule_id, schedule_occurrence_id, due_at, trigger_id, event_id, root_event_id;
   unsigned pipeline_version = 1, child_pipeline_version = 0, subpipeline_depth = 0;
+  unsigned trigger_depth = 0;
   RunState state = RunState::Queued;
   bool cancellation_requested = false;
   Message message;
@@ -164,6 +166,14 @@ inline void to_json(Json &j, const Run &r) {
        {"child_pipeline_id", r.child_pipeline_id},
        {"child_pipeline_version", r.child_pipeline_version},
        {"subpipeline_depth", r.subpipeline_depth},
+       {"initiation_type", r.initiation_type},
+       {"schedule_id", r.schedule_id},
+       {"schedule_occurrence_id", r.schedule_occurrence_id},
+       {"due_at", r.due_at},
+       {"trigger_id", r.trigger_id},
+       {"event_id", r.event_id},
+       {"root_event_id", r.root_event_id},
+       {"trigger_depth", r.trigger_depth},
        {"child_runs", r.child_runs},
        {"resolved_subpipelines", r.resolved_subpipelines},
        {"state", r.state},
@@ -198,6 +208,14 @@ inline void from_json(const Json &j, Run &r) {
   r.child_pipeline_id = j.value("child_pipeline_id", std::string{});
   r.child_pipeline_version = j.value("child_pipeline_version", 0U);
   r.subpipeline_depth = j.value("subpipeline_depth", 0U);
+  r.initiation_type = j.value("initiation_type", std::string{"manual"});
+  r.schedule_id = j.value("schedule_id", std::string{});
+  r.schedule_occurrence_id = j.value("schedule_occurrence_id", std::string{});
+  r.due_at = j.value("due_at", std::string{});
+  r.trigger_id = j.value("trigger_id", std::string{});
+  r.event_id = j.value("event_id", std::string{});
+  r.root_event_id = j.value("root_event_id", std::string{});
+  r.trigger_depth = j.value("trigger_depth", 0U);
   r.child_runs = j.value("child_runs", std::vector<std::string>{});
   r.resolved_subpipelines = j.value("resolved_subpipelines", std::map<std::string, std::string>{});
   j.at("state").get_to(r.state);
@@ -260,9 +278,34 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Approval, id, run_id, node_id, reason, action
                                    decision, decided_at, actor, comment, visit)
 struct Event {
   std::string id = uuid(), run_id, pipeline_id, node_id, type, time = timestamp();
+  std::string causation_id, root_event_id;
+  unsigned trigger_depth = 0;
   Json metadata = Json::object();
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Event, id, run_id, pipeline_id, node_id, type, time, metadata)
+inline void to_json(Json &j, const Event &e) {
+  j = {{"id", e.id},
+       {"run_id", e.run_id},
+       {"pipeline_id", e.pipeline_id},
+       {"node_id", e.node_id},
+       {"type", e.type},
+       {"time", e.time},
+       {"causation_id", e.causation_id},
+       {"root_event_id", e.root_event_id},
+       {"trigger_depth", e.trigger_depth},
+       {"metadata", e.metadata}};
+}
+inline void from_json(const Json &j, Event &e) {
+  e.id = j.value("id", uuid());
+  e.run_id = j.value("run_id", std::string{});
+  e.pipeline_id = j.value("pipeline_id", std::string{});
+  e.node_id = j.value("node_id", std::string{});
+  e.type = j.value("type", std::string{});
+  e.time = j.value("time", timestamp());
+  e.causation_id = j.value("causation_id", std::string{});
+  e.root_event_id = j.value("root_event_id", std::string{});
+  e.trigger_depth = j.value("trigger_depth", 0U);
+  e.metadata = j.value("metadata", Json::object());
+}
 struct Artifact {
   std::string id = uuid(), run_id, node_id, name, media_type, location, created_at = timestamp();
   Json metadata = Json::object();

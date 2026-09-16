@@ -86,20 +86,48 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {200, service_.plugins()};
   std::smatch match;
   static const std::regex route_pattern(
-      "/api/v1/(pipelines|runs|approvals)(?:/([A-Za-z0-9_.@-]{1,128}))?(?:/"
-      "(runs|cancel|resume|events|attempts|messages|approve|reject))?");
+      "/api/v1/(pipelines|runs|approvals|schedules|triggers)(?:/([A-Za-z0-9_.@-]{1,128}))?(?:/"
+      "(runs|cancel|resume|events|attempts|messages|approve|reject|enable|disable))?");
   if (!std::regex_match(target, match, route_pattern))
     return {404, {{"error", "Endpoint not found"}}};
   auto collection = match[1].str(), id = match[2].str(), action = match[3].str();
-  auto kind = collection == "pipelines" ? RecordKind::Pipeline
-              : collection == "runs"    ? RecordKind::Run
-                                        : RecordKind::Approval;
+  auto kind = collection == "pipelines"   ? RecordKind::Pipeline
+              : collection == "runs"      ? RecordKind::Run
+              : collection == "approvals" ? RecordKind::Approval
+              : collection == "schedules" ? RecordKind::Schedule
+                                          : RecordKind::Trigger;
   if (method == "GET" && id.empty())
     return {200, service_.list(kind, "", limit, offset)};
   if (method == "GET" && action.empty())
     return {200, collection == "runs" ? service_.run_view(id) : service_.get(kind, id)};
   if (method == "POST" && collection == "pipelines" && id.empty())
     return {201, service_.register_pipeline(body.at("yaml").get<std::string>())};
+  if (method == "POST" && collection == "schedules" && id.empty())
+    return {201, service_.create_schedule(body)};
+  if (method == "POST" && collection == "triggers" && id.empty())
+    return {201, service_.create_trigger(body)};
+  if (method == "PATCH" && collection == "schedules" && !id.empty() && action.empty())
+    return {200, service_.update_schedule(id, body)};
+  if (method == "PATCH" && collection == "triggers" && !id.empty() && action.empty())
+    return {200, service_.update_trigger(id, body)};
+  if (method == "DELETE" && collection == "schedules" && !id.empty() && action.empty()) {
+    service_.delete_schedule(id);
+    return {202, {{"id", id}, {"deleted", true}}};
+  }
+  if (method == "DELETE" && collection == "triggers" && !id.empty() && action.empty()) {
+    service_.delete_trigger(id);
+    return {202, {{"id", id}, {"deleted", true}}};
+  }
+  if (method == "POST" && collection == "schedules" && !id.empty() &&
+      (action == "enable" || action == "disable")) {
+    service_.set_schedule_enabled(id, action == "enable");
+    return {202, service_.get(RecordKind::Schedule, id)};
+  }
+  if (method == "POST" && collection == "triggers" && !id.empty() &&
+      (action == "enable" || action == "disable")) {
+    service_.set_trigger_enabled(id, action == "enable");
+    return {202, service_.get(RecordKind::Trigger, id)};
+  }
   if (method == "POST" && collection == "pipelines" && action == "runs")
     return {202, {{"id", service_.start(id, body.value("input", Json::object()), actor.id)}}};
   if (collection == "runs" && !id.empty()) {
