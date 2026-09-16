@@ -18,11 +18,11 @@ public:
                     const std::string &actor = "local", bool allow_file = false);
   Json run_view(const std::string &id) const;
   Json get(RecordKind kind, const std::string &id) const {
-    return storage_.get(kind, id);
+    return storage_->get(kind, id);
   }
   std::vector<Json> list(RecordKind kind, const std::string &run_id = "", std::size_t limit = 1000,
                          std::size_t offset = 0) const {
-    return storage_.list(kind, run_id, limit, offset);
+    return storage_->list(kind, run_id, limit, offset);
   }
   Json providers() const;
   Json tools() const;
@@ -56,7 +56,7 @@ public:
 private:
   Config config_;
   ProcessLease lease_;
-  SQLiteStorage storage_;
+  std::unique_ptr<Storage> storage_;
   InProcessEventBus events_;
   ProviderRegistry providers_;
   ToolRegistry tools_;

@@ -2,6 +2,7 @@
 #include <iomanip>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
+#include <laso/storage/sqlite.hpp>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -43,13 +44,14 @@ bool same_source(const Json &record, const std::string &yaml) {
 }
 } // namespace
 Service::Service(asio::io_context &io, Config config)
-    : config_(checked(std::move(config))), lease_(config_.db_path), storage_(config_.db_path),
+    : config_(checked(std::move(config))), lease_(config_.db_path),
+      storage_(std::make_unique<SQLiteStorage>(config_.db_path)),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       plugins_(tools_, providers_),
       runtime_(io, config_,
-               {storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
+               {*storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
                 [this](const std::string &reference) { return resolve_pipeline(reference); }}),
-      artifacts_(config_.data_dir / "artifacts", storage_),
+      artifacts_(config_.data_dir / "artifacts", *storage_),
       scheduler_(
           io, [this](const ScheduledPipeline &s) { start(s.pipeline_id, s.input, "scheduler"); }) {
   configure_logging(config_);
@@ -82,7 +84,7 @@ Json Service::register_pipeline(const std::string &yaml) {
   auto existing = Json();
   bool has_existing = false;
   try {
-    existing = storage_.get(RecordKind::Pipeline, key);
+    existing = storage_->get(RecordKind::Pipeline, key);
     has_existing = true;
   } catch (const Error &error) {
     if (error.code != ErrorCode::NotFound)
@@ -91,7 +93,7 @@ Json Service::register_pipeline(const std::string &yaml) {
   // Read records written by the pre-versioned registry as the v1 identity.
   if (!has_existing && p.version == 1) {
     try {
-      existing = storage_.get(RecordKind::Pipeline, p.name);
+      existing = storage_->get(RecordKind::Pipeline, p.name);
       has_existing = true;
     } catch (const Error &error) {
       if (error.code != ErrorCode::NotFound)
@@ -105,7 +107,7 @@ Json Service::register_pipeline(const std::string &yaml) {
     return existing;
   }
 
-  const auto records = all_pipeline_records(storage_);
+  const auto records = all_pipeline_records(*storage_);
   const auto candidate_key = key;
   auto revisions = [&](const std::string &name) {
     std::vector<Json> found;
@@ -200,7 +202,7 @@ Json Service::register_pipeline(const std::string &yaml) {
   e.metadata["pipeline_version"] = p.version;
   e.type = "pipeline.registered";
   try {
-    storage_.commit(
+    storage_->commit(
         {{RecordKind::Pipeline, key, "", record}, {RecordKind::Event, e.id, "", Json(e)}});
   } catch (const Error &error) {
     // Another registration may have won the SQLite transaction between the
@@ -209,7 +211,7 @@ Json Service::register_pipeline(const std::string &yaml) {
     if (error.code != ErrorCode::Conflict)
       throw;
     try {
-      const auto concurrent = storage_.get(RecordKind::Pipeline, key);
+      const auto concurrent = storage_->get(RecordKind::Pipeline, key);
       if (same_source(concurrent, yaml))
         return concurrent;
     } catch (const Error &lookup_error) {
@@ -240,24 +242,24 @@ Json Service::pipeline_record(const std::string &reference) const {
   if (parsed.explicit_version) {
     const auto key = pipeline_reference(parsed.name, parsed.version);
     try {
-      return storage_.get(RecordKind::Pipeline, key);
+      return storage_->get(RecordKind::Pipeline, key);
     } catch (const Error &error) {
       if (error.code != ErrorCode::NotFound)
         throw;
       if (parsed.version != 1)
         throw;
       // Compatibility for a database created before versioned registry keys.
-      return storage_.get(RecordKind::Pipeline, parsed.name);
+      return storage_->get(RecordKind::Pipeline, parsed.name);
     }
   }
   try {
-    return storage_.get(RecordKind::Pipeline, parsed.name);
+    return storage_->get(RecordKind::Pipeline, parsed.name);
   } catch (const Error &error) {
     if (error.code != ErrorCode::NotFound)
       throw;
   }
   Json found;
-  for (const auto &record : all_pipeline_records(storage_)) {
+  for (const auto &record : all_pipeline_records(*storage_)) {
     if (record.value("name", std::string{}) != parsed.name)
       continue;
     if (!found.is_null())
@@ -280,10 +282,10 @@ PipelineDefinition Service::resolve_pipeline(const std::string &reference) const
   return p;
 }
 Json Service::run_view(const std::string &id) const {
-  auto result = storage_.get(RecordKind::Run, id);
+  auto result = storage_->get(RecordKind::Run, id);
   Json children = Json::array();
   for (std::size_t offset = 0;;) {
-    auto page = storage_.list(RecordKind::Run, "", 10000, offset);
+    auto page = storage_->list(RecordKind::Run, "", 10000, offset);
     for (const auto &item : page) {
       const auto child = item.get<Run>();
       if (child.parent_id == id)
@@ -341,7 +343,7 @@ void Service::shutdown() {
 }
 void Service::recover_history() {
   for (std::size_t offset = 0;; offset += 1000) {
-    auto records = storage_.list(RecordKind::Run, "", 1000, offset);
+    auto records = storage_->list(RecordKind::Run, "", 1000, offset);
     for (const auto &record : records) {
       auto r = record.get<Run>();
       // A terminal checkpoint is immutable.  A stale cancellation flag must not
@@ -356,8 +358,8 @@ void Service::recover_history() {
         event.pipeline_id = r.pipeline_id;
         event.node_id = r.active_node;
         event.type = "run.cancelled";
-        storage_.commit({{RecordKind::Run, r.id, r.id, Json(r)},
-                         {RecordKind::Event, event.id, r.id, Json(event)}});
+        storage_->commit({{RecordKind::Run, r.id, r.id, Json(r)},
+                          {RecordKind::Event, event.id, r.id, Json(event)}});
         continue;
       }
       if (r.state == RunState::WaitingApproval || r.state == RunState::Paused ||
@@ -375,7 +377,7 @@ void Service::recover_history() {
                                      {RecordKind::Event, event.id, r.id, Json(event)}};
       for (std::size_t attempt_offset = 0;;) {
         constexpr std::size_t page_size = 10000;
-        auto attempts = storage_.list(RecordKind::Attempt, r.id, page_size, attempt_offset);
+        auto attempts = storage_->list(RecordKind::Attempt, r.id, page_size, attempt_offset);
         for (const auto &item : attempts) {
           auto a = item.get<NodeExecution>();
           if (a.state == NodeState::Running) {
@@ -389,7 +391,7 @@ void Service::recover_history() {
           break;
         attempt_offset += page_size;
       }
-      storage_.commit(checkpoint);
+      storage_->commit(checkpoint);
     }
     if (records.size() < 1000)
       break;
