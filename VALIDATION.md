@@ -75,7 +75,7 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
-| Debian 13 container CTest suite | **NOT RUN locally: Docker is unavailable on server1300; the public Debian CI job remains the reproducible validation path** |
+| Debian 13 container CTest suite | **PASS: 127/127 in the public Debian 13 container job; Docker was unavailable on server1300 for a duplicate local run** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
@@ -95,7 +95,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **PENDING: rerun after storage hardening push** |
+| GitHub Actions execution | **PASS: run `35135035917` completed all Ubuntu GCC/Clang, Debian, ASan/UBSan, and PostgreSQL jobs successfully** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
