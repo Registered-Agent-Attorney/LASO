@@ -7,73 +7,107 @@
 using namespace laso;
 using namespace laso::test;
 TEST(Storage, PersistsAcrossConnections) {
-  TemporaryDirectory dir;
-  {
-    auto s = make_storage(dir.path / "state.db");
-    s->commit({{RecordKind::Pipeline, "example", "", {{"value", 42}}}});
-  }
-  {
-    auto s = make_storage(dir.path / "state.db");
-    EXPECT_EQ(s->get(RecordKind::Pipeline, "example").at("value"), 42);
-  }
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    {
+      auto s = backend.open(dir.path / "state.db");
+      s->commit({{RecordKind::Pipeline, "example", "", {{"value", 42}}}});
+    }
+    {
+      auto s = backend.open(dir.path / "state.db");
+      EXPECT_EQ(s->get(RecordKind::Pipeline, "example").at("value"), 42);
+    }
+  });
 }
 TEST(Storage, TransactionRollsBackWholeCheckpoint) {
-  TemporaryDirectory dir;
-  auto s = make_storage(dir.path / "state.db");
-  std::vector<Record> batch{
-      {RecordKind::Run, "first", "first", {{"valid", true}}},
-      {RecordKind::Message, "large", "first", std::string(4 * 1024 * 1024 + 1, 'a')}};
-  EXPECT_THROW(s->commit(batch), Error);
-  EXPECT_THROW(s->get(RecordKind::Run, "first"), Error);
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    std::vector<Record> batch{
+        {RecordKind::Run, "first", "first", {{"valid", true}}},
+        {RecordKind::Message, "large", "first", std::string(4 * 1024 * 1024 + 1, 'a')}};
+    EXPECT_THROW(s->commit(batch), Error);
+    EXPECT_THROW(s->get(RecordKind::Run, "first"), Error);
+  });
 }
 TEST(Storage, ConformanceStoresAllRecordKinds) {
-  TemporaryDirectory dir;
-  auto s = make_storage(dir.path / "state.db");
-  constexpr std::array kinds = {RecordKind::Pipeline, RecordKind::Run, RecordKind::Attempt,
-                                RecordKind::Message, RecordKind::Approval, RecordKind::Artifact,
-                                RecordKind::Event};
-  std::vector<Record> records;
-  for (std::size_t i = 0; i < kinds.size(); ++i)
-    records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});
-  s->commit(records);
-  for (std::size_t i = 0; i < kinds.size(); ++i) {
-    EXPECT_EQ(s->get(kinds[i], "record-" + std::to_string(i)).at("index"), i);
-    EXPECT_EQ(s->list(kinds[i], "run-1").size(), 1U);
-  }
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    constexpr std::array kinds = {RecordKind::Pipeline, RecordKind::Run, RecordKind::Attempt,
+                                  RecordKind::Message, RecordKind::Approval, RecordKind::Artifact,
+                                  RecordKind::Event};
+    std::vector<Record> records;
+    for (std::size_t i = 0; i < kinds.size(); ++i)
+      records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});
+    s->commit(records);
+    for (std::size_t i = 0; i < kinds.size(); ++i) {
+      EXPECT_EQ(s->get(kinds[i], "record-" + std::to_string(i)).at("index"), i);
+      EXPECT_EQ(s->list(kinds[i], "run-1").size(), 1U);
+    }
+  });
 }
 TEST(Storage, ConformancePreservesOrderAcrossUpdates) {
-  TemporaryDirectory dir;
-  auto s = make_storage(dir.path / "state.db");
-  s->commit({{RecordKind::Message, "first", "run-1", {{"value", 1}}},
-             {RecordKind::Message, "second", "run-1", {{"value", 2}}}});
-  s->commit({{RecordKind::Message, "first", "run-1", {{"value", 3}}}});
-  const auto messages = s->list(RecordKind::Message, "run-1");
-  ASSERT_EQ(messages.size(), 2U);
-  EXPECT_EQ(messages[0].at("value"), 3);
-  EXPECT_EQ(messages[1].at("value"), 2);
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    s->commit({{RecordKind::Message, "first", "run-1", {{"value", 1}}},
+               {RecordKind::Message, "second", "run-1", {{"value", 2}}}});
+    s->commit({{RecordKind::Message, "first", "run-1", {{"value", 3}}}});
+    const auto messages = s->list(RecordKind::Message, "run-1");
+    ASSERT_EQ(messages.size(), 2U);
+    EXPECT_EQ(messages[0].at("value"), 3);
+    EXPECT_EQ(messages[1].at("value"), 2);
+  });
 }
 TEST(Storage, ConformanceRejectsConflictingPipelineRevision) {
-  TemporaryDirectory dir;
-  auto s = make_storage(dir.path / "state.db");
-  const Record original{RecordKind::Pipeline, "hello@1", "", {{"yaml", "one"}}};
-  s->commit({original});
-  EXPECT_NO_THROW(s->commit({original}));
-  try {
-    s->commit({{RecordKind::Pipeline, "hello@1", "", {{"yaml", "two"}}}});
-    FAIL() << "conflicting pipeline revision should be rejected";
-  } catch (const Error &error) {
-    EXPECT_EQ(error.code, ErrorCode::Conflict);
-  }
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    const Record original{RecordKind::Pipeline, "hello@1", "", {{"yaml", "one"}}};
+    s->commit({original});
+    EXPECT_NO_THROW(s->commit({original}));
+    try {
+      s->commit({{RecordKind::Pipeline, "hello@1", "", {{"yaml", "two"}}}});
+      FAIL() << "conflicting pipeline revision should be rejected";
+    } catch (const Error &error) {
+      EXPECT_EQ(error.code, ErrorCode::Conflict);
+    }
+  });
 }
 TEST(Storage, ConformanceSupportsPagination) {
-  TemporaryDirectory dir;
-  auto s = make_storage(dir.path / "state.db");
-  for (int i = 0; i < 3; ++i)
-    s->commit({{RecordKind::Event, "event-" + std::to_string(i), "run-1", {{"index", i}}}});
-  const auto page = s->list(RecordKind::Event, "run-1", 2, 1);
-  ASSERT_EQ(page.size(), 2U);
-  EXPECT_EQ(page[0].at("index"), 1);
-  EXPECT_EQ(page[1].at("index"), 2);
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    for (int i = 0; i < 3; ++i)
+      s->commit({{RecordKind::Event, "event-" + std::to_string(i), "run-1", {{"index", i}}}});
+    const auto page = s->list(RecordKind::Event, "run-1", 2, 1);
+    ASSERT_EQ(page.size(), 2U);
+    EXPECT_EQ(page[0].at("index"), 1);
+    EXPECT_EQ(page[1].at("index"), 2);
+  });
+}
+TEST(Storage, PostgresRejectsSecondOwner) {
+#if defined(LASO_HAS_POSTGRES)
+  if (!std::getenv("LASO_TEST_POSTGRES_DSN"))
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  for (const auto &backend : storage_backends()) {
+    if (backend.name != "postgres")
+      continue;
+    TemporaryDirectory dir;
+    auto first = backend.open(dir.path / "state.db");
+    try {
+      auto second = backend.open(dir.path / "state.db");
+      (void)second;
+      ADD_FAILURE() << "a second PostgreSQL storage owner was accepted";
+    } catch (const Error &error) {
+      EXPECT_EQ(error.code, ErrorCode::Conflict);
+      EXPECT_STREQ(error.what(), "PostgreSQL database is owned by another LASO process");
+    }
+  }
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
 }
 TEST(Storage, ProcessLeasePreventsCompetingExecutors) {
   TemporaryDirectory dir;
