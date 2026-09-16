@@ -60,3 +60,13 @@ backend; PostgreSQL is an explicit optional build/runtime choice. PostgreSQL DSN
 never written to LASO logs or API error responses. PostgreSQL schema names are
 validated as simple identifiers before they are used in DDL; SQL values are bound
 parameters. The PostgreSQL test service in CI uses disposable credentials and data.
+
+Scheduler definitions are bounded before persistence: schedule input is limited to
+1 MiB, trigger metadata filters to 32 scalar entries and 16 KiB, intervals to one
+year, cron fields to the documented five-field UTC form, pending launches and
+deliveries to configured finite limits, and trigger recursion to a configured depth.
+Due occurrences and event deliveries use insert-only durable claims, so restart
+recovery does not replay the same local occurrence or event delivery casually.
+Event metadata is not dumped into scheduler logs. Internal LASO events are the only
+source handled by this framework; HTTP, DNS, webhooks, filesystem, and message-bus
+adapters are not enabled by these records.

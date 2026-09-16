@@ -7,8 +7,10 @@ namespace laso {
 namespace {
 using Statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 std::string table(RecordKind kind) {
-  static constexpr std::array names = {"pipelines", "runs",      "attempts", "messages",
-                                       "approvals", "artifacts", "events"};
+  static constexpr std::array names = {
+      "pipelines",         "runs",   "attempts",  "messages", "approvals",
+      "artifacts",         "events", "schedules", "triggers", "schedule_occurrences",
+      "trigger_deliveries"};
   const auto index = static_cast<std::size_t>(kind);
   if (index >= names.size())
     throw Error(ErrorCode::Validation, "Unknown record kind");
@@ -70,19 +72,19 @@ SQLiteStorage::SQLiteStorage(const std::filesystem::path &path) : impl_(std::mak
   exec(raw, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
   auto version_stmt = prepare(raw, "PRAGMA user_version");
   if (sqlite3_step(version_stmt.get()) != SQLITE_ROW ||
-      sqlite3_column_int(version_stmt.get(), 0) > 1)
+      sqlite3_column_int(version_stmt.get(), 0) > 2)
     throw Error(ErrorCode::Storage, "Unsupported database schema version");
   version_stmt.reset();
   exec(raw, "BEGIN IMMEDIATE");
   try {
-    for (int i = 0; i < 7; ++i) {
+    for (std::size_t i = 0; i < 11; ++i) {
       auto name = table(static_cast<RecordKind>(i));
       exec(raw, "CREATE TABLE IF NOT EXISTS " + name +
                     " (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, body TEXT NOT NULL "
                     "CHECK(json_valid(body)), sequence INTEGER NOT NULL)");
       exec(raw, "CREATE INDEX IF NOT EXISTS " + name + "_run ON " + name + "(run_id,sequence)");
     }
-    exec(raw, "PRAGMA user_version=1; COMMIT");
+    exec(raw, "PRAGMA user_version=2; COMMIT");
   } catch (...) {
     sqlite3_exec(raw, "ROLLBACK", nullptr, nullptr, nullptr);
     throw;
@@ -120,6 +122,34 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
         throw Error(ErrorCode::Storage, "SQLite checkpoint failed");
     }
     exec(db, "COMMIT");
+  } catch (...) {
+    sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+    throw;
+  }
+}
+bool SQLiteStorage::claim(const Record &record) {
+  std::lock_guard lock(impl_->mutex);
+  if (record.id.empty())
+    throw Error(ErrorCode::Validation, "Record id is empty");
+  if (record.kind != RecordKind::ScheduleOccurrence && record.kind != RecordKind::TriggerDelivery)
+    throw Error(ErrorCode::Validation, "Record kind cannot be claimed");
+  const auto name = table(record.kind);
+  const auto body = serialize(record.value);
+  auto *db = impl_->db.get();
+  exec(db, "BEGIN IMMEDIATE");
+  try {
+    auto statement = prepare(db, "INSERT INTO " + name +
+                                     "(id,run_id,body,sequence) VALUES(?,?,?,(SELECT "
+                                     "COALESCE(MAX(sequence),0)+1 FROM " +
+                                     name + ")) ON CONFLICT(id) DO NOTHING");
+    bind(statement.get(), 1, record.id);
+    bind(statement.get(), 2, record.run_id);
+    bind(statement.get(), 3, body);
+    if (sqlite3_step(statement.get()) != SQLITE_DONE)
+      throw Error(ErrorCode::Storage, "SQLite claim failed");
+    const bool inserted = sqlite3_changes(db) == 1;
+    exec(db, "COMMIT");
+    return inserted;
   } catch (...) {
     sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
     throw;

@@ -46,3 +46,9 @@ registry.
 The offline examples in `examples/composition` show a versioned two-pipeline
 composition and a three-pipeline chain. Register referenced children first, then
 the parent, using `laso pipeline register`; start with `laso run start process@1`.
+
+Schedules and event triggers are separate durable records, not pipeline macros.
+Create them after registering their pinned pipeline revision with the API or with
+`laso schedule create FILE` / `laso trigger create FILE`. Their definitions and
+the scheduler's UTC/misfire/overlap semantics are documented in
+[scheduling](scheduling.md).

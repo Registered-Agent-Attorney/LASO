@@ -49,6 +49,17 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
   event.metadata["child_run_id"] = r.child_id;
   event.metadata["child_pipeline_id"] = r.child_pipeline_id;
   event.metadata["child_pipeline_version"] = r.child_pipeline_version;
+  event.metadata["initiation_type"] = r.initiation_type;
+  event.metadata["schedule_id"] = r.schedule_id;
+  event.metadata["schedule_occurrence_id"] = r.schedule_occurrence_id;
+  event.metadata["due_at"] = r.due_at;
+  event.metadata["trigger_id"] = r.trigger_id;
+  event.metadata["event_id"] = r.event_id;
+  event.metadata["root_event_id"] = r.root_event_id;
+  event.metadata["trigger_depth"] = r.trigger_depth;
+  event.causation_id = r.id;
+  event.root_event_id = r.root_event_id;
+  event.trigger_depth = r.trigger_depth;
   for (const auto &record : records)
     if (record.kind == RecordKind::Attempt)
       event.node_id = record.value.at("node_id").get<std::string>();
@@ -67,7 +78,7 @@ void Runtime::transition(Run &r, RunState state, const std::string &event,
 }
 std::string Runtime::run(const PipelineDefinition &p, Json input, std::string actor,
                          std::string parent_id, std::string parent_node_id,
-                         unsigned subpipeline_depth, std::string parent_message_id) {
+                         unsigned subpipeline_depth, std::string parent_message_id, Json origin) {
   std::lock_guard lock(mutex_);
   if (stopping_ || active_.size() >= config_.max_runs)
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
@@ -89,6 +100,14 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
   r.parent_node_id = std::move(parent_node_id);
   r.parent_message_id = std::move(parent_message_id);
   r.subpipeline_depth = subpipeline_depth;
+  r.initiation_type = origin.value("initiation_type", std::string{"manual"});
+  r.schedule_id = origin.value("schedule_id", std::string{});
+  r.schedule_occurrence_id = origin.value("schedule_occurrence_id", std::string{});
+  r.due_at = origin.value("due_at", std::string{});
+  r.trigger_id = origin.value("trigger_id", std::string{});
+  r.event_id = origin.value("event_id", std::string{});
+  r.root_event_id = origin.value("root_event_id", std::string{});
+  r.trigger_depth = origin.value("trigger_depth", 0U);
   r.resolved_subpipelines = checked.resolved_subpipelines;
   r.message.run_id = r.id;
   r.message.pipeline_id = r.pipeline_id;

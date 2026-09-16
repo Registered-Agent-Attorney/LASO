@@ -1,7 +1,7 @@
 # Architecture and ownership
 
 The public API is C++20. The shared-library extension boundary is C. The framework
-version (0.1.0), YAML format (1), SQLite schema (1), and plugin ABI (1) are distinct.
+version (0.1.0), YAML format (1), SQLite schema (2), and plugin ABI (1) are distinct.
 
 | Target | Responsibility and dependencies |
 |---|---|
@@ -10,7 +10,7 @@ version (0.1.0), YAML format (1), SQLite schema (1), and plugin ABI (1) are dist
 | `laso_storage_sqlite` | Native SQLite C API behind `Storage`, transactional checkpoints |
 | `laso_storage_postgres` | Optional libpqxx backend behind `Storage`, transactional checkpoints |
 | `laso_plugin_loader` | Linux dynamic loader and C adapters for tools and model providers |
-| `laso_runtime` | Async node execution, state transitions, finite scheduling and checkpoint decisions |
+| `laso_runtime` | Async node execution, state transitions, durable scheduling and checkpoint decisions |
 | `laso_application` | Owns dependencies, registration, recovery inspection and shared services |
 | `laso_api` | Versioned JSON routes and Boost.Beast asynchronous HTTP |
 | `laso_cli` | CLI11 parsing, calls the same services |
@@ -81,3 +81,24 @@ configured bound. Configured `schema_roots`, canonical path checks, disabled rem
 references, rejected external reference cycles, and bounded document/depth/payload
 limits protect the filesystem and runtime. Relative local references resolve from
 the declaring schema document; absolute and parent-traversing references are rejected.
+
+## Durable scheduling
+
+`LocalScheduler` stores schedules, event triggers, occurrence claims, and trigger
+delivery records through the generic `Storage` boundary. It launches the same
+`Service::start`/`Runtime` path used by manual runs, so policies, schemas,
+approvals, retries, plugins, limits, provenance, and persistence remain shared.
+The scheduler uses UTC `system_clock` wall time for durable timestamps and a
+`steady_timer` only for local waiting; tests use `TestClock`.
+
+Schedule and trigger lifecycle events are persisted as ordinary events. A
+schedule occurrence is claimed by an insert-only durable record, using
+`schedule_id|due_at` as its identity. This prevents the obvious restart duplicate
+within the storage ownership model; LASO does not claim distributed exactly-once
+execution. PostgreSQL retains its existing session ownership lease, while the
+claim operation is transactional and safe under concurrent adapter calls.
+
+Event triggers match an event type and optional scalar metadata fields. Delivery
+records keyed by `trigger_id|event_id` provide restart deduplication. Trigger depth
+and pending delivery limits bound event loops and storms. See [scheduling](scheduling.md)
+for the supported policies and API/CLI surface.

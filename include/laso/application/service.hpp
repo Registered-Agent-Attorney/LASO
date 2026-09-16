@@ -16,7 +16,16 @@ public:
   }
   Json register_pipeline(const std::string &yaml);
   std::string start(const std::string &name_or_path, const Json &input = Json::object(),
-                    const std::string &actor = "local", bool allow_file = false);
+                    const std::string &actor = "local", bool allow_file = false,
+                    Json origin = Json::object());
+  Json create_schedule(const Json &spec);
+  Json update_schedule(const std::string &id, const Json &spec);
+  void set_schedule_enabled(const std::string &id, bool enabled);
+  void delete_schedule(const std::string &id);
+  Json create_trigger(const Json &spec);
+  Json update_trigger(const std::string &id, const Json &spec);
+  void set_trigger_enabled(const std::string &id, bool enabled);
+  void delete_trigger(const std::string &id);
   Json run_view(const std::string &id) const;
   Json get(RecordKind kind, const std::string &id) const {
     return storage_->get(kind, id);

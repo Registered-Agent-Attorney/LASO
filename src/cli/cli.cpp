@@ -55,6 +55,32 @@ int cli_main(int argc, char **argv) {
   auto *tool = app.add_subcommand("tool");
   tool->require_subcommand(1);
   auto *tool_list = tool->add_subcommand("list");
+  auto *schedule = app.add_subcommand("schedule");
+  schedule->require_subcommand(1);
+  auto *schedule_list = schedule->add_subcommand("list");
+  auto *schedule_show = schedule->add_subcommand("show");
+  schedule_show->add_option("id", target)->required();
+  auto *schedule_create = schedule->add_subcommand("create");
+  schedule_create->add_option("file", target)->required();
+  auto *schedule_enable = schedule->add_subcommand("enable");
+  schedule_enable->add_option("id", target)->required();
+  auto *schedule_disable = schedule->add_subcommand("disable");
+  schedule_disable->add_option("id", target)->required();
+  auto *schedule_delete = schedule->add_subcommand("delete");
+  schedule_delete->add_option("id", target)->required();
+  auto *trigger = app.add_subcommand("trigger");
+  trigger->require_subcommand(1);
+  auto *trigger_list = trigger->add_subcommand("list");
+  auto *trigger_show = trigger->add_subcommand("show");
+  trigger_show->add_option("id", target)->required();
+  auto *trigger_create = trigger->add_subcommand("create");
+  trigger_create->add_option("file", target)->required();
+  auto *trigger_enable = trigger->add_subcommand("enable");
+  trigger_enable->add_option("id", target)->required();
+  auto *trigger_disable = trigger->add_subcommand("disable");
+  trigger_disable->add_option("id", target)->required();
+  auto *trigger_delete = trigger->add_subcommand("delete");
+  trigger_delete->add_option("id", target)->required();
   app.require_subcommand(1);
   try {
     app.parse(argc, argv);
@@ -97,6 +123,7 @@ int cli_main(int argc, char **argv) {
     Service service(executor.context(), config);
     Json result;
     std::string run_id;
+    bool run_executor = false;
     if (*health)
       result = {{"status", "ok"}, {"scope", "local storage; not a daemon probe"}};
     else if (*register_command)
@@ -109,27 +136,64 @@ int cli_main(int argc, char **argv) {
       result = service.list(RecordKind::Run);
     else if (*show)
       result = service.run_view(target);
-    else if (*start)
+    else if (*start) {
       run_id = service.start(target, Json::parse(input), actor, true);
-    else if (*cancel) {
+      run_executor = true;
+    } else if (*cancel) {
       service.runtime().cancel(target);
       result = service.get(RecordKind::Run, target);
+      run_executor = true;
     } else if (*resume) {
       service.runtime().resume(target);
       run_id = target;
+      run_executor = true;
     } else if (*approval_list)
       result = service.list(RecordKind::Approval);
     else if (*approve || *reject) {
       run_id = service.get(RecordKind::Approval, target).at("run_id").get<std::string>();
       service.runtime().decide(target, static_cast<bool>(*approve), actor, comment);
+      run_executor = true;
     } else if (*plugin_list)
       result = service.plugins();
     else if (*provider_list)
       result = service.providers();
     else if (*tool_list)
       result = service.tools();
-    executor.start();
-    executor.join();
+    else if (*schedule_list)
+      result = service.list(RecordKind::Schedule);
+    else if (*schedule_show)
+      result = service.get(RecordKind::Schedule, target);
+    else if (*schedule_create)
+      result = service.create_schedule(Json::parse(read_document(target)));
+    else if (*schedule_enable) {
+      service.set_schedule_enabled(target, true);
+      result = service.get(RecordKind::Schedule, target);
+    } else if (*schedule_disable) {
+      service.set_schedule_enabled(target, false);
+      result = service.get(RecordKind::Schedule, target);
+    } else if (*schedule_delete) {
+      service.delete_schedule(target);
+      result = service.get(RecordKind::Schedule, target);
+    } else if (*trigger_list)
+      result = service.list(RecordKind::Trigger);
+    else if (*trigger_show)
+      result = service.get(RecordKind::Trigger, target);
+    else if (*trigger_create)
+      result = service.create_trigger(Json::parse(read_document(target)));
+    else if (*trigger_enable) {
+      service.set_trigger_enabled(target, true);
+      result = service.get(RecordKind::Trigger, target);
+    } else if (*trigger_disable) {
+      service.set_trigger_enabled(target, false);
+      result = service.get(RecordKind::Trigger, target);
+    } else if (*trigger_delete) {
+      service.delete_trigger(target);
+      result = service.get(RecordKind::Trigger, target);
+    }
+    if (run_executor) {
+      executor.start();
+      executor.join();
+    }
     if (!run_id.empty())
       result = service.run_view(run_id);
     std::cout << result.dump(2) << '\n';

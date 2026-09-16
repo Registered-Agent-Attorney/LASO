@@ -394,8 +394,14 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
               if (!deps_.resolve_pipeline)
                 throw Error(ErrorCode::Execution, "Pipeline resolver is unavailable");
               auto child_pipeline = deps_.resolve_pipeline(resolved);
-              const auto child_id = run(child_pipeline, r.message.payload, r.actor, r.id,
-                                        definition.id, r.subpipeline_depth + 1, r.message.id);
+              Json child_origin = {{"initiation_type", r.initiation_type},
+                                   {"trigger_depth", r.trigger_depth},
+                                   {"root_event_id", r.root_event_id},
+                                   {"trigger_id", r.trigger_id},
+                                   {"event_id", r.event_id}};
+              const auto child_id =
+                  run(child_pipeline, r.message.payload, r.actor, r.id, definition.id,
+                      r.subpipeline_depth + 1, r.message.id, std::move(child_origin));
               r.child_id = child_id;
               r.child_pipeline_id = child_pipeline.name;
               r.child_pipeline_version = child_pipeline.version;

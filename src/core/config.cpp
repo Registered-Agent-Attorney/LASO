@@ -29,7 +29,10 @@ void Config::validate() {
   if (api_port == 0 || api_port > 65535 || workers == 0 || workers > 64 || max_runs == 0 ||
       max_runs > 1024 || max_nodes == 0 || max_nodes > 4096 || max_nodes_per_run == 0 ||
       max_nodes_per_run > max_nodes || max_models == 0 || max_models > 1024 || max_tools == 0 ||
-      max_tools > 1024 || max_subpipeline_depth == 0 || max_subpipeline_depth > 64)
+      max_tools > 1024 || max_subpipeline_depth == 0 || max_subpipeline_depth > 64 ||
+      max_pending_scheduler_launches == 0 || max_pending_scheduler_launches > 4096 ||
+      max_event_trigger_depth == 0 || max_event_trigger_depth > 64 ||
+      max_event_trigger_deliveries == 0 || max_event_trigger_deliveries > 100000)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
   if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
@@ -91,12 +94,29 @@ Config load_config(const std::filesystem::path &supplied,
       throw Error(ErrorCode::Configuration, "Invalid configuration YAML");
     }
   }
-  for (auto name :
-       {"DATA_DIR",          "DB_PATH",       "STORAGE_BACKEND",  "POSTGRES_DSN",
-        "POSTGRES_SCHEMA",   "PLUGIN_DIR",    "LOG_LEVEL",        "API_HOST",
-        "API_PORT",          "WORKERS",       "MAX_RUNS",         "MAX_NODES",
-        "MAX_NODES_PER_RUN", "MAX_MODELS",    "MAX_TOOLS",        "MAX_SUBPIPELINE_DEPTH",
-        "JSON_LOGS",         "ALLOW_NETWORK", "ALLOW_REMOTE_API", "LOCAL_OPENAI_ENDPOINT"}) {
+  for (auto name : {"DATA_DIR",
+                    "DB_PATH",
+                    "STORAGE_BACKEND",
+                    "POSTGRES_DSN",
+                    "POSTGRES_SCHEMA",
+                    "PLUGIN_DIR",
+                    "LOG_LEVEL",
+                    "API_HOST",
+                    "API_PORT",
+                    "WORKERS",
+                    "MAX_RUNS",
+                    "MAX_NODES",
+                    "MAX_NODES_PER_RUN",
+                    "MAX_MODELS",
+                    "MAX_TOOLS",
+                    "MAX_SUBPIPELINE_DEPTH",
+                    "MAX_PENDING_SCHEDULER_LAUNCHES",
+                    "MAX_EVENT_TRIGGER_DEPTH",
+                    "MAX_EVENT_TRIGGER_DELIVERIES",
+                    "JSON_LOGS",
+                    "ALLOW_NETWORK",
+                    "ALLOW_REMOTE_API",
+                    "LOCAL_OPENAI_ENDPOINT"}) {
     auto variable = std::string("LASO_") + name;
     if (auto *v = std::getenv(variable.c_str())) {
       std::string key = name;
@@ -166,6 +186,12 @@ Config load_config(const std::filesystem::path &supplied,
       c.max_tools = integer(v);
     else if (k == "max_subpipeline_depth")
       c.max_subpipeline_depth = integer(v);
+    else if (k == "max_pending_scheduler_launches")
+      c.max_pending_scheduler_launches = integer(v);
+    else if (k == "max_event_trigger_depth")
+      c.max_event_trigger_depth = integer(v);
+    else if (k == "max_event_trigger_deliveries")
+      c.max_event_trigger_deliveries = integer(v);
     else
       throw Error(ErrorCode::Configuration, "Unknown configuration field");
   }

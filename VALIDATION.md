@@ -10,8 +10,8 @@ C++20 source, public headers, CMake targets, native C plugin SDK and examples,
 SQLite persistence, runtime, API/CLI, policies, scheduling and artifact interfaces,
 tests, systemd/Docker deployment files, documentation, and Linux CI are present.
 
-The test inventory contains **125 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario, for **127 CTest entries**. Composition and
+The test inventory contains **135 GoogleTest cases** plus **2 CTest entries** for CLI
+validation and a process smoke/restart scenario, for **137 CTest entries**. Composition and
 storage coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
@@ -66,16 +66,16 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 127/127** |
-| GCC Release CTest suite | **PASS: 127/127** |
-| Clang Debug CTest suite | **PASS: 127/127** |
-| Clang Release CTest suite | **PASS: 127/127** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 127/127** |
-| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 127/127; PostgreSQL tests executed against isolated PostgreSQL 16** |
+| GCC Debug CTest suite | **PASS: 137/137** |
+| GCC Release CTest suite | **PASS: 137/137** |
+| Clang Debug CTest suite | **PASS: 137/137** |
+| Clang Release CTest suite | **PASS: 137/137** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 137/137** |
+| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 137/137; all PostgreSQL cases executed against isolated PostgreSQL 16** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
-| Debian 13 container CTest suite | **PASS: 127/127 in the public Debian 13 container job; Docker was unavailable on the validation host for a duplicate local run** |
+| Debian 13 container CTest suite | **PASS: 137/137 in the public Debian 13 container job; Docker was unavailable on the validation host for a duplicate local run** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
@@ -95,7 +95,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **PASS: final-HEAD run `35139897204` completed all Ubuntu GCC/Clang, Debian, ASan/UBSan, and PostgreSQL jobs successfully** |
+| GitHub Actions execution | **Workflow configured for Ubuntu GCC/Clang, Debian, ASan/UBSan, and PostgreSQL service jobs; public status is authoritative for each pushed commit** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
@@ -112,5 +112,8 @@ use, and concurrent cache access.
 The shared storage conformance tests run against SQLite on every default build and
 against a real disposable PostgreSQL service when `LASO_TEST_POSTGRES_DSN` is set.
 They cover immutable pipeline revisions, pagination, invalid-record rejection,
-structured operational records, rollback boundaries, concurrent writes, and
-restart/reopen recovery.
+structured operational records, rollback boundaries, concurrent writes and claims,
+durable schedules/triggers, occurrence/delivery deduplication, and restart/reopen
+recovery. Scheduler tests cover UTC one-time/interval/cron behavior, misfire and
+overlap policies, bounded capacity retry, event matching/depth/deduplication,
+API/CLI surfaces, and normal-runtime launch provenance.

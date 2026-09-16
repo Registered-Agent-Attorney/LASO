@@ -55,7 +55,21 @@ Service::Service(asio::io_context &io, Config config)
                 [this](const std::string &reference) { return resolve_pipeline(reference); }}),
       artifacts_(config_.data_dir / "artifacts", *storage_),
       scheduler_(
-          io, [this](const ScheduledPipeline &s) { start(s.pipeline_id, s.input, "scheduler"); }) {
+          io, *storage_,
+          [this](const LaunchRequest &request) {
+            const auto reference =
+                pipeline_reference(request.pipeline_id, request.pipeline_version);
+            const auto actor = request.origin.value("initiation_type", std::string{}) == "event"
+                                   ? "event-trigger"
+                                   : "scheduler";
+            return start(reference, request.input, actor, false, request.origin);
+          },
+          [this](const Event &event) {
+            events_.publish(event);
+            log_event(event);
+          },
+          std::make_shared<SystemClock>(), config_.max_pending_scheduler_launches,
+          config_.max_event_trigger_depth, config_.max_event_trigger_deliveries) {
   configure_logging(config_);
   providers_.add("mock", std::make_shared<MockModelProvider>());
   if (!config_.local_openai_endpoint.empty())
@@ -65,6 +79,8 @@ Service::Service(asio::io_context &io, Config config)
   register_functions(functions_);
   plugins_.discover(config_.plugin_dirs);
   recover_history();
+  events_.subscribe(scheduler_.event_subscriber());
+  scheduler_.start();
 }
 Json Service::register_pipeline(const std::string &yaml) {
   auto extensions = nodes_.names();
@@ -226,7 +242,7 @@ Json Service::register_pipeline(const std::string &yaml) {
   return record;
 }
 std::string Service::start(const std::string &name_or_path, const Json &input,
-                           const std::string &actor, bool allow_file) {
+                           const std::string &actor, bool allow_file, Json origin) {
   std::string name = name_or_path;
   if (allow_file && std::filesystem::is_regular_file(name_or_path))
     name = register_pipeline(read_document(name_or_path)).at("id").get<std::string>();
@@ -237,7 +253,138 @@ std::string Service::start(const std::string &name_or_path, const Json &input,
   if (record.contains("resolved_subpipelines"))
     p.resolved_subpipelines =
         record.at("resolved_subpipelines").get<std::map<std::string, std::string>>();
-  return runtime_.run(p, input, actor);
+  return runtime_.run(p, input, actor, "", "", 0, "", std::move(origin));
+}
+
+Json Service::create_schedule(const Json &spec) {
+  auto schedule = parse_schedule_spec(spec);
+  const auto raw_pipeline = schedule.pipeline_id;
+  auto reference = parse_pipeline_reference(raw_pipeline);
+  if (reference.explicit_version) {
+    schedule.pipeline_id = reference.name;
+    schedule.pipeline_version = reference.version;
+  }
+  const auto pipeline =
+      reference.explicit_version
+          ? pipeline_record(pipeline_reference(schedule.pipeline_id, schedule.pipeline_version))
+          : pipeline_record(raw_pipeline);
+  schedule.pipeline_id = pipeline.at("name").get<std::string>();
+  schedule.pipeline_version = pipeline.at("version").get<unsigned>();
+  if (schedule.next_due_at.empty()) {
+    if (!schedule.at.empty())
+      schedule.next_due_at = schedule.at;
+    else
+      schedule.next_due_at = next_schedule_due(schedule, timestamp());
+  }
+  validate_schedule(schedule);
+  return scheduler_.create_schedule(std::move(schedule));
+}
+
+Json Service::update_schedule(const std::string &id, const Json &spec) {
+  auto schedule = get(RecordKind::Schedule, id).get<ScheduleDefinition>();
+  if (!spec.is_object())
+    throw Error(ErrorCode::Validation, "Schedule update must be a JSON object");
+  if (spec.contains("name"))
+    schedule.name = spec.at("name").get<std::string>();
+  if (spec.contains("type"))
+    schedule.type = spec.at("type").get<std::string>();
+  if (spec.contains("at"))
+    schedule.at = spec.at("at").get<std::string>();
+  if (spec.contains("cron"))
+    schedule.cron = spec.at("cron").get<std::string>();
+  if (spec.contains("interval_ms"))
+    schedule.interval_ms = spec.at("interval_ms").is_string()
+                               ? spec.at("interval_ms").get<std::string>()
+                               : std::to_string(spec.at("interval_ms").get<std::int64_t>());
+  if (spec.contains("input"))
+    schedule.input = spec.at("input");
+  if (spec.contains("misfire_policy"))
+    schedule.misfire_policy = spec.at("misfire_policy").get<std::string>();
+  if (spec.contains("overlap_policy"))
+    schedule.overlap_policy = spec.at("overlap_policy").get<std::string>();
+  if (spec.contains("enabled"))
+    schedule.enabled = spec.at("enabled").get<bool>();
+  if (spec.contains("pipeline") || spec.contains("pipeline_id") ||
+      spec.contains("pipeline_version") || spec.contains("version")) {
+    const auto raw = spec.value("pipeline", spec.value("pipeline_id", schedule.pipeline_id));
+    const auto parsed = parse_pipeline_reference(raw);
+    schedule.pipeline_id = parsed.explicit_version ? parsed.name : raw;
+    if (parsed.explicit_version)
+      schedule.pipeline_version = parsed.version;
+    else if (spec.contains("pipeline_version"))
+      schedule.pipeline_version = spec.at("pipeline_version").get<unsigned>();
+    else if (spec.contains("version"))
+      schedule.pipeline_version = spec.at("version").get<unsigned>();
+  }
+  if (spec.contains("next_due_at"))
+    schedule.next_due_at = spec.at("next_due_at").get<std::string>();
+  else if (spec.contains("at") || spec.contains("cron") || spec.contains("interval_ms"))
+    schedule.next_due_at =
+        schedule.type == "one_time" ? schedule.at : next_schedule_due(schedule, timestamp());
+  const auto pipeline =
+      pipeline_record(pipeline_reference(schedule.pipeline_id, schedule.pipeline_version));
+  schedule.pipeline_id = pipeline.at("name").get<std::string>();
+  schedule.pipeline_version = pipeline.at("version").get<unsigned>();
+  return scheduler_.update_schedule(std::move(schedule));
+}
+
+void Service::set_schedule_enabled(const std::string &id, bool enabled) {
+  scheduler_.set_schedule_enabled(id, enabled);
+}
+void Service::delete_schedule(const std::string &id) {
+  scheduler_.delete_schedule(id);
+}
+
+Json Service::create_trigger(const Json &spec) {
+  auto trigger = parse_trigger_spec(spec);
+  const auto parsed = parse_pipeline_reference(trigger.pipeline_id);
+  if (parsed.explicit_version) {
+    trigger.pipeline_id = parsed.name;
+    trigger.pipeline_version = parsed.version;
+  }
+  const auto pipeline =
+      pipeline_record(pipeline_reference(trigger.pipeline_id, trigger.pipeline_version));
+  trigger.pipeline_id = pipeline.at("name").get<std::string>();
+  trigger.pipeline_version = pipeline.at("version").get<unsigned>();
+  return scheduler_.create_trigger(std::move(trigger));
+}
+
+Json Service::update_trigger(const std::string &id, const Json &spec) {
+  auto trigger = get(RecordKind::Trigger, id).get<TriggerDefinition>();
+  if (!spec.is_object())
+    throw Error(ErrorCode::Validation, "Trigger update must be a JSON object");
+  if (spec.contains("name"))
+    trigger.name = spec.at("name").get<std::string>();
+  if (spec.contains("event") || spec.contains("event_type"))
+    trigger.event_type = spec.value("event", spec.value("event_type", trigger.event_type));
+  if (spec.contains("match"))
+    trigger.match = spec.at("match");
+  if (spec.contains("enabled"))
+    trigger.enabled = spec.at("enabled").get<bool>();
+  if (spec.contains("pipeline") || spec.contains("pipeline_id") ||
+      spec.contains("pipeline_version") || spec.contains("version")) {
+    const auto raw = spec.value("pipeline", spec.value("pipeline_id", trigger.pipeline_id));
+    const auto parsed = parse_pipeline_reference(raw);
+    trigger.pipeline_id = parsed.explicit_version ? parsed.name : raw;
+    if (parsed.explicit_version)
+      trigger.pipeline_version = parsed.version;
+    else if (spec.contains("pipeline_version"))
+      trigger.pipeline_version = spec.at("pipeline_version").get<unsigned>();
+    else if (spec.contains("version"))
+      trigger.pipeline_version = spec.at("version").get<unsigned>();
+  }
+  const auto pipeline =
+      pipeline_record(pipeline_reference(trigger.pipeline_id, trigger.pipeline_version));
+  trigger.pipeline_id = pipeline.at("name").get<std::string>();
+  trigger.pipeline_version = pipeline.at("version").get<unsigned>();
+  return scheduler_.update_trigger(std::move(trigger));
+}
+
+void Service::set_trigger_enabled(const std::string &id, bool enabled) {
+  scheduler_.set_trigger_enabled(id, enabled);
+}
+void Service::delete_trigger(const std::string &id) {
+  scheduler_.delete_trigger(id);
 }
 Json Service::pipeline_record(const std::string &reference) const {
   const auto parsed = parse_pipeline_reference(reference);

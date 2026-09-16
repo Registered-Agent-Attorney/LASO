@@ -75,3 +75,25 @@ metadata registration. User names never select filesystem paths. A crash between
 file creation and metadata commit may leave an unreferenced file; garbage collection
 is deferred. Payloads/results and comments are stored as supplied: applications
 must keep credentials out of them. Resolved secret-provider values are not recorded.
+
+## Scheduler and triggers
+
+Durable schedules and event triggers launch ordinary runtime runs. A schedule pins
+an immutable `pipeline_id` and `pipeline_version`; it never resolves a newer
+revision during a historical occurrence. Schedule inputs are passed as the root
+run input. A matching event trigger passes the source event under the `event` key.
+
+The scheduler supports `one_time`, `interval`, and standard five-field `cron`
+(`minute hour day-of-month month day-of-week`). Persisted timestamps and cron
+evaluation are UTC. `SKIP` misfire advances past missed occurrences; `RUN_ONCE`
+performs one bounded catch-up. Recurring overlap is explicitly `ALLOW`, `SKIP`, or
+`QUEUE_ONE`; the latter collapses multiple overlaps into one pending execution.
+
+An insert-only occurrence claim (`schedule_id|due_at`) is committed before a
+launch. Trigger delivery claims (`trigger_id|event_id`) similarly survive restart.
+These mechanisms prevent obvious duplicate local launches but do not promise
+distributed exactly-once execution. Event triggers enforce a maximum causal depth
+and a bounded delivery queue. Scheduler-created runs expose `initiation_type`,
+schedule/trigger IDs, due/event IDs, and root event IDs through normal run
+inspection. The scheduler shuts down by cancelling its wait timer and does not
+hold runtime node permits while waiting for capacity.
