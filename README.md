@@ -157,7 +157,7 @@ process.** Metadata validation does not isolate native code. See the
 | `parallel-join` | Fork, checkpoint each branch, combine results in branch order |
 | `schema-contract` | Offline function pipeline with input/output JSON Schema contracts |
 | `bounded-loop` | Exactly two deterministic repetitions |
-| `subpipeline` | Invoke registered `hello@1`; register it first with `pipeline register` |
+| `subpipeline` | Invoke registered `hello@1` through `parent@1`; register it first with `pipeline register` |
 | `composition` | Offline versioned child pipeline and A → B → C composition |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 

@@ -75,7 +75,7 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
-| Debian 13 container CTest suite | **PASS: 127/127** |
+| Debian 13 container CTest suite | **NOT RUN locally: Docker is unavailable on Linux validation host; the public Debian CI job remains the reproducible validation path** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
