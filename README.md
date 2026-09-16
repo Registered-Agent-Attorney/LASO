@@ -137,9 +137,12 @@ LASO_PLUGIN_DIR=build/plugins ./build/bin/laso --config examples/plugin-model/co
 Plugins are loaded with `dlopen`/`dlsym`, only from configured directories.
 The SDK uses a versioned C ABI, explicit structure sizes, borrowed inputs,
 host-owned output callbacks, and no STL objects or exceptions across the boundary.
-Tool and model-provider components are operational. Model providers are resolved
-through the existing provider registry, so built-in mock and local providers remain
-available. Other component kinds have reserved IDs and return `LASO_UNSUPPORTED`.
+Tool, model-provider, and event-source components are operational. Model providers
+are resolved through the existing provider registry, so built-in mock and local
+providers remain available; other component kinds have reserved IDs and return
+`LASO_UNSUPPORTED`. Event
+sources use the ABI lifecycle suffix and a bounded thread-safe host callback to
+submit canonical events; they never create runs directly.
 
 **Loading a native LASO plugin grants that plugin code execution inside the LASO
 process.** Metadata validation does not isolate native code. See the
@@ -160,6 +163,7 @@ process.** Metadata validation does not isolate native code. See the
 | `subpipeline` | Invoke registered `hello@1` through `parent@1`; register it first with `pipeline register` |
 | `composition` | Offline versioned child pipeline and A → B → C composition |
 | `scheduling` | Offline schedule and event-trigger definitions for a deterministic pipeline |
+| `event-source` | Offline native event-source plugin → durable event trigger → pipeline |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 
 For an optional loopback-only OpenAI-compatible local model service, see
@@ -203,8 +207,10 @@ daemon in the foreground as an unprivileged service account.
   version resolution, approval/retry/recovery behavior, and a configurable maximum
   depth. There is no distributed execution or package registry.
 - Deadlines and cancellation are cooperative. A native plugin that blocks or
-  misbehaves can block a worker or crash the process. The v1 plugin invocation ABI
-  is for short local operations; asynchronous external plugin I/O is deferred.
+  misbehaves can block a worker or crash the process. The v1 tool/provider
+  invocation ABI is for short local operations; event sources may emit from
+  their own threads but must quiesce those threads before their stop callback
+  returns. Native plugins are privileged in-process code and are not sandboxed.
 - Approval waits and history survive restart. In-flight external effects are not
   exactly once; an explicit resume may replay an unfinished node. Operators must
   review interrupted runs. Automatic general crash recovery is deferred.
@@ -218,6 +224,8 @@ daemon in the foreground as an unprivileged service account.
 - Schedules and event triggers are durable local framework records. One-time,
   interval, UTC five-field cron, and internal-event triggers launch normal runs;
   misfire, overlap, delivery-depth, and pending-work bounds are explicit. There
-  are no external event adapters, distributed workers, or exactly-once claims.
+  are no vendor-specific external adapters, distributed workers, or exactly-once
+  claims. Generic configured event-source plugins can ingress validated durable
+  events; supplied external IDs deduplicate within the selected storage database.
 
 Licensed under Apache License 2.0.

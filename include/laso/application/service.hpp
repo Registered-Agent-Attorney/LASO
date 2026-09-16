@@ -1,4 +1,5 @@
 #pragma once
+#include <laso/application/event_ingress.hpp>
 #include <laso/artifacts/artifacts.hpp>
 #include <laso/plugins/loader.hpp>
 #include <laso/runtime/runtime.hpp>
@@ -11,6 +12,7 @@ namespace laso {
 class Service {
 public:
   Service(asio::io_context &, Config);
+  ~Service() noexcept;
   const Config &config() const {
     return config_;
   }
@@ -37,6 +39,9 @@ public:
   Json providers() const;
   Json tools() const;
   Json plugins() const;
+  Json event_sources() const;
+  Json event_source(const std::string &id) const;
+  void set_event_source_enabled(const std::string &id, bool enabled);
   Runtime &runtime() {
     return runtime_;
   }
@@ -58,6 +63,9 @@ public:
   ArtifactStore &artifacts() {
     return artifacts_;
   }
+  EventIngress &event_ingress() {
+    return ingress_;
+  }
   Scheduler &scheduler() {
     return scheduler_;
   }
@@ -74,10 +82,12 @@ private:
   NodeRegistry nodes_;
   PolicyEngine policy_;
   SchemaValidator schemas_;
+  EventIngress ingress_;
   PluginLoader plugins_;
   Runtime runtime_;
   LocalArtifactStore artifacts_;
   LocalScheduler scheduler_;
+  bool shutdown_ = false;
   Json pipeline_record(const std::string &reference) const;
   PipelineDefinition resolve_pipeline(const std::string &reference) const;
   void recover_history();

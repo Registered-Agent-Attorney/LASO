@@ -49,7 +49,26 @@ Service::Service(asio::io_context &io, Config config)
       storage_(create_storage({config_.storage_backend, config_.db_path, config_.postgres_dsn,
                                config_.postgres_schema})),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
-      plugins_(tools_, providers_),
+      ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
+               config_.max_pending_scheduler_launches, 32),
+      plugins_(
+          tools_, providers_,
+          [this](const std::string &source, const std::string &plugin, const std::string &component,
+                 const std::string &schema, const std::string &event_json) {
+            return ingress_.submit(source, plugin, component, schema, event_json);
+          },
+          [this](const EventSourceInfo &info) {
+            storage_->commit({{RecordKind::EventSource, info.id, "", Json(info)}});
+          },
+          [this](const std::string &id) -> std::optional<EventSourceInfo> {
+            try {
+              return storage_->get(RecordKind::EventSource, id).get<EventSourceInfo>();
+            } catch (const Error &error) {
+              if (error.code == ErrorCode::NotFound)
+                return std::nullopt;
+              throw;
+            }
+          }),
       runtime_(io, config_,
                {*storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
                 [this](const std::string &reference) { return resolve_pipeline(reference); }}),
@@ -77,10 +96,17 @@ Service::Service(asio::io_context &io, Config config)
                    std::make_shared<LocalOpenAICompatibleProvider>(config_.local_openai_endpoint));
   tools_.add("echo", std::make_shared<EchoTool>());
   register_functions(functions_);
-  plugins_.discover(config_.plugin_dirs);
+  plugins_.discover(config_.plugin_dirs, config_.event_sources);
+  for (const auto &source : plugins_.event_sources())
+    if (!source.value("event_schema", std::string{}).empty())
+      schemas_.validate_declaration(source.at("event_schema").get<std::string>());
   recover_history();
   events_.subscribe(scheduler_.event_subscriber());
   scheduler_.start();
+  plugins_.start_event_sources();
+}
+Service::~Service() noexcept {
+  shutdown();
 }
 Json Service::register_pipeline(const std::string &yaml) {
   auto extensions = nodes_.names();
@@ -386,6 +412,15 @@ void Service::set_trigger_enabled(const std::string &id, bool enabled) {
 void Service::delete_trigger(const std::string &id) {
   scheduler_.delete_trigger(id);
 }
+Json Service::event_sources() const {
+  return plugins_.event_sources();
+}
+Json Service::event_source(const std::string &id) const {
+  return plugins_.event_source(id);
+}
+void Service::set_event_source_enabled(const std::string &id, bool enabled) {
+  plugins_.set_event_source_enabled(id, enabled);
+}
 Json Service::pipeline_record(const std::string &reference) const {
   const auto parsed = parse_pipeline_reference(reference);
   if (parsed.explicit_version) {
@@ -487,6 +522,11 @@ Json Service::plugins() const {
   return Json(plugins_.plugins());
 }
 void Service::shutdown() {
+  if (shutdown_)
+    return;
+  shutdown_ = true;
+  ingress_.stop();
+  plugins_.stop_event_sources();
   scheduler_.stop();
   runtime_.shutdown();
 }

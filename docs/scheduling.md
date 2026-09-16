@@ -74,6 +74,14 @@ receives the source LASO event as `{"event": <event>}`. Delivery records use
 persisted events after restart is deduplicated. Triggers created after an event do
 not replay older events. Disabled/deleted triggers do nothing.
 
+Generic native event-source plugins may publish those same durable Events through
+the bounded host ingress API. The trigger engine does not distinguish a plugin
+origin from an internal event after persistence; source plugin/component identity,
+external event ID, occurrence time, ingestion time, and causal fields remain on
+the Event for inspection. See [event sources](event-sources.md) for the ABI,
+schema, backpressure, lifecycle, and security contract. LASO Core does not include
+vendor adapters or network listeners.
+
 Event-caused runs retain `initiation_type: event`, trigger/event IDs, the root
 event ID, and causal depth. Events emitted by those runs carry the causal fields;
 the configured `max_event_trigger_depth` (default 16, range 1–64) stops obvious
@@ -88,6 +96,7 @@ under `/api/v1/schedules` and `/api/v1/triggers`. The CLI provides:
 ```text
 laso schedule list|show ID|create FILE|enable ID|disable ID|delete ID
 laso trigger  list|show ID|create FILE|enable ID|disable ID|delete ID
+laso event-source list|show ID|enable ID|disable ID
 ```
 
 Run inspection exposes origin fields through the normal run response. Schedule,

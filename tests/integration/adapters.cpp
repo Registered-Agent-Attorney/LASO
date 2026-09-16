@@ -36,12 +36,19 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
   for_each_storage_backend([](const auto &backend) {
     TemporaryDirectory dir;
     auto s = backend.open(dir.path / "state.db");
-    constexpr std::array kinds = {RecordKind::Pipeline,       RecordKind::Run,
-                                  RecordKind::Attempt,        RecordKind::Message,
-                                  RecordKind::Approval,       RecordKind::Artifact,
-                                  RecordKind::Event,          RecordKind::Schedule,
-                                  RecordKind::Trigger,        RecordKind::ScheduleOccurrence,
-                                  RecordKind::TriggerDelivery};
+    constexpr std::array kinds = {RecordKind::Pipeline,
+                                  RecordKind::Run,
+                                  RecordKind::Attempt,
+                                  RecordKind::Message,
+                                  RecordKind::Approval,
+                                  RecordKind::Artifact,
+                                  RecordKind::Event,
+                                  RecordKind::Schedule,
+                                  RecordKind::Trigger,
+                                  RecordKind::ScheduleOccurrence,
+                                  RecordKind::TriggerDelivery,
+                                  RecordKind::EventSource,
+                                  RecordKind::ExternalEventClaim};
     std::vector<Record> records;
     for (std::size_t i = 0; i < kinds.size(); ++i)
       records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});
@@ -226,6 +233,45 @@ TEST(Storage, ConformanceSerializesConcurrentClaims) {
     EXPECT_EQ(winners, 1U);
   });
 }
+TEST(Storage, ConformanceAtomicallyClaimsExternalEventAndDeduplicates) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    const Record claim{
+        RecordKind::ExternalEventClaim,
+        "external-event:source:event-1",
+        "",
+        {{"source_id", "source"}, {"external_event_id", "event-1"}, {"event_id", "event-record"}}};
+    const Record event{RecordKind::Event, "event-record", "", {{"type", "example.created"}}};
+    EXPECT_TRUE(s->claim(claim, {event}));
+    EXPECT_FALSE(s->claim(claim, {{RecordKind::Event, "other-event", "", Json::object()}}));
+    EXPECT_EQ(s->list(RecordKind::Event).size(), 1U);
+    EXPECT_EQ(s->get(RecordKind::ExternalEventClaim, claim.id).at("event_id"), "event-record");
+  });
+}
+TEST(Storage, ConformanceSerializesConcurrentExternalEventClaims) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    std::atomic<unsigned> winners = 0;
+    std::vector<std::jthread> claimers;
+    for (unsigned i = 0; i < 8; ++i) {
+      claimers.emplace_back([&, i] {
+        const auto event_id = "external-event-" + std::to_string(i);
+        if (s->claim({RecordKind::ExternalEventClaim,
+                      "external-event:source:same",
+                      "",
+                      {{"event_id", event_id}}},
+                     {{RecordKind::Event, event_id, "", {{"type", "example.created"}}}}))
+          ++winners;
+      });
+    }
+    claimers.clear();
+    EXPECT_EQ(winners, 1U);
+    EXPECT_EQ(s->list(RecordKind::Event).size(), 1U);
+  });
+}
+
 TEST(Storage, PostgresRejectsSecondOwner) {
 #if defined(LASO_HAS_POSTGRES)
   if (!std::getenv("LASO_TEST_POSTGRES_DSN"))
@@ -322,7 +368,7 @@ TEST(Plugins, DiscoversLoadsInvokesAndUnloadsExample) {
   auto c = config(dir.path);
   c.plugin_dirs = {LASO_PLUGIN_DIR};
   Service s(io, c);
-  ASSERT_EQ(s.plugins().size(), 2U);
+  ASSERT_EQ(s.plugins().size(), 3U);
   EXPECT_TRUE(s.plugins().at(0).at("loaded").get<bool>());
   auto r = execute(s, io, fixture("native-plugin"), {{"echo", 123}});
   EXPECT_EQ(r.state, RunState::Completed);

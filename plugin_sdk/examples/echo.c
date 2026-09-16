@@ -32,6 +32,8 @@ int32_t laso_plugin_init(const laso_host_api *host, laso_plugin_handle *out) {
       "{\"description\":\"Native JSON echo\",\"network\":false,\"timeout_ms\":1000}",
       &instance,
       echo,
+      NULL,
+      NULL,
       NULL};
   int32_t status = host->register_component(host->host_context, &component);
   if (status != LASO_OK)

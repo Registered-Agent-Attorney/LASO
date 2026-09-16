@@ -17,6 +17,8 @@ an arbitrary request-body actor. Local development identity is unauthenticated.
 | GET | `/approvals`, `/approvals/{id}` |
 | POST | `/approvals/{id}/approve`, `/approvals/{id}/reject` |
 | GET | `/providers`, `/tools`, `/plugins` |
+| GET | `/event-sources`, `/event-sources/{id}` |
+| POST | `/event-sources/{id}/enable`, `/event-sources/{id}/disable` |
 
 All paths above are relative to `/api/v1`. Creation/decisions return 201/202; callers
 inspect run state separately. Errors use 400 (validation), 403 (policy), 404, 409
@@ -45,6 +47,10 @@ laso approval reject ID [--actor NAME] [--comment TEXT]
 laso plugin list
 laso provider list
 laso tool list
+laso event-source list
+laso event-source show ID
+laso event-source enable ID
+laso event-source disable ID
 ```
 
 Pipeline IDs may be explicit revisions such as `research@2`; `pipeline show` and

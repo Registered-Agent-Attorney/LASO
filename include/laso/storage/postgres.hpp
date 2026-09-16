@@ -11,7 +11,7 @@ public:
   PostgresStorage(const PostgresStorage &) = delete;
   PostgresStorage &operator=(const PostgresStorage &) = delete;
   void commit(const std::vector<Record> &) override;
-  bool claim(const Record &) override;
+  bool claim(const Record &, const std::vector<Record> &associated = {}) override;
   Json get(RecordKind, const std::string &) const override;
   std::vector<Json> list(RecordKind, const std::string &run_id = "", std::size_t limit = 1000,
                          std::size_t offset = 0) const override;

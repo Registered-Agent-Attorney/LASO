@@ -52,19 +52,19 @@ unsigned number(const YAML::Node &n, const char *key, unsigned fallback, unsigne
     throw Error(ErrorCode::Validation, "Numeric configuration out of bounds");
   return static_cast<unsigned>(value);
 }
-Json value(const YAML::Node &n) {
+Json yaml_value_impl(const YAML::Node &n) {
   if (!n || n.IsNull())
     return nullptr;
   if (n.IsSequence()) {
     Json j = Json::array();
     for (const auto &v : n)
-      j.push_back(value(v));
+      j.push_back(yaml_value_impl(v));
     return j;
   }
   if (n.IsMap()) {
     Json j = Json::object();
     for (const auto &v : n)
-      j[v.first.as<std::string>()] = value(v.second);
+      j[v.first.as<std::string>()] = yaml_value_impl(v.second);
     return j;
   }
   const auto s = n.as<std::string>();
@@ -78,6 +78,9 @@ bool identifier(const std::string &s) {
   return std::regex_match(s, pattern);
 }
 } // namespace
+Json detail::yaml_value(const YAML::Node &n) {
+  return yaml_value_impl(n);
+}
 YAML::Node detail::load_safe_yaml(const std::string &text) {
   if (text.size() > max_document_bytes)
     throw Error(ErrorCode::Validation, "Configuration exceeds 1 MiB");
@@ -175,7 +178,7 @@ PipelineDefinition parse_pipeline(const std::string &text,
       d.input_schema = str(n, "input_schema");
       d.output_schema = str(n, "output_schema");
       d.schema = str(n, "schema");
-      d.value = value(n["value"]);
+      d.value = detail::yaml_value(n["value"]);
       d.retry.max_attempts = number(n, "max_attempts", 1, 1, 10);
       d.retry.delay = Milliseconds(number(n, "retry_delay_ms", 0, 0, 60000));
       d.timeout.timeout = Milliseconds(number(n, "timeout_ms", 30000, 1, 3600000));

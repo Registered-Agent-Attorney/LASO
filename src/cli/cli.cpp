@@ -81,6 +81,15 @@ int cli_main(int argc, char **argv) {
   trigger_disable->add_option("id", target)->required();
   auto *trigger_delete = trigger->add_subcommand("delete");
   trigger_delete->add_option("id", target)->required();
+  auto *event_source = app.add_subcommand("event-source");
+  event_source->require_subcommand(1);
+  auto *event_source_list = event_source->add_subcommand("list");
+  auto *event_source_show = event_source->add_subcommand("show");
+  event_source_show->add_option("id", target)->required();
+  auto *event_source_enable = event_source->add_subcommand("enable");
+  event_source_enable->add_option("id", target)->required();
+  auto *event_source_disable = event_source->add_subcommand("disable");
+  event_source_disable->add_option("id", target)->required();
   app.require_subcommand(1);
   try {
     app.parse(argc, argv);
@@ -189,6 +198,17 @@ int cli_main(int argc, char **argv) {
     } else if (*trigger_delete) {
       service.delete_trigger(target);
       result = service.get(RecordKind::Trigger, target);
+    } else if (*event_source_list)
+      result = service.event_sources();
+    else if (*event_source_show)
+      result = service.event_source(target);
+    else if (*event_source_enable) {
+      service.set_event_source_enabled(target, true);
+      result = service.event_source(target);
+      run_executor = true;
+    } else if (*event_source_disable) {
+      service.set_event_source_enabled(target, false);
+      result = service.event_source(target);
     }
     if (run_executor) {
       executor.start();
