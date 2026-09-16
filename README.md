@@ -169,6 +169,7 @@ not download or launch models.
 
 See [architecture](docs/architecture.md), [runtime semantics](docs/runtime.md),
 [pipeline composition](docs/pipelines.md),
+[storage backends](docs/storage.md),
 [Linux deployment](docs/linux-deployment.md), [security](SECURITY.md), and
 [contribution instructions](CONTRIBUTING.md). CI specifies Ubuntu GCC/Clang,
 Debian 13, ASan/UBSan, formatting, clang-tidy, and a real PostgreSQL service job.
@@ -213,7 +214,7 @@ daemon in the foreground as an unprivileged service account.
   adapters, streaming, secret persistence, sandboxing, authentication platform, or
   GUI is included.
 - Scheduler registration is an in-process C++ interface, finite one-shot/interval
-  only. Durable schedules, cron, event backends, remote storage, and the non-tool
-  plugin adapters are deferred.
+  only. Durable schedules, cron, event backends, distributed storage, and the
+  non-tool plugin adapters are deferred.
 
 Licensed under Apache License 2.0.

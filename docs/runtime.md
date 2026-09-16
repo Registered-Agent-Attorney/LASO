@@ -18,7 +18,7 @@ Both adapters reject newer schema versions instead of silently interpreting them
 Each successful node checkpoint includes its final attempt, output message, run
 cursor/branch queues and event in one transaction. A pending approval includes its
 request, waiting attempt and run state in one transaction. An approval decision and
-resumable queued state commit together. SQLite history survives process restart.
+resumable queued state commit together. Storage history survives process restart.
 
 The selected database has a single-service ownership lease: SQLite uses Linux
 `flock`, while PostgreSQL uses a session-held advisory lock. Two independent
