@@ -31,7 +31,7 @@ unvalidated. See [VALIDATION.md](VALIDATION.md) for the exact record.
   secrets in those values. No generic redaction guarantee is claimed.
 - Native binaries set restrictive umask. Use a private state directory, restrict
   database backups and artifact access, and keep configuration outside public
-  repositories. SQLite and artifacts are not an encrypted secret vault.
+  repositories. SQLite, PostgreSQL, and artifacts are not encrypted secret vaults.
 - Cancellation and deadlines are cooperative. A faulty native extension can block
   a worker, corrupt memory or crash the daemon. Out-of-process isolation is deferred.
 
@@ -54,3 +54,9 @@ dependency graphs, while runtime enforces the configured maximum depth (16 by
 default). Child runs use the normal policy, schema, provider/tool, cancellation,
 deadline and resource-limit paths, and parent/child identifiers are persisted
 without logging payload contents.
+
+Storage is backend-neutral at the application boundary. SQLite is the default local
+backend; PostgreSQL is an explicit optional build/runtime choice. PostgreSQL DSNs are
+never written to LASO logs or API error responses. PostgreSQL schema names are
+validated as simple identifiers before they are used in DDL; SQL values are bound
+parameters. The PostgreSQL test service in CI uses disposable credentials and data.

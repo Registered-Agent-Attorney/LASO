@@ -1,8 +1,10 @@
 #include "../support.hpp"
 #include <array>
+#include <atomic>
 #include <boost/beast.hpp>
 #include <fstream>
 #include <laso/api/api.hpp>
+#include <thread>
 
 using namespace laso;
 using namespace laso::test;
@@ -34,8 +36,8 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
   for_each_storage_backend([](const auto &backend) {
     TemporaryDirectory dir;
     auto s = backend.open(dir.path / "state.db");
-    constexpr std::array kinds = {RecordKind::Pipeline, RecordKind::Run, RecordKind::Attempt,
-                                  RecordKind::Message, RecordKind::Approval, RecordKind::Artifact,
+    constexpr std::array kinds = {RecordKind::Pipeline, RecordKind::Run,      RecordKind::Attempt,
+                                  RecordKind::Message,  RecordKind::Approval, RecordKind::Artifact,
                                   RecordKind::Event};
     std::vector<Record> records;
     for (std::size_t i = 0; i < kinds.size(); ++i)
@@ -87,6 +89,108 @@ TEST(Storage, ConformanceSupportsPagination) {
     EXPECT_EQ(page[1].at("index"), 2);
   });
 }
+TEST(Storage, ConformancePaginatesBeyondOnePage) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    std::vector<Record> records;
+    records.reserve(10001);
+    for (unsigned i = 0; i < 10001; ++i)
+      records.push_back({RecordKind::Event, "event-" + std::to_string(i), "run-1", {{"index", i}}});
+    s->commit(records);
+    const auto page = s->list(RecordKind::Event, "run-1", 1000, 10000);
+    ASSERT_EQ(page.size(), 1U);
+    EXPECT_EQ(page.front().at("index"), 10000U);
+  });
+}
+TEST(Storage, ConformanceRejectsInvalidRecordInputs) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    try {
+      s->commit({{static_cast<RecordKind>(99), "record", "run-1", Json::object()}});
+      FAIL() << "invalid record kind should be rejected";
+    } catch (const Error &error) {
+      EXPECT_EQ(error.code, ErrorCode::Validation);
+    }
+    try {
+      s->get(static_cast<RecordKind>(99), "record");
+      FAIL() << "invalid get kind should be rejected";
+    } catch (const Error &error) {
+      EXPECT_EQ(error.code, ErrorCode::Validation);
+    }
+    try {
+      s->list(static_cast<RecordKind>(99));
+      FAIL() << "invalid list kind should be rejected";
+    } catch (const Error &error) {
+      EXPECT_EQ(error.code, ErrorCode::Validation);
+    }
+    EXPECT_THROW(s->commit({{RecordKind::Event, "", "run-1", Json::object()}}), Error);
+    EXPECT_THROW(
+        s->commit({{RecordKind::Event, "discarded", "run-1", Json(Json::value_t::discarded)}}),
+        Error);
+  });
+}
+TEST(Storage, ConformancePersistsStructuredOperationalRecords) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    const Json run = {{"id", "parent"},
+                      {"state", "WaitingApproval"},
+                      {"pipeline_id", "parent"},
+                      {"pipeline_version", 2},
+                      {"child_runs", Json::array({"child"})}};
+    const Json child = {{"id", "child"},
+                        {"parent_id", "parent"},
+                        {"parent_node_id", "invoke"},
+                        {"pipeline_id", "child"},
+                        {"pipeline_version", 3}};
+    const Json approval = {{"id", "approval"}, {"run_id", "child"}, {"decision", "pending"}};
+    const Json artifact = {{"id", "artifact"}, {"run_id", "child"}, {"location", "local"}};
+    const Json event = {{"id", "event"}, {"run_id", "child"}, {"type", "child.started"}};
+    s->commit({{RecordKind::Run, "parent", "parent", run},
+               {RecordKind::Run, "child", "parent", child},
+               {RecordKind::Approval, "approval", "child", approval},
+               {RecordKind::Artifact, "artifact", "child", artifact},
+               {RecordKind::Event, "event", "child", event}});
+    EXPECT_EQ(s->get(RecordKind::Run, "child"), child);
+    EXPECT_EQ(s->list(RecordKind::Run, "parent").size(), 2U);
+    EXPECT_EQ(s->get(RecordKind::Approval, "approval"), approval);
+    EXPECT_EQ(s->get(RecordKind::Artifact, "artifact"), artifact);
+    EXPECT_EQ(s->get(RecordKind::Event, "event"), event);
+    auto decided = approval;
+    decided["decision"] = "approved";
+    s->commit({{RecordKind::Approval, "approval", "child", decided}});
+    EXPECT_EQ(s->get(RecordKind::Approval, "approval").at("decision"), "approved");
+    auto cancelled = run;
+    cancelled["state"] = "Cancelled";
+    s->commit({{RecordKind::Run, "parent", "parent", cancelled}});
+    EXPECT_EQ(s->get(RecordKind::Run, "parent").at("state"), "Cancelled");
+  });
+}
+TEST(Storage, ConformanceSerializesConcurrentCommits) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    std::atomic<bool> failed = false;
+    std::vector<std::jthread> writers;
+    for (unsigned writer = 0; writer < 4; ++writer) {
+      writers.emplace_back([&, writer] {
+        try {
+          for (unsigned i = 0; i < 32; ++i) {
+            const auto id = "concurrent-" + std::to_string(writer) + "-" + std::to_string(i);
+            s->commit({{RecordKind::Event, id, "run-1", {{"writer", writer}, {"index", i}}}});
+          }
+        } catch (...) {
+          failed = true;
+        }
+      });
+    }
+    writers.clear();
+    EXPECT_FALSE(failed);
+    EXPECT_EQ(s->list(RecordKind::Event, "run-1").size(), 128U);
+  });
+}
 TEST(Storage, PostgresRejectsSecondOwner) {
 #if defined(LASO_HAS_POSTGRES)
   if (!std::getenv("LASO_TEST_POSTGRES_DSN"))
@@ -105,6 +209,56 @@ TEST(Storage, PostgresRejectsSecondOwner) {
       EXPECT_STREQ(error.what(), "PostgreSQL database is owned by another LASO process");
     }
   }
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
+TEST(Storage, PostgresRunsAndRecoversNormalRuntime) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  const auto dsn_copy = std::string(dsn);
+  auto schema = "laso_runtime_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  TemporaryDirectory dir;
+  Config c = config(dir.path);
+  c.storage_backend = "postgres";
+  c.postgres_dsn = dsn_copy;
+  c.postgres_schema = schema;
+  c.validate();
+  std::string run_id;
+  try {
+    {
+      asio::io_context io;
+      Service service(io, c);
+      service.register_pipeline(fixture("hello-pipeline"));
+      const auto parent = service.register_pipeline(fixture("subpipeline"));
+      run_id = service.start(parent.at("id").get<std::string>(), Json{{"value", 42}});
+      io.run();
+      const auto run = service.get(RecordKind::Run, run_id).get<laso::Run>();
+      EXPECT_EQ(run.state, RunState::Completed);
+      EXPECT_EQ(run.child_runs.size(), 1U);
+      EXPECT_EQ(service.get(RecordKind::Run, run.child_runs.front()).at("pipeline_version"), 1U);
+    }
+    {
+      asio::io_context io;
+      Service reopened(io, c);
+      const auto run = reopened.get(RecordKind::Run, run_id).get<laso::Run>();
+      EXPECT_EQ(run.state, RunState::Completed);
+      EXPECT_EQ(reopened.run_view(run_id).at("children").size(), 1U);
+    }
+  } catch (...) {
+    pqxx::connection connection(dsn_copy);
+    pqxx::work transaction(connection);
+    transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+    transaction.commit();
+    throw;
+  }
+  pqxx::connection connection(dsn_copy);
+  pqxx::work transaction(connection);
+  transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+  transaction.commit();
 #else
   GTEST_SKIP() << "PostgreSQL backend is not enabled";
 #endif

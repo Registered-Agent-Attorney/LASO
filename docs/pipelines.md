@@ -1,6 +1,6 @@
 # Pipeline registry and composition
 
-LASO registers pipeline revisions in the existing SQLite-backed registry. The
+LASO registers pipeline revisions in the configured backend-neutral registry. The
 logical identity is `name@version`, not a YAML file path. A definition with
 `name: research` and `version: 2` is registered as `research@2`.
 

@@ -44,11 +44,10 @@ bool same_source(const Json &record, const std::string &yaml) {
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))),
-      lease_(config_.storage_backend == "sqlite"
-                 ? std::make_unique<ProcessLease>(config_.db_path)
-                 : nullptr),
-      storage_(create_storage(
-          {config_.storage_backend, config_.db_path, config_.postgres_dsn, config_.postgres_schema})),
+      lease_(config_.storage_backend == "sqlite" ? std::make_unique<ProcessLease>(config_.db_path)
+                                                 : nullptr),
+      storage_(create_storage({config_.storage_backend, config_.db_path, config_.postgres_dsn,
+                               config_.postgres_schema})),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       plugins_(tools_, providers_),
       runtime_(io, config_,

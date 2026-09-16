@@ -6,7 +6,9 @@ version (0.1.0), YAML format (1), SQLite schema (1), and plugin ABI (1) are dist
 | Target | Responsibility and dependencies |
 |---|---|
 | `laso_core` | Domain types, safe parser, config, policy contracts, registry, events, security and artifacts; no HTTP includes |
+| `laso_storage` | Backend-neutral storage factory and `Storage` boundary |
 | `laso_storage_sqlite` | Native SQLite C API behind `Storage`, transactional checkpoints |
+| `laso_storage_postgres` | Optional libpqxx backend behind `Storage`, transactional checkpoints |
 | `laso_plugin_loader` | Linux dynamic loader and C adapters for tools and model providers |
 | `laso_runtime` | Async node execution, state transitions, finite scheduling and checkpoint decisions |
 | `laso_application` | Owns dependencies, registration, recovery inspection and shared services |
@@ -16,7 +18,8 @@ version (0.1.0), YAML format (1), SQLite schema (1), and plugin ABI (1) are dist
 Boost.Beast was selected because Ubuntu and Debian ship Boost, it supplies a
 maintained HTTP parser, and Asio also provides the execution/event-loop facilities.
 No custom HTTP parser or provider SDK is in the runtime. SQLite uses its small C
-API instead of an ORM. YAML and JSON remain at parsing and payload boundaries.
+API instead of an ORM, while the optional PostgreSQL adapter uses libpqxx. YAML and
+JSON remain at parsing and payload boundaries.
 
 Registries use shared mutexes and shared ownership of registered objects. Plugin
 tool and provider objects retain their library handle; shutdown and `dlclose` occur only after
@@ -26,10 +29,12 @@ operation. Plugins are never hot-reloaded during execution.
 
 The executor owns a configured finite number of `std::jthread` workers and runs
 Asio coroutines. Slot limiters suspend rather than block. One coroutine owns each
-run's mutable snapshot. Storage serializes its short SQLite operations; runtime
-admission and cancellation maps have their own mutex. HTTP connections and
-scheduler timers use strands. These are independent locks, not a global framework
-lock. Implementations registered by applications must handle concurrent calls.
+run's mutable snapshot. Each storage adapter serializes its short synchronous
+operations behind its own mutex; the PostgreSQL adapter intentionally uses one
+bounded connection. Runtime admission and cancellation maps have their own mutex.
+HTTP connections and scheduler timers use strands. These are independent locks,
+not a global framework lock. Implementations registered by applications must handle
+concurrent calls.
 
 The owner must stop HTTP acceptance and scheduling, request runtime cancellation,
 and drain/join workers before destroying `Service`. The daemon follows this order.
@@ -52,8 +57,8 @@ The baseline performs no external network or model calls. Short SQLite calls and
 v1 native callbacks are synchronous; future external I/O implementations must
 suspend rather than hold a worker on a blocking operation.
 
-Pipeline registration is part of `laso_application` and uses the existing SQLite
-record store. A revision is keyed by `name@version`, stores the original
+Pipeline registration is part of `laso_application` and uses the configured
+backend-neutral `Storage` record store. A revision is keyed by `name@version`, stores the original
 definition and a non-security definition fingerprint, and rejects a conflicting
 definition for an existing key. Registration resolves explicit subpipeline
 references and checks the stored dependency graph for missing revisions and

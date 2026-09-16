@@ -9,7 +9,10 @@ using Statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 std::string table(RecordKind kind) {
   static constexpr std::array names = {"pipelines", "runs",      "attempts", "messages",
                                        "approvals", "artifacts", "events"};
-  return names.at(static_cast<std::size_t>(kind));
+  const auto index = static_cast<std::size_t>(kind);
+  if (index >= names.size())
+    throw Error(ErrorCode::Validation, "Unknown record kind");
+  return names[index];
 }
 void exec(sqlite3 *db, const std::string &sql) {
   if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK)
@@ -25,6 +28,18 @@ void bind(sqlite3_stmt *s, int index, const std::string &value) {
   if (sqlite3_bind_text(s, index, value.c_str(), static_cast<int>(value.size()),
                         SQLITE_TRANSIENT) != SQLITE_OK)
     throw Error(ErrorCode::Storage, "SQLite binding failed");
+}
+std::string serialize(const Json &value) {
+  try {
+    const auto body = value.dump();
+    if (body.size() > std::size_t{4} * 1024 * 1024)
+      throw Error(ErrorCode::Storage, "Stored record exceeds limit");
+    return body;
+  } catch (const Error &) {
+    throw;
+  } catch (const Json::exception &) {
+    throw Error(ErrorCode::Validation, "Record contains invalid JSON");
+  }
 }
 Json parse(sqlite3_stmt *s) {
   const auto *data = sqlite3_column_text(s, 0);
@@ -80,15 +95,15 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
   exec(db, "BEGIN IMMEDIATE");
   try {
     for (const auto &r : records) {
+      if (r.id.empty())
+        throw Error(ErrorCode::Validation, "Record id is empty");
       auto name = table(r.kind);
       auto s = prepare(
           db,
           "INSERT INTO " + name +
               "(id,run_id,body,sequence) VALUES(?,?,?,(SELECT COALESCE(MAX(sequence),0)+1 FROM " +
               name + ")) ON CONFLICT(id) DO UPDATE SET body=excluded.body,run_id=excluded.run_id");
-      const auto body = r.value.dump();
-      if (body.size() > std::size_t{4} * 1024 * 1024)
-        throw Error(ErrorCode::Storage, "Stored record exceeds limit");
+      const auto body = serialize(r.value);
       if (r.kind == RecordKind::Pipeline) {
         auto existing = prepare(db, "SELECT body FROM pipelines WHERE id=?");
         bind(existing.get(), 1, r.id);

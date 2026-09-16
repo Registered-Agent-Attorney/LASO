@@ -50,21 +50,20 @@ inline std::vector<StorageBackend> storage_backends() {
     const auto dsn_copy = std::string(dsn);
     auto schema = "laso_test_" + uuid();
     std::replace(schema.begin(), schema.end(), '-', '_');
-    backends.push_back({
-        "postgres",
-        [dsn_copy, schema](const std::filesystem::path &) {
-          StorageOptions options;
-          options.backend = "postgres";
-          options.postgres_dsn = dsn_copy;
-          options.postgres_schema = schema;
-          return create_storage(options);
-        },
-        [dsn_copy, schema] {
-          pqxx::connection connection(dsn_copy);
-          pqxx::work transaction(connection);
-          transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
-          transaction.commit();
-        }});
+    backends.push_back({"postgres",
+                        [dsn_copy, schema](const std::filesystem::path &) {
+                          StorageOptions options;
+                          options.backend = "postgres";
+                          options.postgres_dsn = dsn_copy;
+                          options.postgres_schema = schema;
+                          return create_storage(options);
+                        },
+                        [dsn_copy, schema] {
+                          pqxx::connection connection(dsn_copy);
+                          pqxx::work transaction(connection);
+                          transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+                          transaction.commit();
+                        }});
   }
 #endif
   return backends;

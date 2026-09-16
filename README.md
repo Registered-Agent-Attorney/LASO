@@ -23,7 +23,9 @@ pending systemd deployment validation, and the blocked host TSan run.
                      |
           +----------+----------+
           |          |          |
-        Nodes      SQLite     Events
+        Nodes   Storage backends  Events
+                   /      \\
+               SQLite   PostgreSQL*
           |
        Registries
           |
@@ -57,11 +59,13 @@ PostgreSQL is an optional build and runtime backend. Install `libpqxx-dev` and
 environment variables). SQLite remains the default. DSNs are never included
 in LASO error messages or logs.
 
-Produced binaries are `build/bin/laso`, `build/bin/laso-server`, and
+The default build has no PostgreSQL development-library requirement. Produced
+binaries are `build/bin/laso`, `build/bin/laso-server`, and
 `build/laso_tests`. Example C plugins are
 `build/plugins/liblaso_example_tool.so` and
-`build/plugins/liblaso_example_model_provider.so`. Core, runtime, SQLite, plugin loader,
-application, API, and CLI are separate library targets. Installation currently
+`build/plugins/liblaso_example_model_provider.so`. Core, runtime, storage factory,
+SQLite, optional PostgreSQL, plugin loader, application, API, and CLI are separate
+library targets. Installation currently
 installs the executables, public headers, C SDK header, and example configuration;
 a relocatable CMake SDK package is deferred.
 
@@ -167,8 +171,9 @@ See [architecture](docs/architecture.md), [runtime semantics](docs/runtime.md),
 [pipeline composition](docs/pipelines.md),
 [Linux deployment](docs/linux-deployment.md), [security](SECURITY.md), and
 [contribution instructions](CONTRIBUTING.md). CI specifies Ubuntu GCC/Clang,
-Debian 13, ASan/UBSan, formatting, and clang-tidy jobs. Tests use GoogleTest and
-CTest, plus a shell process/restart smoke test; no external AI services are used.
+Debian 13, ASan/UBSan, formatting, clang-tidy, and a real PostgreSQL service job.
+Tests use GoogleTest and CTest, plus a shell process/restart smoke test; no external
+AI services are used.
 
 ```sh
 docker compose -f deploy/docker/compose.yaml up --build
@@ -182,8 +187,10 @@ daemon in the foreground as an unprivileged service account.
 
 - Linux builds, tests, sanitizer builds, and the Debian container path have been
   executed. Full systemd installation and shutdown behavior remain unvalidated.
-- One process owns each SQLite database; no distributed scheduling or horizontal
-  scaling. SQLite calls are short synchronous transactions.
+- One process owns each selected storage database: SQLite uses a lock file and
+  PostgreSQL uses a session-held advisory lock. There is no distributed scheduling
+  or horizontal scaling. Storage calls are short synchronous transactions; the
+  PostgreSQL adapter uses one bounded connection protected by a mutex.
 - Fork branches execute concurrently through the bounded executor when capacity is
   available, while join results retain pipeline branch order. Global, per-run,
   model-call, and tool-call limits bound work; cancellation is cooperative. Approval

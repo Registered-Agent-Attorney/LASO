@@ -91,11 +91,12 @@ Config load_config(const std::filesystem::path &supplied,
       throw Error(ErrorCode::Configuration, "Invalid configuration YAML");
     }
   }
-  for (auto name : {"DATA_DIR", "DB_PATH", "STORAGE_BACKEND", "POSTGRES_DSN", "POSTGRES_SCHEMA",
-                    "PLUGIN_DIR", "LOG_LEVEL", "API_HOST", "API_PORT",
-                    "WORKERS", "MAX_RUNS", "MAX_NODES", "MAX_NODES_PER_RUN", "MAX_MODELS",
-                    "MAX_TOOLS", "MAX_SUBPIPELINE_DEPTH", "JSON_LOGS", "ALLOW_NETWORK",
-                    "ALLOW_REMOTE_API", "LOCAL_OPENAI_ENDPOINT"}) {
+  for (auto name :
+       {"DATA_DIR",          "DB_PATH",       "STORAGE_BACKEND",  "POSTGRES_DSN",
+        "POSTGRES_SCHEMA",   "PLUGIN_DIR",    "LOG_LEVEL",        "API_HOST",
+        "API_PORT",          "WORKERS",       "MAX_RUNS",         "MAX_NODES",
+        "MAX_NODES_PER_RUN", "MAX_MODELS",    "MAX_TOOLS",        "MAX_SUBPIPELINE_DEPTH",
+        "JSON_LOGS",         "ALLOW_NETWORK", "ALLOW_REMOTE_API", "LOCAL_OPENAI_ENDPOINT"}) {
     auto variable = std::string("LASO_") + name;
     if (auto *v = std::getenv(variable.c_str())) {
       std::string key = name;

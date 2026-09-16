@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed the Clang formatting gate and added a real PostgreSQL CI service job.
+- Hardened SQLite/PostgreSQL adapter parity with shared conformance coverage,
+  normalized invalid record handling, and a PostgreSQL-backed runtime/reopen test.
 - Added optional JSON Schema contracts for node inputs and outputs.
 - Added shared schema validation for explicit `validator` nodes, safe local `$ref`
   loading, bounded schema/payload resources, and structured validation errors.

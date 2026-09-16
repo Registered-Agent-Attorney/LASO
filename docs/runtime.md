@@ -6,21 +6,25 @@ transition again. Pending approvals can be decided once. Rejection fails the run
 Node attempts have separate states, start/end timestamps, attempt numbers, safe
 error categories, and duration. Messages and events are durable.
 
-The SQLite adapter maintains separate tables for pipelines, runs, attempts,
-messages, approvals, artifacts and events. Each row has an ID, indexed run ID,
-insertion sequence and JSON representation of the typed record. WAL,
-`synchronous=FULL`, a busy timeout, prepared parameter bindings and explicit
-transactions are enabled. Schema version is stored using `PRAGMA user_version`.
-Newer database schemas are rejected instead of silently interpreted.
+The configured storage adapter maintains separate records for pipelines, runs,
+attempts, messages, approvals, artifacts and events. Each row has an ID, indexed
+run ID, insertion sequence and JSON representation of the typed record. SQLite
+uses WAL, `synchronous=FULL`, a busy timeout, prepared parameter bindings and
+explicit transactions; its schema version is stored using `PRAGMA user_version`.
+The optional PostgreSQL adapter uses equivalent tables, identity-backed sequence
+values, parameterized libpqxx transactions, and a schema-local migration table.
+Both adapters reject newer schema versions instead of silently interpreting them.
 
 Each successful node checkpoint includes its final attempt, output message, run
 cursor/branch queues and event in one transaction. A pending approval includes its
 request, waiting attempt and run state in one transaction. An approval decision and
 resumable queued state commit together. SQLite history survives process restart.
 
-The database has a Linux process lease (`flock`) so two independent services cannot
-execute or approve the same run concurrently. This is local single-writer service
-ownership, not a distributed claim protocol. API readers share the same adapter.
+The selected database has a single-service ownership lease: SQLite uses Linux
+`flock`, while PostgreSQL uses a session-held advisory lock. Two independent
+services therefore cannot execute or approve the same run concurrently. This is
+local single-writer service ownership, not a distributed claim protocol. API readers
+share the same adapter.
 
 On startup, runs left in active states are marked Paused with a recovery-required
 event. Interrupted attempts are marked failed. Completed and approval-waiting runs
