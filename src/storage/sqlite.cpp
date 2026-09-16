@@ -1,5 +1,5 @@
 #include <array>
-#include <laso/storage/storage.hpp>
+#include <laso/storage/sqlite.hpp>
 #include <mutex>
 #include <sqlite3.h>
 

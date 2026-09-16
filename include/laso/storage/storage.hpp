@@ -2,6 +2,8 @@
 #include <filesystem>
 #include <laso/core/types.hpp>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace laso {
 enum class RecordKind { Pipeline, Run, Attempt, Message, Approval, Artifact, Event };
@@ -19,6 +21,8 @@ public:
   virtual std::vector<Json> list(RecordKind kind, const std::string &run_id = "",
                                  std::size_t limit = 1000, std::size_t offset = 0) const = 0;
 };
+// Kept in this long-standing public header for source compatibility. New code
+// may include <laso/storage/sqlite.hpp> when it needs the concrete adapter.
 class SQLiteStorage final : public Storage {
 public:
   explicit SQLiteStorage(const std::filesystem::path &path);

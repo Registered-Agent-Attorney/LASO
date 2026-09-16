@@ -50,6 +50,13 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+PostgreSQL is an optional build and runtime backend. Install `libpqxx-dev` and
+`libpq-dev`, configure with `-DLASO_ENABLE_POSTGRES=ON`, then select it with
+`storage_backend: postgres` and a `postgres_dsn` connection string (or the
+`LASO_STORAGE_BACKEND`, `LASO_POSTGRES_DSN`, and `LASO_POSTGRES_SCHEMA`
+environment variables). SQLite remains the default. DSNs are never included
+in LASO error messages or logs.
+
 Produced binaries are `build/bin/laso`, `build/bin/laso-server`, and
 `build/laso_tests`. Example C plugins are
 `build/plugins/liblaso_example_tool.so` and

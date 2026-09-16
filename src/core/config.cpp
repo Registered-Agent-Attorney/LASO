@@ -12,6 +12,18 @@ namespace laso {
 void Config::validate() {
   if (data_dir.empty())
     throw Error(ErrorCode::Configuration, "Data directory is empty");
+  if (storage_backend != "sqlite" && storage_backend != "postgres")
+    throw Error(ErrorCode::Configuration, "Unsupported storage backend");
+  if (storage_backend == "postgres" && postgres_dsn.empty())
+    throw Error(ErrorCode::Configuration, "PostgreSQL DSN is required");
+  if (storage_backend == "postgres" &&
+      (postgres_schema.empty() || postgres_schema.size() > 63 ||
+       !std::isalpha(static_cast<unsigned char>(postgres_schema.front()))))
+    throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
+  if (storage_backend == "postgres")
+    for (const auto ch : postgres_schema)
+      if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
+        throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
   if (db_path.empty())
     db_path = data_dir / "laso.db";
   if (api_port == 0 || api_port > 65535 || workers == 0 || workers > 64 || max_runs == 0 ||
@@ -79,7 +91,8 @@ Config load_config(const std::filesystem::path &supplied,
       throw Error(ErrorCode::Configuration, "Invalid configuration YAML");
     }
   }
-  for (auto name : {"DATA_DIR", "DB_PATH", "PLUGIN_DIR", "LOG_LEVEL", "API_HOST", "API_PORT",
+  for (auto name : {"DATA_DIR", "DB_PATH", "STORAGE_BACKEND", "POSTGRES_DSN", "POSTGRES_SCHEMA",
+                    "PLUGIN_DIR", "LOG_LEVEL", "API_HOST", "API_PORT",
                     "WORKERS", "MAX_RUNS", "MAX_NODES", "MAX_NODES_PER_RUN", "MAX_MODELS",
                     "MAX_TOOLS", "MAX_SUBPIPELINE_DEPTH", "JSON_LOGS", "ALLOW_NETWORK",
                     "ALLOW_REMOTE_API", "LOCAL_OPENAI_ENDPOINT"}) {
@@ -114,6 +127,12 @@ Config load_config(const std::filesystem::path &supplied,
   for (const auto &[k, v] : values) {
     if (k == "data_dir")
       c.data_dir = v;
+    else if (k == "storage_backend")
+      c.storage_backend = v;
+    else if (k == "postgres_dsn")
+      c.postgres_dsn = v;
+    else if (k == "postgres_schema")
+      c.postgres_schema = v;
     else if (k == "db_path")
       c.db_path = v;
     else if (k == "plugin_dir")

@@ -1,9 +1,11 @@
 #include "../support.hpp"
 #include <laso/policies/policy.hpp>
 #include <laso_plugin.h>
+#include <type_traits>
 
 using namespace laso;
 using namespace laso::test;
+static_assert(std::is_constructible_v<SQLiteStorage, const std::filesystem::path &>);
 TEST(Pipeline, ParsesTypedDefinition) {
   auto p = parse_pipeline(fixture("hello-pipeline"));
   EXPECT_EQ(p.name, "hello");
@@ -69,6 +71,13 @@ TEST(Configuration, ValidatesSubpipelineDepth) {
   c.max_subpipeline_depth = 0;
   EXPECT_THROW(c.validate(), Error);
   c.max_subpipeline_depth = 16;
+  EXPECT_NO_THROW(c.validate());
+}
+TEST(Configuration, RejectsUnsupportedStorageBackend) {
+  Config c;
+  c.storage_backend = "postgres";
+  EXPECT_THROW(c.validate(), Error);
+  c.storage_backend = "sqlite";
   EXPECT_NO_THROW(c.validate());
 }
 TEST(Pipeline, RejectsUnboundedCycle) {
