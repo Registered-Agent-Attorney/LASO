@@ -2,7 +2,6 @@
 #include <iomanip>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
-#include <laso/storage/sqlite.hpp>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -45,7 +44,7 @@ bool same_source(const Json &record, const std::string &yaml) {
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), lease_(config_.db_path),
-      storage_(std::make_unique<SQLiteStorage>(config_.db_path)),
+      storage_(create_storage({config_.storage_backend, config_.db_path})),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       plugins_(tools_, providers_),
       runtime_(io, config_,

@@ -6,6 +6,7 @@
 namespace laso {
 struct Config {
   std::filesystem::path data_dir = ".laso", db_path;
+  std::string storage_backend = "sqlite";
   std::vector<std::filesystem::path> plugin_dirs;
   std::vector<std::filesystem::path> schema_roots;
   std::string api_host = "127.0.0.1", log_level = "info", local_openai_endpoint;

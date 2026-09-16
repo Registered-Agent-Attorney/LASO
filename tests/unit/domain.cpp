@@ -71,6 +71,13 @@ TEST(Configuration, ValidatesSubpipelineDepth) {
   c.max_subpipeline_depth = 16;
   EXPECT_NO_THROW(c.validate());
 }
+TEST(Configuration, RejectsUnsupportedStorageBackend) {
+  Config c;
+  c.storage_backend = "postgres";
+  EXPECT_THROW(c.validate(), Error);
+  c.storage_backend = "sqlite";
+  EXPECT_NO_THROW(c.validate());
+}
 TEST(Pipeline, RejectsUnboundedCycle) {
   auto yaml = fixture("bounded-loop");
   auto position = yaml.find(", max_iterations: 2}");

@@ -12,6 +12,8 @@ namespace laso {
 void Config::validate() {
   if (data_dir.empty())
     throw Error(ErrorCode::Configuration, "Data directory is empty");
+  if (storage_backend != "sqlite")
+    throw Error(ErrorCode::Configuration, "Unsupported storage backend");
   if (db_path.empty())
     db_path = data_dir / "laso.db";
   if (api_port == 0 || api_port > 65535 || workers == 0 || workers > 64 || max_runs == 0 ||
@@ -114,6 +116,8 @@ Config load_config(const std::filesystem::path &supplied,
   for (const auto &[k, v] : values) {
     if (k == "data_dir")
       c.data_dir = v;
+    else if (k == "storage_backend")
+      c.storage_backend = v;
     else if (k == "db_path")
       c.db_path = v;
     else if (k == "plugin_dir")

@@ -5,6 +5,7 @@
 #include <laso/scheduler/scheduler.hpp>
 #include <laso/schema/validator.hpp>
 #include <laso/security/security.hpp>
+#include <laso/storage/factory.hpp>
 
 namespace laso {
 class Service {
