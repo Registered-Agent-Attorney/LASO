@@ -1,12 +1,12 @@
-# Storage backend audit
+# Storage backend architecture audit
 
-Audit baseline: `ef072429c96eb9b0964e56a561591a37ccb68fbd` (`main` and
-`upstream/main` at audit start). No production source was changed for this
-audit. The existing working tree already contained validation logs and the
-repository-local dependency directory from the earlier Linux validation; those
-were left untouched.
+This document records the pre-implementation storage audit that informed the
+backend-neutral design. Its baseline was
+`ef072429c96eb9b0964e56a561591a37ccb68fbd`; statements in the baseline and
+recommendation sections describe that earlier state and are intentionally
+historical. The current implementation is summarized below.
 
-## Current architecture
+## Pre-implementation baseline (historical snapshot)
 
 Persistence is a deliberately thin record adapter:
 
@@ -39,7 +39,19 @@ links `laso_application` directly to `laso_storage_sqlite`. `Runtime` already
 depends on `Storage&`, so most execution code does not need to know which
 backend is active.
 
-## Exact SQLite coupling points
+## Current implementation
+
+LASO now exposes the backend-neutral `Storage` interface and selects an
+adapter through `create_storage`. SQLite remains the default and preserves the
+existing file/lease behavior. PostgreSQL is an explicit optional build and
+runtime choice using `libpqxx`, a schema-local migration table, parameterized
+transactions, and a session-held advisory lock for single-service ownership.
+`Service`, `Runtime`, and artifact metadata use the interface rather than a
+backend-specific concrete type. The PostgreSQL adapter is not enabled unless
+`LASO_ENABLE_POSTGRES=ON` is selected at build time and
+`storage_backend: postgres` is selected at runtime.
+
+## Exact SQLite coupling points (historical baseline)
 
 ### Backend and build coupling
 
