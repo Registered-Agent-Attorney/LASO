@@ -8,8 +8,9 @@
   pricing is included.
 - Added the `WorkerTransport` seam while preserving the native in-process
   `WorkerAdapter` ABI path. Transport failures are distinct from worker job,
-  budget, and cancellation outcomes; supervised and remote transports remain
-  future work.
+  budget, and cancellation outcomes. Added an opt-in supervised local process
+  transport, bounded versioned NDJSON protocol, and deterministic reference
+  worker host; remote transports remain future work.
 - Fixed the Clang formatting gate and added a real PostgreSQL CI service job.
 - Hardened SQLite/PostgreSQL adapter parity with shared conformance coverage,
   normalized invalid record handling, and a PostgreSQL-backed runtime/reopen test.

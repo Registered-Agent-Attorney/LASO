@@ -95,10 +95,36 @@ state and deadlocking.
 `WorkerTransport` is the backend-neutral lifecycle boundary used by
 `WorkerManager`: submit, status/recovery, result, cancel, start, and stop. The
 existing `WorkerAdapter` native ABI wrapper remains the in-process adapter and
-continues to work unchanged. A future supervised child-process, Unix-socket, or
-remote adapter can implement `WorkerTransport`; no such adapter or process
-isolation is implemented here. Transport exceptions are recorded separately
-from worker-declared job failures.
+continues to work unchanged. The optional `process_workers` configuration now
+provides a supervised local process implementation using the versioned NDJSON
+protocol described in `docs/worker-process-protocol.md`. It is generic and can
+host any executable that implements the protocol; it adds no vendor-specific
+behavior. Transport exceptions are recorded separately from worker-declared
+job failures.
+
+Process workers use an absolute executable path and argument vector. Their
+environment is empty by default; `environment_allowlist` and literal
+`environment` overrides are explicit. Startup and request timeouts are bounded.
+LASO owns the child, attempts cooperative `shutdown`, and then terminates its
+process group with bounded escalation. A broken child is not silently
+restarted or resubmitted because the external outcome may be ambiguous. This
+is process isolation and lifecycle supervision, not an OS or container
+sandbox.
+
+```yaml
+process_workers:
+  reference:
+    executable: /absolute/path/to/laso-example-worker-host
+    args: [--mode, success]
+    startup_timeout_ms: 5000
+    request_timeout_ms: 5000
+    # environment_allowlist: [PATH]
+    # environment: {WORKER_SETTING: value}
+```
+
+The deterministic `laso-example-worker-host` is a reference/test adapter, not
+an AI assistant. Remote worker networking, mandatory process isolation,
+distributed leasing, and vendor-specific adapters remain future work.
 
 ## Policy, secrets, and trust
 

@@ -79,4 +79,6 @@ identity is assigned by LASO and cannot be supplied by the plugin payload. Worke
 submit/status/result JSON may optionally contain a `usage` object with normalized
 fields documented in [worker adapters](workers.md); this is an additive JSON
 protocol feature and does not change the C ABI. A worker-declared failed status is
-kept distinct from a callback/transport failure.
+kept distinct from a callback/transport failure. The optional supervised process
+transport is not a native ABI revision; it uses the separate versioned local
+[worker process protocol](worker-process-protocol.md).
