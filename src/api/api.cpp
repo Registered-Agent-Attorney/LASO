@@ -86,7 +86,7 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {200, service_.plugins()};
   std::smatch match;
   static const std::regex route_pattern(
-      "/api/v1/(pipelines|runs|approvals|schedules|triggers|event-sources)(?:/"
+      "/api/v1/(pipelines|runs|approvals|schedules|triggers|event-sources|workers|worker-jobs)(?:/"
       "([A-Za-z0-9_.@-]{1,128}))?(?:/"
       "(runs|cancel|resume|events|attempts|messages|approve|reject|enable|disable))?");
   if (!std::regex_match(target, match, route_pattern))
@@ -100,6 +100,24 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     if (method == "POST" && !id.empty() && (action == "enable" || action == "disable")) {
       service_.set_event_source_enabled(id, action == "enable");
       return {202, service_.event_source(id)};
+    }
+    return {405, {{"error", "Method not supported"}}};
+  }
+  if (collection == "workers") {
+    if (method == "GET" && id.empty())
+      return {200, service_.workers()};
+    if (method == "GET" && action.empty())
+      return {200, service_.worker(id)};
+    return {405, {{"error", "Method not supported"}}};
+  }
+  if (collection == "worker-jobs") {
+    if (method == "GET" && id.empty())
+      return {200, service_.worker_jobs("", limit, offset)};
+    if (method == "GET" && action.empty())
+      return {200, service_.worker_job(id)};
+    if (method == "POST" && action == "cancel") {
+      service_.cancel_worker_job(id);
+      return {202, service_.worker_job(id)};
     }
     return {405, {{"error", "Method not supported"}}};
   }

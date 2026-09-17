@@ -42,6 +42,12 @@ public:
   Json event_sources() const;
   Json event_source(const std::string &id) const;
   void set_event_source_enabled(const std::string &id, bool enabled);
+  Json workers() const;
+  Json worker(const std::string &id) const;
+  std::vector<Json> worker_jobs(const std::string &run_id = "", std::size_t limit = 1000,
+                                std::size_t offset = 0) const;
+  Json worker_job(const std::string &id) const;
+  void cancel_worker_job(const std::string &id);
   Runtime &runtime() {
     return runtime_;
   }
@@ -78,11 +84,13 @@ private:
   InProcessEventBus events_;
   ProviderRegistry providers_;
   ToolRegistry tools_;
+  WorkerRegistry worker_registry_;
   FunctionRegistry functions_;
   NodeRegistry nodes_;
   PolicyEngine policy_;
   SchemaValidator schemas_;
   EventIngress ingress_;
+  std::shared_ptr<WorkerManager> worker_manager_;
   PluginLoader plugins_;
   Runtime runtime_;
   LocalArtifactStore artifacts_;

@@ -19,7 +19,8 @@ enum class RecordKind {
   ScheduleOccurrence,
   TriggerDelivery,
   EventSource,
-  ExternalEventClaim
+  ExternalEventClaim,
+  WorkerJob
 };
 struct Record {
   RecordKind kind;

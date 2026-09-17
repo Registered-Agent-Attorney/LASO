@@ -1,5 +1,6 @@
 #include <array>
 #include <laso/storage/sqlite.hpp>
+#include <laso/workers/worker.hpp>
 #include <mutex>
 #include <sqlite3.h>
 
@@ -19,7 +20,8 @@ std::string table(RecordKind kind) {
                                        "schedule_occurrences",
                                        "trigger_deliveries",
                                        "event_sources",
-                                       "external_event_claims"};
+                                       "external_event_claims",
+                                       "worker_jobs"};
   const auto index = static_cast<std::size_t>(kind);
   if (index >= names.size())
     throw Error(ErrorCode::Validation, "Unknown record kind");
@@ -81,19 +83,19 @@ SQLiteStorage::SQLiteStorage(const std::filesystem::path &path) : impl_(std::mak
   exec(raw, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
   auto version_stmt = prepare(raw, "PRAGMA user_version");
   if (sqlite3_step(version_stmt.get()) != SQLITE_ROW ||
-      sqlite3_column_int(version_stmt.get(), 0) > 3)
+      sqlite3_column_int(version_stmt.get(), 0) > 4)
     throw Error(ErrorCode::Storage, "Unsupported database schema version");
   version_stmt.reset();
   exec(raw, "BEGIN IMMEDIATE");
   try {
-    for (std::size_t i = 0; i < 13; ++i) {
+    for (std::size_t i = 0; i < 14; ++i) {
       auto name = table(static_cast<RecordKind>(i));
       exec(raw, "CREATE TABLE IF NOT EXISTS " + name +
                     " (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, body TEXT NOT NULL "
                     "CHECK(json_valid(body)), sequence INTEGER NOT NULL)");
       exec(raw, "CREATE INDEX IF NOT EXISTS " + name + "_run ON " + name + "(run_id,sequence)");
     }
-    exec(raw, "PRAGMA user_version=3; COMMIT");
+    exec(raw, "PRAGMA user_version=4; COMMIT");
   } catch (...) {
     sqlite3_exec(raw, "ROLLBACK", nullptr, nullptr, nullptr);
     throw;
@@ -124,6 +126,20 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
             throw Error(ErrorCode::Conflict, "Pipeline revision is immutable");
         }
       }
+      if (r.kind == RecordKind::WorkerJob) {
+        auto existing = prepare(db, "SELECT body FROM worker_jobs WHERE id=?");
+        bind(existing.get(), 1, r.id);
+        if (sqlite3_step(existing.get()) == SQLITE_ROW) {
+          const auto *stored = sqlite3_column_text(existing.get(), 0);
+          if (!stored)
+            throw Error(ErrorCode::Storage, "Missing worker job state");
+          auto old_job = Json::parse(reinterpret_cast<const char *>(stored)).get<WorkerJob>();
+          auto new_job = r.value.get<WorkerJob>();
+          if (old_job.state != new_job.state &&
+              !valid_worker_job_transition(old_job.state, new_job.state))
+            throw Error(ErrorCode::Conflict, "Invalid worker job state transition");
+        }
+      }
       bind(s.get(), 1, r.id);
       bind(s.get(), 2, r.run_id);
       bind(s.get(), 3, body);
@@ -141,7 +157,7 @@ bool SQLiteStorage::claim(const Record &record, const std::vector<Record> &assoc
   if (record.id.empty())
     throw Error(ErrorCode::Validation, "Record id is empty");
   if (record.kind != RecordKind::ScheduleOccurrence && record.kind != RecordKind::TriggerDelivery &&
-      record.kind != RecordKind::ExternalEventClaim)
+      record.kind != RecordKind::ExternalEventClaim && record.kind != RecordKind::WorkerJob)
     throw Error(ErrorCode::Validation, "Record kind cannot be claimed");
   const auto name = table(record.kind);
   const auto body = serialize(record.value);

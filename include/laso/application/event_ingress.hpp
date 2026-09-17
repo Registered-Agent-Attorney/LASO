@@ -25,7 +25,6 @@ private:
   Storage &storage_;
   EventBus &events_;
   SchemaValidator &schemas_;
-  unsigned max_trigger_depth_;
   std::size_t max_pending_, max_per_source_;
   mutable std::mutex mutex_;
   std::condition_variable drained_;

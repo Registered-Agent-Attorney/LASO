@@ -42,6 +42,7 @@ enum class RunState {
   Running,
   WaitingTool,
   WaitingModel,
+  WaitingWorker,
   WaitingApproval,
   Retrying,
   Paused,
@@ -55,6 +56,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(RunState, {{RunState::Queued, "Queued"},
                                         {RunState::Running, "Running"},
                                         {RunState::WaitingTool, "WaitingTool"},
                                         {RunState::WaitingModel, "WaitingModel"},
+                                        {RunState::WaitingWorker, "WaitingWorker"},
                                         {RunState::WaitingApproval, "WaitingApproval"},
                                         {RunState::Retrying, "Retrying"},
                                         {RunState::Paused, "Paused"},
@@ -72,10 +74,30 @@ NLOHMANN_JSON_SERIALIZE_ENUM(NodeState, {{NodeState::Running, "Running"},
                                          {NodeState::Cancelled, "Cancelled"},
                                          {NodeState::TimedOut, "TimedOut"}})
 struct ProvenanceRecord {
-  std::string node, tool, model, provider, artifact, parent_message, validation, time;
+  std::string node, tool, model, provider, artifact, parent_message, validation, time, worker;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ProvenanceRecord, node, tool, model, provider, artifact,
-                                   parent_message, validation, time)
+inline void to_json(Json &j, const ProvenanceRecord &p) {
+  j = {{"node", p.node},
+       {"tool", p.tool},
+       {"model", p.model},
+       {"provider", p.provider},
+       {"artifact", p.artifact},
+       {"parent_message", p.parent_message},
+       {"validation", p.validation},
+       {"time", p.time},
+       {"worker", p.worker}};
+}
+inline void from_json(const Json &j, ProvenanceRecord &p) {
+  p.node = j.value("node", std::string{});
+  p.tool = j.value("tool", std::string{});
+  p.model = j.value("model", std::string{});
+  p.provider = j.value("provider", std::string{});
+  p.artifact = j.value("artifact", std::string{});
+  p.parent_message = j.value("parent_message", std::string{});
+  p.validation = j.value("validation", std::string{});
+  p.time = j.value("time", std::string{});
+  p.worker = j.value("worker", std::string{});
+}
 struct Message {
   std::string id = uuid(), run_id, pipeline_id, node_id, type = "laso.data", time = timestamp();
   Json payload = Json::object(), metadata = Json::object();
@@ -94,7 +116,7 @@ struct TimeoutPolicy {
 };
 struct NodeDefinition {
   std::string id, type, binding, prompt, field, condition, reason, join, input_schema,
-      output_schema, schema;
+      output_schema, schema, task_type, capability, instructions;
   Json value = nullptr;
   RetryPolicy retry;
   TimeoutPolicy timeout;
@@ -147,6 +169,7 @@ struct Run {
   std::map<std::string, std::string> resolved_subpipelines;
   std::string prepared_join;
   std::string provider, model, tool, plugin;
+  std::string worker, worker_job_id;
   unsigned steps = 0;
 };
 inline void to_json(Json &j, const Run &r) {
@@ -189,6 +212,8 @@ inline void to_json(Json &j, const Run &r) {
        {"model", r.model},
        {"tool", r.tool},
        {"plugin", r.plugin},
+       {"worker", r.worker},
+       {"worker_job_id", r.worker_job_id},
        {"steps", r.steps}};
 }
 inline void from_json(const Json &j, Run &r) {
@@ -231,11 +256,14 @@ inline void from_json(const Json &j, Run &r) {
   j.at("model").get_to(r.model);
   j.at("tool").get_to(r.tool);
   j.at("plugin").get_to(r.plugin);
+  r.worker = j.value("worker", std::string{});
+  r.worker_job_id = j.value("worker_job_id", std::string{});
   j.at("steps").get_to(r.steps);
 }
 struct NodeExecution {
   std::string id = uuid(), run_id, node_id, started_at = timestamp(), finished_at, error,
               child_run_id, child_pipeline_id;
+  std::string worker_job_id, worker_id, external_job_id;
   unsigned child_pipeline_version = 0;
   unsigned attempt = 1;
   NodeState state = NodeState::Running;
@@ -251,6 +279,9 @@ inline void to_json(Json &j, const NodeExecution &a) {
        {"child_run_id", a.child_run_id},
        {"child_pipeline_id", a.child_pipeline_id},
        {"child_pipeline_version", a.child_pipeline_version},
+       {"worker_job_id", a.worker_job_id},
+       {"worker_id", a.worker_id},
+       {"external_job_id", a.external_job_id},
        {"attempt", a.attempt},
        {"state", a.state},
        {"duration_ms", a.duration_ms}};
@@ -265,6 +296,9 @@ inline void from_json(const Json &j, NodeExecution &a) {
   a.child_run_id = j.value("child_run_id", std::string{});
   a.child_pipeline_id = j.value("child_pipeline_id", std::string{});
   a.child_pipeline_version = j.value("child_pipeline_version", 0U);
+  a.worker_job_id = j.value("worker_job_id", std::string{});
+  a.worker_id = j.value("worker_id", std::string{});
+  a.external_job_id = j.value("external_job_id", std::string{});
   j.at("attempt").get_to(a.attempt);
   j.at("state").get_to(a.state);
   j.at("duration_ms").get_to(a.duration_ms);

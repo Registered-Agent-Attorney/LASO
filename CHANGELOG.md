@@ -19,6 +19,12 @@
   event triggers. Occurrence claims, misfire/overlap policies, restart recovery,
   bounded trigger delivery, event-depth protection, trigger-origin provenance, and
   schedule/trigger API and CLI operations use the normal runtime and storage paths.
+- Added a generic durable external-worker adapter framework: ABI-v1 worker
+  components, bounded submit/status/result/cancel callbacks, durable worker jobs,
+  idempotent attempt identities, event-based completion, recovery reconciliation,
+  cancellation/timeout handling, per-worker limits, API/CLI inspection, and an
+  offline worker example. Vendor-specific adapters and distributed workers remain
+  out of scope.
 
 ## 0.2.0 — Framework Milestone 1 (in progress)
 
