@@ -226,10 +226,9 @@ Config load_config(const std::filesystem::path &supplied,
               if (!fields.insert(field.first.as<std::string>()).second)
                 throw Error(ErrorCode::Configuration, "Duplicate process worker field");
             for (const auto &field : fields)
-              if (field != "executable" && field != "args" &&
-                  field != "environment_allowlist" && field != "environment" &&
-                  field != "startup_timeout_ms" && field != "request_timeout_ms" &&
-                  field != "interaction_timeout_ms")
+              if (field != "executable" && field != "args" && field != "environment_allowlist" &&
+                  field != "environment" && field != "startup_timeout_ms" &&
+                  field != "request_timeout_ms" && field != "interaction_timeout_ms")
                 throw Error(ErrorCode::Configuration, "Unknown process worker field");
             ProcessWorkerConfig cfg;
             if (!node["executable"])

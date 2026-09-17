@@ -12,8 +12,11 @@ namespace {
 ProcessWorkerConfig opencode_config(const std::filesystem::path &root, unsigned port) {
   ProcessWorkerConfig result;
   result.executable = LASO_OPENCODE_WORKER;
-  result.args = {"--opencode", std::getenv("OPENCODE_BIN") ? std::getenv("OPENCODE_BIN") : "opencode",
-                 "--port", std::to_string(port), "--allowed-root", root.string(), "--timeout-ms", "120000"};
+  result.args = {
+      "--opencode",     std::getenv("OPENCODE_BIN") ? std::getenv("OPENCODE_BIN") : "opencode",
+      "--port",         std::to_string(port),
+      "--allowed-root", root.string(),
+      "--timeout-ms",   "120000"};
   result.startup_timeout_ms = 120000;
   result.request_timeout_ms = 120000;
   return result;
