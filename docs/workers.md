@@ -20,6 +20,10 @@ worker_plugins:
     config: {mode: deterministic}
 max_worker_jobs: 32
 max_worker_jobs_per_worker: 16
+# Optional budgets; zero disables each one. Token and cost budgets are per run.
+max_worker_wall_time_ms: 0
+max_worker_tokens_per_run: 0
+max_worker_cost_units_per_run: 0
 ```
 
 A pipeline selects a configured worker by ID or by an unambiguous capability:
@@ -36,8 +40,17 @@ nodes:
 
 The input payload is submitted unchanged as structured JSON. The worker result
 becomes the normal node payload. Node input/output schema declarations are still
-enforced by the runtime, and worker result metadata and bounded artifact
-references are retained in message metadata.
+enforced by the runtime, and worker result metadata, normalized usage, and
+bounded artifact references are retained in message metadata.
+
+Adapters may report any subset of `queue_duration_ms`, `wall_duration_ms`,
+`input_tokens`, `output_tokens`, `total_tokens`, `tool_calls`, `action_count`,
+`provider`, `model`, `executor`, `cost_units`, and bounded structured `metadata`
+in a submission, status response, or completion event. Missing fields remain
+missing; LASO does not assume that a worker is an LLM or invent vendor pricing.
+When both input and output tokens are reported, LASO derives `total_tokens` if
+it was not supplied. Usage is persisted in `WorkerJob` and added to the
+completed node message.
 
 ## Durable jobs and recovery
 
@@ -66,6 +79,10 @@ job ID. A terminal job ignores late status events.
 Ingress, requests, results, metadata, artifact references, active jobs, and
 per-worker jobs are bounded. Defaults are 32 active jobs globally and 16 per
 worker; `max_worker_jobs` and `max_worker_jobs_per_worker` are configurable.
+`max_worker_wall_time_ms` bounds a reported job wall duration, while
+`max_worker_tokens_per_run` and `max_worker_cost_units_per_run` accumulate
+reported usage across jobs in one run. Zero disables a budget. A violation is a
+durable `Failed` job with `failure_kind: budget` and a stable diagnostic.
 Native callbacks may run on plugin-owned threads, but the host callback is
 thread-safe and returns explicit backpressure/stopped/rejected statuses.
 
@@ -74,6 +91,43 @@ cancel and records acknowledgement; a failed or unsupported cancellation is not
 reported as confirmed. Adapter callbacks are never invoked while the runtime
 mutex is held, preventing synchronous event callbacks from re-entering runtime
 state and deadlocking.
+
+`WorkerTransport` is the backend-neutral lifecycle boundary used by
+`WorkerManager`: submit, status/recovery, result, cancel, start, and stop. The
+existing `WorkerAdapter` native ABI wrapper remains the in-process adapter and
+continues to work unchanged. The optional `process_workers` configuration now
+provides a supervised local process implementation using the versioned NDJSON
+protocol described in `docs/worker-process-protocol.md`. It is generic and can
+host any executable that implements the protocol; it adds no vendor-specific
+behavior. Transport exceptions are recorded separately from worker-declared
+job failures.
+
+Process workers use an absolute executable path and argument vector. Their
+environment is empty by default; `environment_allowlist` and literal
+`environment` overrides are explicit, with literal overrides taking precedence
+on name collisions. Configuration validates NUL characters, duplicate
+allowlist names, per-value limits, and a 64 KiB aggregate child-environment
+limit. Startup and request timeouts are bounded.
+LASO owns the child, attempts cooperative `shutdown`, and then terminates its
+process group with bounded escalation. A broken child is not silently
+restarted or resubmitted because the external outcome may be ambiguous. This
+is process isolation and lifecycle supervision, not an OS or container
+sandbox.
+
+```yaml
+process_workers:
+  reference:
+    executable: /absolute/path/to/laso-example-worker-host
+    args: [--mode, success]
+    startup_timeout_ms: 5000
+    request_timeout_ms: 5000
+    # environment_allowlist: [PATH]
+    # environment: {WORKER_SETTING: value}
+```
+
+The deterministic `laso-example-worker-host` is a reference/test adapter, not
+an AI assistant. Remote worker networking, mandatory process isolation,
+distributed leasing, and vendor-specific adapters remain future work.
 
 ## Policy, secrets, and trust
 

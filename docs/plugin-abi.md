@@ -74,5 +74,11 @@ The original tool/model prefix remains valid, so existing ABI-v1 tool and model
 plugins do not need recompilation. Worker callbacks receive borrowed bounded JSON
 and may emit events from plugin-owned threads until `worker_stop` returns. The
 host serializes calls per worker, retains the shared library until shutdown, and
-translates callback failures into bounded LASO errors. Worker event-source
-identity is assigned by LASO and cannot be supplied by the plugin payload.
+translates callback failures into bounded LASO transport errors. Worker event-source
+identity is assigned by LASO and cannot be supplied by the plugin payload. Worker
+submit/status/result JSON may optionally contain a `usage` object with normalized
+fields documented in [worker adapters](workers.md); this is an additive JSON
+protocol feature and does not change the C ABI. A worker-declared failed status is
+kept distinct from a callback/transport failure. The optional supervised process
+transport is not a native ABI revision; it uses the separate versioned local
+[worker process protocol](worker-process-protocol.md).

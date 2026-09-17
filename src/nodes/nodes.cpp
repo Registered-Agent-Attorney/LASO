@@ -54,7 +54,7 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
     current = manager_->submit(request);
     for (;;) {
       c.check();
-      current = manager_->job(current.id);
+      current = manager_->refresh(current.id);
       if (current.state == WorkerJobState::Completed) {
         auto message = input;
         message.payload = current.result;
@@ -62,6 +62,8 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
         message.metadata["worker_job_id"] = current.id;
         message.metadata["external_job_id"] = current.external_job_id;
         message.metadata["worker_result_metadata"] = current.result_metadata;
+        message.metadata["worker_usage"] = current.usage;
+        message.metadata["worker_failure_kind"] = current.failure_kind;
         if (!current.artifacts.empty())
           message.metadata["worker_artifacts"] = current.artifacts;
         message.provenance.push_back(
