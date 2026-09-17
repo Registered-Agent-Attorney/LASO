@@ -114,6 +114,31 @@ restarted or resubmitted because the external outcome may be ambiguous. This
 is process isolation and lifecycle supervision, not an OS or container
 sandbox.
 
+### Worker-originated interaction
+
+A process worker may emit a bounded `approval`, `permission`, or `question`
+request. LASO correlates it to the durable `WorkerJob`, evaluates configured
+policy where applicable, and persists the request under
+`GET /api/v1/worker-requests`. Pending requests can be resolved with
+`POST /api/v1/worker-requests/{id}/respond` using `{"state":"approved"}` or
+`{"state":"answered","payload":{...}}`; `deny` and `cancel` are also
+available. Duplicate request IDs replay their durable decision. A pending
+request is never auto-approved after restart, and job cancellation resolves its
+pending requests as cancelled. This channel is not arbitrary LASO RPC.
+
+### OpenCode adapter
+
+`laso-opencode-worker` is an optional generic adapter outside Core. It supervises
+the installed OpenCode headless server through loopback HTTP and maps the
+structured session/message API into the process-worker protocol. The adapter
+captures session IDs, accepts a later turn with the same session ID, reports
+structured results and available usage, and uses OpenCode abort for cooperative
+cancellation. See [OpenCode worker](opencode-worker.md). The current reference
+implementation reports an in-flight turn as `Unknown` after adapter restart
+when it cannot safely reconcile local turn state; it never silently resubmits.
+OpenCode permission/question events are mapped to the interaction channel when
+the installed server exposes them.
+
 ```yaml
 process_workers:
   reference:
@@ -121,13 +146,16 @@ process_workers:
     args: [--mode, success]
     startup_timeout_ms: 5000
     request_timeout_ms: 5000
+    interaction_timeout_ms: 300000
     # environment_allowlist: [PATH]
     # environment: {WORKER_SETTING: value}
 ```
 
 The deterministic `laso-example-worker-host` is a reference/test adapter, not
-an AI assistant. Remote worker networking, mandatory process isolation,
-distributed leasing, and vendor-specific adapters remain future work.
+an AI assistant. The OpenCode adapter is opt-in and does not add an OpenCode
+dependency to the default build or configuration. Remote worker networking,
+mandatory process isolation, distributed leasing, and Codex/Claude adapters
+remain future work.
 
 ## Policy, secrets, and trust
 
@@ -149,6 +177,9 @@ GET  /api/v1/workers/{id}
 GET  /api/v1/worker-jobs
 GET  /api/v1/worker-jobs/{id}
 POST /api/v1/worker-jobs/{id}/cancel
+GET  /api/v1/worker-requests
+GET  /api/v1/worker-requests/{id}
+POST /api/v1/worker-requests/{id}/respond
 ```
 
 The matching local CLI commands are `laso worker list|show` and

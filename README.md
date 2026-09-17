@@ -154,6 +154,12 @@ in-process adapter by default. An opt-in supervised local process transport is
 also available through `process_workers`; see the [worker process protocol](docs/worker-process-protocol.md).
 It is generic and does not add vendor-specific behavior.
 
+The optional `laso-opencode-worker` adapter uses that same supervised boundary
+for the installed OpenCode headless session API. It is disabled by default;
+see [OpenCode worker](docs/opencode-worker.md) for explicit project-root and
+environment configuration. Worker-originated approvals, permissions, and
+questions remain under LASO policy and durable operator control.
+
 **Loading a native LASO plugin grants that plugin code execution inside the LASO
 process.** Metadata validation does not isolate native code. See the
 [SDK](plugin_sdk/README.md) and [ABI contract](docs/plugin-abi.md).
@@ -176,6 +182,7 @@ process.** Metadata validation does not isolate native code. See the
 | `event-source` | Offline native event-source plugin → durable event trigger → pipeline |
 | `worker-adapter` | Offline worker plugin → durable worker job → status event → validated output |
 | `process-worker` | Supervised local process transport → deterministic reference worker host |
+| `opencode-worker` | Optional supervised OpenCode session adapter (requires a local OpenCode installation) |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 
 For an optional loopback-only OpenAI-compatible local model service, see
