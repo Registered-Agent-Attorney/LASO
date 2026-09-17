@@ -554,6 +554,27 @@ TEST(Api, RegistersAndCreatesRun) {
   auto id = response.body.at("id").get<std::string>();
   EXPECT_EQ(api.handle("GET", "/api/v1/runs/" + id, "").body.at("state"), "Completed");
 }
+TEST(Api, RunMetadataIsPreservedForWorkerContext) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service s(io, config(dir.path));
+  LocalDevelopmentIdentity identity;
+  Api api(s, identity);
+  ASSERT_EQ(
+      api.handle("POST", "/api/v1/pipelines", Json{{"yaml", fixture("hello-pipeline")}}.dump())
+          .status,
+      201U);
+  const auto response = api.handle(
+      "POST", "/api/v1/pipelines/hello/runs",
+      Json{{"input", Json{{"value", 42}}},
+           {"metadata", Json{{"classification", "public"}, {"project_dir", "/tmp/example"}}}}
+          .dump());
+  ASSERT_EQ(response.status, 202U);
+  io.run();
+  const auto run = api.handle("GET", "/api/v1/runs/" + response.body.at("id").get<std::string>(), "").body;
+  EXPECT_EQ(run.at("message").at("metadata").at("classification"), "public");
+  EXPECT_EQ(run.at("message").at("metadata").at("project_dir"), "/tmp/example");
+}
 TEST(Api, RejectsMalformedAndOversizedRequests) {
   TemporaryDirectory dir;
   asio::io_context io;

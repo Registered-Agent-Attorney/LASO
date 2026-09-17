@@ -20,7 +20,7 @@ public:
   Json register_pipeline(const std::string &yaml);
   std::string start(const std::string &name_or_path, const Json &input = Json::object(),
                     const std::string &actor = "local", bool allow_file = false,
-                    Json origin = Json::object());
+                    Json origin = Json::object(), Json message_metadata = Json::object());
   Json create_schedule(const Json &spec);
   Json update_schedule(const std::string &id, const Json &spec);
   void set_schedule_enabled(const std::string &id, bool enabled);
