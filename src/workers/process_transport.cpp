@@ -172,7 +172,7 @@ private:
   }
 
   void spawn_locked() {
-    int child_input[2], child_output[2], child_error[2];
+    int child_input[2] = {-1, -1}, child_output[2] = {-1, -1}, child_error[2] = {-1, -1};
     if (::pipe(child_input) < 0 || ::pipe(child_output) < 0 || ::pipe(child_error) < 0) {
       close_fd(child_input[0]);
       close_fd(child_input[1]);
@@ -249,7 +249,8 @@ private:
 
   void terminate_locked() noexcept {
     if (pid > 0) {
-      (void)::kill(-pid, SIGTERM);
+      if (::kill(-pid, SIGTERM) < 0)
+        (void)::kill(pid, SIGTERM);
       const auto deadline = Clock::now() + std::chrono::milliseconds(500);
       int status = 0;
       while (Clock::now() < deadline) {
@@ -261,7 +262,8 @@ private:
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
       if (::waitpid(pid, &status, WNOHANG) == 0) {
-        (void)::kill(-pid, SIGKILL);
+        if (::kill(-pid, SIGKILL) < 0)
+          (void)::kill(pid, SIGKILL);
         (void)::waitpid(pid, &status, 0);
       }
     }
@@ -374,9 +376,11 @@ private:
     const auto response = Json::parse(response_wire, nullptr, false);
     if (response.is_discarded() || !response.is_object())
       throw WorkerTransportError("Worker response is not valid JSON");
-    if (response.value("protocol_version", 0U) != process_protocol::version)
+    if (!response.contains("protocol_version") || !response.at("protocol_version").is_number_unsigned() ||
+        response.at("protocol_version").get<std::uint32_t>() != process_protocol::version)
       throw WorkerTransportError("Worker protocol version is incompatible");
-    if (response.value("request_id", std::string{}) != request_id)
+    if (!response.contains("request_id") || !response.at("request_id").is_string() ||
+        response.at("request_id").get<std::string>() != request_id)
       throw WorkerTransportError("Worker response request id does not match");
     if (!response.contains("ok") || !response.at("ok").is_boolean())
       throw WorkerTransportError("Worker response has no valid success flag");
@@ -387,7 +391,16 @@ private:
 
   Json request_response_locked(const std::string &operation, const std::string &job_id,
                                const std::string &external_job_id, const Json &payload) {
-    return request_locked(operation, job_id, external_job_id, payload, config.request_timeout_ms);
+    try {
+      return request_locked(operation, job_id, external_job_id, payload, config.request_timeout_ms);
+    } catch (...) {
+      // A protocol or pipe failure makes this child unusable. Never reuse it
+      // for an ambiguous external submission.
+      terminate_locked();
+      metadata_.healthy = false;
+      metadata_.status = "failed";
+      throw;
+    }
   }
 
   static WorkerJobState response_state(const Json &response) {
@@ -421,45 +434,61 @@ private:
     const auto metadata = response.value("metadata", Json::object());
     if (!metadata.is_object() || metadata.dump().size() > process_protocol::max_metadata_bytes)
       throw WorkerTransportError("Worker response metadata exceeds the limit");
+    if (response.contains("artifacts") && !response.at("artifacts").is_array())
+      throw WorkerTransportError("Worker artifact references are invalid");
     const auto artifacts = response.value("artifacts", std::vector<Json>{});
     if (artifacts.size() > process_protocol::max_artifact_references)
       throw WorkerTransportError("Worker response has too many artifact references");
     for (const auto &artifact : artifacts)
       if (!artifact.is_object() || artifact.dump().size() > process_protocol::max_metadata_bytes)
         throw WorkerTransportError("Worker artifact reference is invalid");
+    if (response.contains("error") && !response.at("error").is_string())
+      throw WorkerTransportError("Worker error is invalid");
     const auto error = response.value("error", std::string{});
     if (error.size() > max_error_bytes)
       throw WorkerTransportError("Worker error exceeds the limit");
   }
 
   static WorkerSubmission parse_submission_locked(const std::string &, const Json &response) {
-    validate_response_metadata(response);
-    WorkerSubmission result;
-    result.external_job_id = response.value("external_job_id", std::string{});
-    if (!bounded_text(result.external_job_id, max_id_bytes))
-      throw WorkerTransportError("Worker returned an invalid external job id");
-    result.state = response_state(response);
-    result.metadata = response.value("metadata", Json::object());
-    result.result = response_payload(response);
-    result.artifacts = response.value("artifacts", std::vector<Json>{});
-    result.error = response.value("error", std::string{});
-    result.usage = response_usage(response);
-    return result;
+    try {
+      validate_response_metadata(response);
+      WorkerSubmission result;
+      result.external_job_id = response.value("external_job_id", std::string{});
+      if (!bounded_text(result.external_job_id, max_id_bytes))
+        throw WorkerTransportError("Worker returned an invalid external job id");
+      result.state = response_state(response);
+      result.metadata = response.value("metadata", Json::object());
+      result.result = response_payload(response);
+      result.artifacts = response.value("artifacts", std::vector<Json>{});
+      result.error = response.value("error", std::string{});
+      result.usage = response_usage(response);
+      return result;
+    } catch (const WorkerTransportError &) {
+      throw;
+    } catch (...) {
+      throw WorkerTransportError("Worker submission response has invalid fields");
+    }
   }
 
   WorkerStatus status_operation(const std::string &operation, const std::string &external_job_id) {
     std::lock_guard lock(mutex);
     ensure_started_locked();
     const auto response = request_response_locked(operation, "", external_job_id, Json::object());
-    validate_response_metadata(response);
-    WorkerStatus result;
-    result.state = response_state(response);
-    result.result = response_payload(response);
-    result.metadata = response.value("metadata", Json::object());
-    result.artifacts = response.value("artifacts", std::vector<Json>{});
-    result.error = response.value("error", std::string{});
-    result.usage = response_usage(response);
-    return result;
+    try {
+      validate_response_metadata(response);
+      WorkerStatus result;
+      result.state = response_state(response);
+      result.result = response_payload(response);
+      result.metadata = response.value("metadata", Json::object());
+      result.artifacts = response.value("artifacts", std::vector<Json>{});
+      result.error = response.value("error", std::string{});
+      result.usage = response_usage(response);
+      return result;
+    } catch (const WorkerTransportError &) {
+      throw;
+    } catch (...) {
+      throw WorkerTransportError("Worker status response has invalid fields");
+    }
   }
 };
 
