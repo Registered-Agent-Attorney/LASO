@@ -21,8 +21,9 @@ PostgreSQL runtime/reopen behavior, event-source ABI/lifecycle, bounded host ing
 source schema validation, durable external-event deduplication, source-state restart,
 offline plugin-to-trigger-to-pipeline execution, durable worker-job lifecycle,
 worker idempotency, concurrent duplicate submission, worker status/result/cancel
-correlation, schema and policy enforcement at the worker boundary, late terminal
-event rejection, and manager restart reconciliation.
+correlation, optional normalized usage, execution budgets, transport/job failure
+classification, schema and policy enforcement at the worker boundary, late
+terminal event rejection, and manager restart reconciliation.
 
 ## Statically reviewed
 
@@ -124,9 +125,11 @@ use, and concurrent cache access.
 
 The worker-adapter tests additionally cover ABI-compatible plugin discovery and
 health, normal `WorkerNode` execution, worker-boundary schemas and policy approval,
-durable idempotency under sequential and concurrent submission, terminal late-event
-handling, and reconciliation after manager restart. Worker job requests persist
-bounded metadata only; instructions and payloads are not copied into job records.
+durable idempotency under sequential and concurrent submission, optional usage
+metadata, budget acceptance/rejection and accumulation, transport-versus-job
+failure classification, terminal late-event handling, and reconciliation after
+manager restart. Worker job requests persist bounded metadata only; instructions
+and payloads are not copied into job records.
 
 The shared storage conformance tests run against SQLite on every default build and
 against a real disposable PostgreSQL service when `LASO_TEST_POSTGRES_DSN` is set.

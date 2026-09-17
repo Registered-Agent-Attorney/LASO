@@ -23,4 +23,7 @@ implementing a plugin. Tool, model-provider, and event-source registration are
 and worker registration are implemented; the remaining component kinds return
 `LASO_UNSUPPORTED`. Plugins are
 privileged native code, loaded only from explicitly configured locations. The
-samples have no network or shell behavior.
+samples have no network or shell behavior. Worker responses may include the
+optional normalized `usage` JSON object described in
+[the worker documentation](../docs/workers.md); no vendor-specific pricing or
+worker implementation is required.
