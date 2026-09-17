@@ -180,9 +180,9 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {202, service_.get(RecordKind::Trigger, id)};
   }
   if (method == "POST" && collection == "pipelines" && action == "runs")
-    return {202, {{"id", service_.start(id, body.value("input", Json::object()), actor.id,
-                                         false, Json::object(),
-                                         body.value("metadata", Json::object()))}}};
+    return {202,
+            {{"id", service_.start(id, body.value("input", Json::object()), actor.id, false,
+                                   Json::object(), body.value("metadata", Json::object()))}}};
   if (collection == "runs" && !id.empty()) {
     if (method == "GET" && (action == "events" || action == "attempts" || action == "messages")) {
       (void)service_.get(RecordKind::Run, id);

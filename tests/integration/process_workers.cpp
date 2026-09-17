@@ -52,8 +52,8 @@ bool reference_host_running() {
 }
 
 boost::beast::http::response<boost::beast::http::string_body>
-http_request(unsigned short port, boost::beast::http::verb method,
-             const std::string &target, const Json &body = Json::object()) {
+http_request(unsigned short port, boost::beast::http::verb method, const std::string &target,
+             const Json &body = Json::object()) {
   namespace http = boost::beast::http;
   asio::io_context peer_io;
   boost::beast::tcp_stream stream(peer_io);
@@ -266,9 +266,9 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
   std::jthread executor([&] { io.run(); });
   std::jthread executor2([&] { io.run(); });
 
-  const auto started = http_request(
-      server.port(), boost::beast::http::verb::post,
-      "/api/v1/pipelines/process-worker-e2e/runs", {{"input", {{"value", 7}}}});
+  const auto started =
+      http_request(server.port(), boost::beast::http::verb::post,
+                   "/api/v1/pipelines/process-worker-e2e/runs", {{"input", {{"value", 7}}}});
   ASSERT_EQ(started.result_int(), 202);
   const auto run_id = Json::parse(started.body()).at("id").get<std::string>();
 
@@ -288,15 +288,14 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
   }
   ASSERT_FALSE(interaction_id.empty());
 
-  const auto approved = http_request(
-      server.port(), boost::beast::http::verb::post,
-      "/api/v1/worker-requests/" + interaction_id + "/approve");
+  const auto approved = http_request(server.port(), boost::beast::http::verb::post,
+                                     "/api/v1/worker-requests/" + interaction_id + "/approve");
   ASSERT_EQ(approved.result_int(), 202);
   EXPECT_EQ(Json::parse(approved.body()).at("state"), "approved");
 
   for (unsigned attempt = 0; attempt < 100; ++attempt) {
-    const auto inspected = http_request(
-        server.port(), boost::beast::http::verb::get, "/api/v1/runs/" + run_id);
+    const auto inspected =
+        http_request(server.port(), boost::beast::http::verb::get, "/api/v1/runs/" + run_id);
     ASSERT_EQ(inspected.result_int(), 200);
     const auto run = Json::parse(inspected.body());
     if (run.value("state", std::string{}) == "Completed")
@@ -304,8 +303,8 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
     ASSERT_NE(run.value("state", std::string{}), "Failed");
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  const auto completed = http_request(server.port(), boost::beast::http::verb::get,
-                                      "/api/v1/runs/" + run_id);
+  const auto completed =
+      http_request(server.port(), boost::beast::http::verb::get, "/api/v1/runs/" + run_id);
   EXPECT_EQ(Json::parse(completed.body()).at("state"), "Completed");
   server.stop();
   service.shutdown();

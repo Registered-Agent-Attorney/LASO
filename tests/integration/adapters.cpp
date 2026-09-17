@@ -571,7 +571,8 @@ TEST(Api, RunMetadataIsPreservedForWorkerContext) {
           .dump());
   ASSERT_EQ(response.status, 202U);
   io.run();
-  const auto run = api.handle("GET", "/api/v1/runs/" + response.body.at("id").get<std::string>(), "").body;
+  const auto run =
+      api.handle("GET", "/api/v1/runs/" + response.body.at("id").get<std::string>(), "").body;
   EXPECT_EQ(run.at("message").at("metadata").at("classification"), "public");
   EXPECT_EQ(run.at("message").at("metadata").at("project_dir"), "/tmp/example");
 }

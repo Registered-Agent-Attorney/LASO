@@ -17,8 +17,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
   std::set<std::shared_ptr<beast::tcp_stream>> sessions;
   bool stopping = false;
   Impl(asio::io_context &io, Api &api_ref, const std::string &host, unsigned short port)
-      : api_strand(asio::make_strand(api_pool)), strand(asio::make_strand(io)),
-        acceptor(strand), api(api_ref) {
+      : api_strand(asio::make_strand(api_pool)), strand(asio::make_strand(io)), acceptor(strand),
+        api(api_ref) {
     Tcp::endpoint endpoint(asio::ip::make_address(host), port);
     acceptor.open(endpoint.protocol());
     acceptor.set_option(Tcp::acceptor::reuse_address(true));
