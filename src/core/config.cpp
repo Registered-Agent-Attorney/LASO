@@ -1,5 +1,6 @@
 #include "../pipeline/yaml.hpp"
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <laso/core/config.hpp>
 #include <laso/pipeline/parser.hpp>
@@ -35,7 +36,10 @@ void Config::validate() {
       max_event_trigger_depth == 0 || max_event_trigger_depth > 64 ||
       max_event_trigger_deliveries == 0 || max_event_trigger_deliveries > 100000 ||
       max_worker_jobs == 0 || max_worker_jobs > 4096 || max_worker_jobs_per_worker == 0 ||
-      max_worker_jobs_per_worker > max_worker_jobs)
+      max_worker_jobs_per_worker > max_worker_jobs || max_worker_wall_time_ms > 1000000000000000ULL ||
+      max_worker_tokens_per_run > 1000000000000000ULL ||
+      !std::isfinite(max_worker_cost_units_per_run) || max_worker_cost_units_per_run < 0 ||
+      max_worker_cost_units_per_run > 1000000000000000.0)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
   if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
@@ -201,6 +205,9 @@ Config load_config(const std::filesystem::path &supplied,
                     "MAX_EVENT_TRIGGER_DELIVERIES",
                     "MAX_WORKER_JOBS",
                     "MAX_WORKER_JOBS_PER_WORKER",
+                    "MAX_WORKER_WALL_TIME_MS",
+                    "MAX_WORKER_TOKENS_PER_RUN",
+                    "MAX_WORKER_COST_UNITS_PER_RUN",
                     "JSON_LOGS",
                     "ALLOW_NETWORK",
                     "ALLOW_REMOTE_API",
@@ -229,6 +236,28 @@ Config load_config(const std::filesystem::path &supplied,
       if (end != s.size() || result > 100000)
         throw std::out_of_range("limit");
       return static_cast<unsigned>(result);
+    } catch (...) {
+      throw Error(ErrorCode::Configuration, "Invalid numeric configuration");
+    }
+  };
+  auto uint64 = [](const std::string &s) {
+    try {
+      std::size_t end = 0;
+      const auto result = std::stoull(s, &end);
+      if (end != s.size() || result > 1000000000000000ULL)
+        throw std::out_of_range("limit");
+      return static_cast<std::uint64_t>(result);
+    } catch (...) {
+      throw Error(ErrorCode::Configuration, "Invalid numeric configuration");
+    }
+  };
+  auto real = [](const std::string &s) {
+    try {
+      std::size_t end = 0;
+      const auto result = std::stod(s, &end);
+      if (end != s.size() || !std::isfinite(result) || result < 0 || result > 1e15)
+        throw std::out_of_range("limit");
+      return result;
     } catch (...) {
       throw Error(ErrorCode::Configuration, "Invalid numeric configuration");
     }
@@ -284,6 +313,12 @@ Config load_config(const std::filesystem::path &supplied,
       c.max_worker_jobs = integer(v);
     else if (k == "max_worker_jobs_per_worker")
       c.max_worker_jobs_per_worker = integer(v);
+    else if (k == "max_worker_wall_time_ms")
+      c.max_worker_wall_time_ms = uint64(v);
+    else if (k == "max_worker_tokens_per_run")
+      c.max_worker_tokens_per_run = uint64(v);
+    else if (k == "max_worker_cost_units_per_run")
+      c.max_worker_cost_units_per_run = real(v);
     else
       throw Error(ErrorCode::Configuration, "Unknown configuration field");
   }
