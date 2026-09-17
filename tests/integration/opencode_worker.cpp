@@ -64,6 +64,14 @@ TEST(OpenCodeWorker, RealInstalledAdapterCreatesAndContinuesSession) {
   EXPECT_EQ(second.state, WorkerJobState::Completed) << second.error;
   EXPECT_EQ(second.result.value("session_id", std::string{}), session);
   transport.stop();
+
+  ProcessWorkerTransport restarted("opencode", opencode_config(root.path, port));
+  ASSERT_NO_THROW(restarted.start());
+  const auto after_restart = restarted.submit(opencode_request(
+      root.path, "opencode-turn-3", "Reply with RECOVERED and do not change any files.", session));
+  EXPECT_EQ(after_restart.state, WorkerJobState::Completed) << after_restart.error;
+  EXPECT_EQ(after_restart.result.value("session_id", std::string{}), session);
+  restarted.stop();
 }
 
 TEST(OpenCodeWorker, RejectsProjectOutsideConfiguredRoot) {
