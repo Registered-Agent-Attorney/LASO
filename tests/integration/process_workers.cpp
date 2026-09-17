@@ -256,7 +256,7 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
   auto process = worker_config("interaction", 5000);
   process.interaction_timeout_ms = 5000;
   config.process_workers.emplace("process", std::move(process));
-  config.rules.push_back({"worker.permission", PolicyDecision::RequireApproval});
+  config.rules.push_back({"worker.reference", PolicyDecision::RequireApproval});
   config.validate();
   Service service(io, config);
   service.register_pipeline(process_pipeline());
