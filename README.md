@@ -150,7 +150,9 @@ create pipeline runs directly. Worker usage is optional and normalized when
 reported; generic per-job wall-time and per-run token/cost budgets are available
 without vendor pricing or billing logic. The transport boundary is
 backend-neutral, while the shipped implementation remains the trusted native
-in-process adapter. Supervised or remote workers are future work.
+in-process adapter by default. An opt-in supervised local process transport is
+also available through `process_workers`; see the [worker process protocol](docs/worker-process-protocol.md).
+It is generic and does not add vendor-specific behavior.
 
 **Loading a native LASO plugin grants that plugin code execution inside the LASO
 process.** Metadata validation does not isolate native code. See the
@@ -173,6 +175,7 @@ process.** Metadata validation does not isolate native code. See the
 | `scheduling` | Offline schedule and event-trigger definitions for a deterministic pipeline |
 | `event-source` | Offline native event-source plugin → durable event trigger → pipeline |
 | `worker-adapter` | Offline worker plugin → durable worker job → status event → validated output |
+| `process-worker` | Supervised local process transport → deterministic reference worker host |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 
 For an optional loopback-only OpenAI-compatible local model service, see

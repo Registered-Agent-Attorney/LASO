@@ -121,5 +121,8 @@ existing schema, policy, retry, deadline, cancellation, provenance, and storage
 paths remain authoritative. Normalized optional usage is persisted with the job,
 and generic wall/token/cost budgets are enforced by the manager without vendor
 pricing or billing logic. `WorkerAdapter` remains the trusted native in-process
-implementation of the transport boundary; a future supervised or remote
-transport is only an architectural seam. See [worker adapters](workers.md).
+implementation of the transport boundary. The optional
+`ProcessWorkerTransport` supervises an explicitly configured local executable
+through a bounded versioned NDJSON protocol; it is a lifecycle boundary, not a
+sandbox. Remote transports and distributed worker leasing remain deferred. See
+[worker adapters](workers.md) and the [process protocol](worker-process-protocol.md).
