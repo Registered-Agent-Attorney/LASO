@@ -106,11 +106,13 @@ int main(int argc, char **argv) {
       } else {
         if (mode == "delay-ms")
           std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-        response(request, {{"ok", true},
-                           {"state", "Completed"},
-                           {"external_job_id", external},
-                           {"payload", terminal_result(mode)},
-                           {"usage", usage(mode)}});
+        Json body{{"ok", true},
+                  {"state", "Completed"},
+                  {"external_job_id", external},
+                  {"payload", terminal_result(mode)}};
+        if (mode != "no-usage")
+          body["usage"] = usage(mode);
+        response(request, body);
       }
       continue;
     }
@@ -132,10 +134,12 @@ int main(int argc, char **argv) {
     }
     ++found->second.status_checks;
     const bool done = mode != "delay" || found->second.status_checks > 1;
-    response(request, {{"ok", true},
-                       {"state", done ? "Completed" : "Running"},
-                       {"payload", done ? terminal_result(mode) : Json::object()},
-                       {"usage", done ? usage(mode) : Json::object()}});
+    Json body{{"ok", true},
+              {"state", done ? "Completed" : "Running"},
+              {"payload", done ? terminal_result(mode) : Json::object()}};
+    if (done && mode != "no-usage")
+      body["usage"] = usage(mode);
+    response(request, body);
   }
   return 0;
 }
