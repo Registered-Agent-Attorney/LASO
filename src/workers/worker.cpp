@@ -1,5 +1,7 @@
-#include <cmath>
 #include <laso/workers/worker.hpp>
+#include <laso/workers/process_protocol.hpp>
+#include <cmath>
+#include <stdexcept>
 
 namespace laso {
 bool worker_job_terminal(WorkerJobState state) {
@@ -173,5 +175,138 @@ void from_json(const Json &j, WorkerJob &job) {
   job.artifacts = j.value("artifacts", std::vector<Json>{});
   if (j.contains("usage"))
     job.usage = j.at("usage").get<WorkerUsage>();
+}
+
+void to_json(Json &j, const WorkerInteractionRequest &request) {
+  j = {{"protocol_version", process_protocol::version},
+       {"request_id", request.request_id},
+       {"worker_job_id", request.worker_job_id},
+       {"worker_id", request.worker_id},
+       {"external_job_id", request.external_job_id},
+       {"session_id", request.session_id},
+       {"request_type", request.type},
+       {"title", request.title},
+       {"summary", request.summary},
+       {"payload", request.payload},
+       {"created_at", request.created_at},
+       {"deadline", request.deadline},
+       {"risk", request.risk},
+       {"category", request.category}};
+}
+
+void from_json(const Json &j, WorkerInteractionRequest &request) {
+  request.request_id = j.value("request_id", std::string{});
+  request.worker_job_id = j.value("worker_job_id", std::string{});
+  request.worker_id = j.value("worker_id", std::string{});
+  request.external_job_id = j.value("external_job_id", std::string{});
+  request.session_id = j.value("session_id", std::string{});
+  const auto type = j.value("request_type", std::string{"question"});
+  if (type == "approval")
+    request.type = WorkerInteractionType::Approval;
+  else if (type == "permission")
+    request.type = WorkerInteractionType::Permission;
+  else if (type == "question")
+    request.type = WorkerInteractionType::Question;
+  else
+    throw std::invalid_argument("unknown worker interaction type");
+  request.title = j.value("title", std::string{});
+  request.summary = j.value("summary", std::string{});
+  request.payload = j.value("payload", Json::object());
+  request.created_at = j.value("created_at", std::string{});
+  request.deadline = j.value("deadline", std::string{});
+  request.risk = j.value("risk", std::string{});
+  request.category = j.value("category", std::string{});
+}
+
+void to_json(Json &j, const WorkerInteractionResponse &response) {
+  j = {{"request_id", response.request_id},
+       {"decision", response.state},
+       {"payload", response.payload},
+       {"reason", response.reason}};
+}
+
+void from_json(const Json &j, WorkerInteractionResponse &response) {
+  response.request_id = j.value("request_id", std::string{});
+  const auto decision = j.value("decision", std::string{"denied"});
+  if (decision == "approved")
+    response.state = WorkerInteractionState::Approved;
+  else if (decision == "denied")
+    response.state = WorkerInteractionState::Denied;
+  else if (decision == "answered")
+    response.state = WorkerInteractionState::Answered;
+  else if (decision == "cancelled")
+    response.state = WorkerInteractionState::Cancelled;
+  else if (decision == "expired")
+    response.state = WorkerInteractionState::Expired;
+  else
+    throw std::invalid_argument("unknown worker interaction decision");
+  response.payload = j.value("payload", Json::object());
+  response.reason = j.value("reason", std::string{});
+}
+
+void to_json(Json &j, const WorkerInteraction &interaction) {
+  j = {{"id", interaction.id},
+       {"worker_job_id", interaction.worker_job_id},
+       {"worker_id", interaction.worker_id},
+       {"run_id", interaction.run_id},
+       {"external_job_id", interaction.external_job_id},
+       {"session_id", interaction.session_id},
+       {"request_type", interaction.type},
+       {"state", interaction.state},
+       {"title", interaction.title},
+       {"summary", interaction.summary},
+       {"payload", interaction.payload},
+       {"response", interaction.response},
+       {"created_at", interaction.created_at},
+       {"deadline", interaction.deadline},
+       {"risk", interaction.risk},
+       {"category", interaction.category},
+       {"reason", interaction.reason},
+       {"actor", interaction.actor},
+       {"decided_at", interaction.decided_at}};
+}
+
+void from_json(const Json &j, WorkerInteraction &interaction) {
+  j.at("id").get_to(interaction.id);
+  interaction.worker_job_id = j.value("worker_job_id", std::string{});
+  interaction.worker_id = j.value("worker_id", std::string{});
+  interaction.run_id = j.value("run_id", std::string{});
+  interaction.external_job_id = j.value("external_job_id", std::string{});
+  interaction.session_id = j.value("session_id", std::string{});
+  const auto type = j.value("request_type", std::string{"question"});
+  if (type == "approval")
+    interaction.type = WorkerInteractionType::Approval;
+  else if (type == "permission")
+    interaction.type = WorkerInteractionType::Permission;
+  else if (type == "question")
+    interaction.type = WorkerInteractionType::Question;
+  else
+    throw std::invalid_argument("unknown worker interaction type");
+  const auto state = j.value("state", std::string{"pending"});
+  if (state == "pending")
+    interaction.state = WorkerInteractionState::Pending;
+  else if (state == "approved")
+    interaction.state = WorkerInteractionState::Approved;
+  else if (state == "denied")
+    interaction.state = WorkerInteractionState::Denied;
+  else if (state == "answered")
+    interaction.state = WorkerInteractionState::Answered;
+  else if (state == "cancelled")
+    interaction.state = WorkerInteractionState::Cancelled;
+  else if (state == "expired")
+    interaction.state = WorkerInteractionState::Expired;
+  else
+    throw std::invalid_argument("unknown worker interaction state");
+  interaction.title = j.value("title", std::string{});
+  interaction.summary = j.value("summary", std::string{});
+  interaction.payload = j.value("payload", Json::object());
+  interaction.response = j.value("response", Json::object());
+  interaction.created_at = j.value("created_at", std::string{});
+  interaction.deadline = j.value("deadline", std::string{});
+  interaction.risk = j.value("risk", std::string{});
+  interaction.category = j.value("category", std::string{});
+  interaction.reason = j.value("reason", std::string{});
+  interaction.actor = j.value("actor", std::string{});
+  interaction.decided_at = j.value("decided_at", std::string{});
 }
 } // namespace laso

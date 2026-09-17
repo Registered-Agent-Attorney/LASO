@@ -51,10 +51,12 @@ Service::Service(asio::io_context &io, Config config)
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
                config_.max_pending_scheduler_launches, 32),
-      worker_manager_(std::make_shared<WorkerManager>(
-          *storage_, worker_registry_, config_.max_worker_jobs, config_.max_worker_jobs_per_worker,
-          16, config_.max_worker_wall_time_ms, config_.max_worker_tokens_per_run,
-          config_.max_worker_cost_units_per_run)),
+      worker_manager_(std::make_shared<WorkerManager>(*storage_, worker_registry_, policy_,
+                                                      config_.max_worker_jobs,
+                                                      config_.max_worker_jobs_per_worker,
+                                                      16, config_.max_worker_wall_time_ms,
+                                                      config_.max_worker_tokens_per_run,
+                                                      config_.max_worker_cost_units_per_run)),
       plugins_(
           tools_, providers_, worker_registry_,
           [this](const std::string &source, const std::string &plugin, const std::string &component,
@@ -105,6 +107,10 @@ Service::Service(asio::io_context &io, Config config)
     auto transport = std::make_shared<ProcessWorkerTransport>(id, process_config);
     worker_registry_.add(id, transport);
     process_workers_.push_back(transport);
+    transport->set_interaction_handler(
+        [manager = worker_manager_](const WorkerInteractionRequest &request) {
+          return manager->handle_interaction(request);
+        });
     transport->start();
   }
   plugins_.discover(config_.plugin_dirs, config_.event_sources, config_.worker_plugins);
@@ -455,6 +461,18 @@ Json Service::worker_job(const std::string &id) const {
 }
 void Service::cancel_worker_job(const std::string &id) {
   worker_manager_->cancel(id, WorkerJobState::Cancelled, "Cancellation requested by operator");
+}
+std::vector<Json> Service::worker_interactions(const std::string &run_id, std::size_t limit,
+                                               std::size_t offset) const {
+  return worker_manager_->worker_interactions(run_id, limit, offset);
+}
+Json Service::worker_interaction(const std::string &id) const {
+  return worker_manager_->worker_interaction(id);
+}
+void Service::resolve_worker_interaction(const std::string &id, WorkerInteractionState state,
+                                         const Json &payload, const std::string &actor,
+                                         const std::string &reason) {
+  worker_manager_->resolve_interaction(id, state, payload, actor, reason);
 }
 Json Service::pipeline_record(const std::string &reference) const {
   const auto parsed = parse_pipeline_reference(reference);

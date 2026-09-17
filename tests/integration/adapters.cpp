@@ -50,7 +50,8 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
                                   RecordKind::TriggerDelivery,
                                   RecordKind::EventSource,
                                   RecordKind::ExternalEventClaim,
-                                  RecordKind::WorkerJob};
+                                  RecordKind::WorkerJob,
+                                  RecordKind::WorkerInteraction};
     std::vector<Record> records;
     for (std::size_t i = 0; i < kinds.size(); ++i)
       records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});

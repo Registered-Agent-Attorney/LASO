@@ -22,7 +22,8 @@ struct ProcessWorkerConfig {
   // explicitly named parent variables and literal overrides are passed.
   std::vector<std::string> environment_allowlist;
   std::map<std::string, std::string> environment;
-  std::uint64_t startup_timeout_ms = 5000, request_timeout_ms = 5000;
+  std::uint64_t startup_timeout_ms = 5000, request_timeout_ms = 5000,
+                interaction_timeout_ms = 300000;
 };
 struct Config {
   std::filesystem::path data_dir = ".laso", db_path;

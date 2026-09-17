@@ -82,3 +82,7 @@ protocol feature and does not change the C ABI. A worker-declared failed status 
 kept distinct from a callback/transport failure. The optional supervised process
 transport is not a native ABI revision; it uses the separate versioned local
 [worker process protocol](worker-process-protocol.md).
+
+The process protocol also carries the bounded worker-originated interaction
+channel. Native ABI plugins retain their existing callback contract; they are
+not required to implement process requests in this change.

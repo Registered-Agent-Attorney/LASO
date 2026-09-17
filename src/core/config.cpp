@@ -78,7 +78,8 @@ void Config::validate() {
     if (worker.args.size() > 128 || worker.environment_allowlist.size() > 64 ||
         worker.environment.size() > 64 || worker.startup_timeout_ms == 0 ||
         worker.startup_timeout_ms > 60000 || worker.request_timeout_ms == 0 ||
-        worker.request_timeout_ms > 60000)
+        worker.request_timeout_ms > 60000 || worker.interaction_timeout_ms == 0 ||
+        worker.interaction_timeout_ms > 3600000)
       throw Error(ErrorCode::Configuration, "Invalid process worker limits");
     static const std::regex env_name("[A-Za-z_][A-Za-z0-9_]{0,127}");
     std::set<std::string> allowlisted_names;
@@ -225,9 +226,10 @@ Config load_config(const std::filesystem::path &supplied,
               if (!fields.insert(field.first.as<std::string>()).second)
                 throw Error(ErrorCode::Configuration, "Duplicate process worker field");
             for (const auto &field : fields)
-              if (field != "executable" && field != "args" && field != "environment_allowlist" &&
-                  field != "environment" && field != "startup_timeout_ms" &&
-                  field != "request_timeout_ms")
+              if (field != "executable" && field != "args" &&
+                  field != "environment_allowlist" && field != "environment" &&
+                  field != "startup_timeout_ms" && field != "request_timeout_ms" &&
+                  field != "interaction_timeout_ms")
                 throw Error(ErrorCode::Configuration, "Unknown process worker field");
             ProcessWorkerConfig cfg;
             if (!node["executable"])
@@ -260,6 +262,8 @@ Config load_config(const std::filesystem::path &supplied,
               cfg.startup_timeout_ms = node["startup_timeout_ms"].as<std::uint64_t>();
             if (node["request_timeout_ms"])
               cfg.request_timeout_ms = node["request_timeout_ms"].as<std::uint64_t>();
+            if (node["interaction_timeout_ms"])
+              cfg.interaction_timeout_ms = node["interaction_timeout_ms"].as<std::uint64_t>();
             if (!c.process_workers.emplace(id, std::move(cfg)).second)
               throw Error(ErrorCode::Configuration, "Duplicate process worker id");
           }

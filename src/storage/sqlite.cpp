@@ -21,7 +21,8 @@ std::string table(RecordKind kind) {
                                        "trigger_deliveries",
                                        "event_sources",
                                        "external_event_claims",
-                                       "worker_jobs"};
+                                       "worker_jobs",
+                                       "worker_interactions"};
   const auto index = static_cast<std::size_t>(kind);
   if (index >= names.size())
     throw Error(ErrorCode::Validation, "Unknown record kind");
@@ -83,19 +84,19 @@ SQLiteStorage::SQLiteStorage(const std::filesystem::path &path) : impl_(std::mak
   exec(raw, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
   auto version_stmt = prepare(raw, "PRAGMA user_version");
   if (sqlite3_step(version_stmt.get()) != SQLITE_ROW ||
-      sqlite3_column_int(version_stmt.get(), 0) > 4)
+      sqlite3_column_int(version_stmt.get(), 0) > 5)
     throw Error(ErrorCode::Storage, "Unsupported database schema version");
   version_stmt.reset();
   exec(raw, "BEGIN IMMEDIATE");
   try {
-    for (std::size_t i = 0; i < 14; ++i) {
+    for (std::size_t i = 0; i < 15; ++i) {
       auto name = table(static_cast<RecordKind>(i));
       exec(raw, "CREATE TABLE IF NOT EXISTS " + name +
                     " (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, body TEXT NOT NULL "
                     "CHECK(json_valid(body)), sequence INTEGER NOT NULL)");
       exec(raw, "CREATE INDEX IF NOT EXISTS " + name + "_run ON " + name + "(run_id,sequence)");
     }
-    exec(raw, "PRAGMA user_version=4; COMMIT");
+    exec(raw, "PRAGMA user_version=5; COMMIT");
   } catch (...) {
     sqlite3_exec(raw, "ROLLBACK", nullptr, nullptr, nullptr);
     throw;

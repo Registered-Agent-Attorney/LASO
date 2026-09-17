@@ -3,6 +3,7 @@
 #include <cmath>
 #include <laso/core/config.hpp>
 #include <laso/workers/manager.hpp>
+#include <laso/workers/process_protocol.hpp>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -58,6 +59,15 @@ WorkerManager::WorkerManager(Storage &storage, WorkerRegistry &registry, unsigne
       !std::isfinite(max_cost_units_per_run_) || max_cost_units_per_run_ < 0 ||
       max_cost_units_per_run_ > static_cast<double>(max_usage_metric))
     throw Error(ErrorCode::Configuration, "Invalid worker limits");
+}
+
+WorkerManager::WorkerManager(Storage &storage, WorkerRegistry &registry, Policy &policy,
+                             unsigned max_active, unsigned max_per_worker, unsigned max_artifacts,
+                             std::uint64_t max_wall_time_ms, std::uint64_t max_tokens_per_run,
+                             double max_cost_units_per_run)
+    : WorkerManager(storage, registry, max_active, max_per_worker, max_artifacts, max_wall_time_ms,
+                    max_tokens_per_run, max_cost_units_per_run) {
+  policy_ = &policy;
 }
 
 WorkerJob WorkerManager::job(const std::string &id) const {
@@ -566,6 +576,22 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
   auto value = job(id);
   if (worker_job_terminal(value.state))
     return;
+  {
+    std::lock_guard lock(interaction_mutex_);
+    for (const auto &record : storage_.list(RecordKind::WorkerInteraction, "", 10000, 0)) {
+      auto interaction = record.get<WorkerInteraction>();
+      if (interaction.worker_job_id == value.id &&
+          interaction.state == WorkerInteractionState::Pending) {
+        interaction.state = WorkerInteractionState::Cancelled;
+        interaction.reason = bounded_error(reason);
+        interaction.decided_at = timestamp();
+        interaction.response = Json{{"decision", "cancelled"}, {"reason", interaction.reason}};
+        storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
+                          Json(interaction)}});
+      }
+    }
+  }
+  interaction_changed_.notify_all();
   if (requested_state == WorkerJobState::TimedOut) {
     value.state = WorkerJobState::TimedOut;
     value.completed_at = timestamp();
@@ -578,6 +604,177 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
         cancellation_error.empty() ? "Worker did not acknowledge cancellation" : cancellation_error;
   }
   persist(value);
+}
+
+namespace {
+bool interaction_terminal(WorkerInteractionState state) {
+  return state != WorkerInteractionState::Pending;
+}
+
+WorkerInteractionResponse interaction_response(const WorkerInteraction &interaction) {
+  WorkerInteractionResponse result;
+  result.request_id = interaction.id;
+  result.state = interaction.state;
+  result.payload = interaction.response.value("payload", Json::object());
+  result.reason = interaction.reason;
+  return result;
+}
+}
+
+WorkerInteractionResponse WorkerManager::handle_interaction(const WorkerInteractionRequest &request) {
+  if (stopped_)
+    throw WorkerTransportError("LASO worker interaction service is stopped");
+  if (request.request_id.empty() || request.request_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.worker_job_id.empty() || request.worker_job_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.worker_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.external_job_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.session_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.title.size() > process_protocol::max_interaction_text_bytes ||
+      request.summary.size() > process_protocol::max_interaction_text_bytes ||
+      request.created_at.size() > 64 || request.deadline.size() > 64 || request.risk.size() > 128 ||
+      request.category.size() > 128 || !request.payload.is_object() ||
+      request.payload.dump().size() > process_protocol::max_interaction_payload_bytes)
+    throw WorkerTransportError("Worker interaction request exceeds its limits");
+
+  std::unique_lock lock(interaction_mutex_);
+  WorkerInteraction interaction;
+  bool existing = true;
+  try {
+    interaction = storage_.get(RecordKind::WorkerInteraction, request.request_id)
+                      .get<WorkerInteraction>();
+    if (interaction.worker_job_id != request.worker_job_id || interaction.type != request.type)
+      throw WorkerTransportError("Worker interaction id was reused with different content");
+  } catch (const Error &error) {
+    if (error.code != ErrorCode::NotFound)
+      throw;
+    existing = false;
+  }
+  if (!existing) {
+    interaction.id = request.request_id;
+    interaction.worker_job_id = request.worker_job_id;
+    interaction.worker_id = request.worker_id;
+    try {
+      interaction.run_id = storage_.get(RecordKind::WorkerJob, request.worker_job_id)
+                               .value("run_id", std::string{});
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::NotFound)
+        throw;
+    }
+    interaction.external_job_id = request.external_job_id;
+    interaction.session_id = request.session_id;
+    interaction.type = request.type;
+    interaction.title = request.title;
+    interaction.summary = request.summary;
+    interaction.payload = request.payload;
+    interaction.created_at = request.created_at.empty() ? timestamp() : request.created_at;
+    interaction.deadline = request.deadline;
+    interaction.risk = request.risk;
+    interaction.category = request.category;
+
+    PolicyResult policy_result{PolicyDecision::RequireApproval, "Human decision required"};
+    if (request.type == WorkerInteractionType::Question) {
+      policy_result = {PolicyDecision::RequireApproval, "Human answer required"};
+    } else if (policy_) {
+      const auto resource = request.payload.value("resource", std::string{"worker.permission"});
+      policy_result = policy_->evaluate(
+          {"", "", resource, request.payload.value("classification", std::string{"public"}),
+           request.payload.value("network", false), request.payload.value("remote", false),
+           request.type == WorkerInteractionType::Approval});
+    }
+    if (policy_result.decision == PolicyDecision::Allow) {
+      interaction.state = request.type == WorkerInteractionType::Question
+                              ? WorkerInteractionState::Answered
+                              : WorkerInteractionState::Approved;
+      interaction.reason = policy_result.reason;
+      interaction.response = Json{{"decision", interaction.state}, {"reason", interaction.reason}};
+      interaction.decided_at = timestamp();
+    } else if (policy_result.decision == PolicyDecision::Deny) {
+      interaction.state = WorkerInteractionState::Denied;
+      interaction.reason = policy_result.reason;
+      interaction.response = Json{{"decision", "denied"}, {"reason", interaction.reason}};
+      interaction.decided_at = timestamp();
+    }
+    storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
+                      Json(interaction)}});
+  }
+  if (interaction_terminal(interaction.state))
+    return interaction_response(interaction);
+
+  // timestamp() is fixed-width UTC, so this comparison is valid for values
+  // produced by LASO and avoids silently waiting past an already-expired
+  // request. The in-memory wait remains bounded even for malformed clocks.
+  if (!interaction.deadline.empty() && interaction.deadline <= timestamp()) {
+    interaction.state = WorkerInteractionState::Expired;
+    interaction.reason = "Worker interaction deadline expired";
+    interaction.response = Json{{"decision", "expired"}, {"reason", interaction.reason}};
+    interaction.decided_at = timestamp();
+    storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
+                      Json(interaction)}});
+    return interaction_response(interaction);
+  }
+
+  const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+  while (!interaction_changed_.wait_until(lock, wait_deadline, [&] {
+           try {
+             interaction = storage_.get(RecordKind::WorkerInteraction, request.request_id)
+                                .get<WorkerInteraction>();
+             return interaction_terminal(interaction.state);
+           } catch (...) {
+             return false;
+           }
+         })) {
+    interaction = storage_.get(RecordKind::WorkerInteraction, request.request_id)
+                      .get<WorkerInteraction>();
+    if (!interaction_terminal(interaction.state)) {
+      interaction.state = WorkerInteractionState::Expired;
+      interaction.reason = "Worker interaction deadline expired";
+      interaction.response = Json{{"decision", "expired"}, {"reason", interaction.reason}};
+      interaction.decided_at = timestamp();
+      storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
+                        Json(interaction)}});
+    }
+    break;
+  }
+  return interaction_response(interaction);
+}
+
+std::vector<Json> WorkerManager::worker_interactions(const std::string &run_id, std::size_t limit,
+                                                     std::size_t offset) const {
+  return storage_.list(RecordKind::WorkerInteraction, run_id, limit, offset);
+}
+
+Json WorkerManager::worker_interaction(const std::string &id) const {
+  return storage_.get(RecordKind::WorkerInteraction, id);
+}
+
+void WorkerManager::resolve_interaction(const std::string &id, WorkerInteractionState state,
+                                        const Json &payload, const std::string &actor,
+                                        const std::string &reason) {
+  const auto supported = state == WorkerInteractionState::Approved ||
+                         state == WorkerInteractionState::Denied ||
+                         state == WorkerInteractionState::Answered ||
+                         state == WorkerInteractionState::Cancelled ||
+                         state == WorkerInteractionState::Expired;
+  if (id.empty() || actor.size() > 128 || reason.size() > 2048 || !payload.is_object() ||
+      payload.dump().size() > process_protocol::max_interaction_payload_bytes || !supported)
+    throw Error(ErrorCode::Validation, "Invalid worker interaction decision");
+  std::lock_guard lock(interaction_mutex_);
+  auto interaction = storage_.get(RecordKind::WorkerInteraction, id).get<WorkerInteraction>();
+  if (interaction.state != WorkerInteractionState::Pending)
+    throw Error(ErrorCode::Conflict, "Worker interaction is no longer pending");
+  if (interaction.type != WorkerInteractionType::Question && state == WorkerInteractionState::Answered)
+    throw Error(ErrorCode::Validation, "Only questions accept an answer");
+  if (interaction.type == WorkerInteractionType::Question &&
+      (state == WorkerInteractionState::Approved || state == WorkerInteractionState::Denied))
+    throw Error(ErrorCode::Validation, "Questions require an answer or cancellation");
+  interaction.state = state;
+  interaction.response = Json{{"decision", state}, {"payload", payload}, {"reason", reason}};
+  interaction.reason = reason;
+  interaction.actor = actor;
+  interaction.decided_at = timestamp();
+  storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
+                    Json(interaction)}});
+  interaction_changed_.notify_all();
 }
 
 void WorkerManager::apply_event(const Event &event) {
