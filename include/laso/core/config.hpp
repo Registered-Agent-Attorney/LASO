@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
 #include <laso/policies/policy.hpp>
 #include <laso/providers/provider.hpp>
@@ -26,6 +27,9 @@ struct Config {
            max_pending_scheduler_launches = 128, max_event_trigger_depth = 16,
            max_event_trigger_deliveries = 1024, max_worker_jobs = 32,
            max_worker_jobs_per_worker = 16;
+  // Zero disables a budget. Token and cost budgets accumulate per run.
+  std::uint64_t max_worker_wall_time_ms = 0, max_worker_tokens_per_run = 0;
+  double max_worker_cost_units_per_run = 0.0;
   bool json_logs = false, allow_network = false, allow_remote_api = false;
   std::map<std::string, EventSourceConfig> event_sources;
   std::map<std::string, WorkerConfig> worker_plugins;
