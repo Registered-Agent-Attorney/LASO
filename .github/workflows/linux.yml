@@ -65,7 +65,7 @@ jobs:
         env:
           POSTGRES_DB: laso_test
           POSTGRES_USER: laso_ci
-          POSTGRES_PASSWORD: laso-ci-only
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -89,4 +89,4 @@ jobs:
       - name: Run SQLite and PostgreSQL storage/runtime tests
         run: ctest --test-dir build --output-on-failure
         env:
-          LASO_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci password=laso-ci-only
+          LASO_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci

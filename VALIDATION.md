@@ -75,7 +75,7 @@ includes nested A → B → C execution and child output-contract failure propag
 
 No non-Linux C++ compilation was attempted because LASO is intentionally Linux-only.
 
-## Tested on a remote Ubuntu 24.04.5 host
+## Tested on Ubuntu 24.04.5 x86-64
 
 | Check | Result |
 |---|---|
@@ -132,6 +132,7 @@ approval/permission/question requests, policy decisions, idempotent replay,
 cancellation, strict protocol bounds, OpenCode session continuation after
 adapter restart, explicit project-root rejection, and normalized results and
 usage. The real OpenCode test used the installed adapter and a temporary fixture;
+<<<<<<< HEAD
 it did not require a paid provider for the test suite. That fixture did not trigger
 a real OpenCode permission or question event, so that vendor-specific interaction
 path remains partially validated; the generic LASO request path is covered by
