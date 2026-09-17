@@ -22,6 +22,8 @@ an arbitrary request-body actor. Local development identity is unauthenticated.
 | GET | `/workers`, `/workers/{id}` |
 | GET | `/worker-jobs`, `/worker-jobs/{id}` |
 | POST | `/worker-jobs/{id}/cancel` |
+| GET | `/worker-requests`, `/worker-requests/{id}` |
+| POST | `/worker-requests/{id}/respond`, `/worker-requests/{id}/answer`, `/worker-requests/{id}/deny`, `/worker-requests/{id}/cancel` |
 
 All paths above are relative to `/api/v1`. Creation/decisions return 201/202; callers
 inspect run state separately. Errors use 400 (validation), 403 (policy), 404, 409

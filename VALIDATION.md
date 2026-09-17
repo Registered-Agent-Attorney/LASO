@@ -1,8 +1,8 @@
 # Validation record
 
-Snapshot validated: 2026-09-17. The Windows development workstation was used for
-source review and packaging. Native validation was performed over SSH in an isolated
-directory on a remote Ubuntu 24.04.5 LTS (x86-64) host.
+Snapshot validated: 2026-09-16. Source review and packaging were performed in a
+development environment. Native validation used an isolated Ubuntu 24.04.5 LTS
+(x86-64) environment.
 
 ## Implemented
 
@@ -62,20 +62,20 @@ and safe relative `$ref` resolution from the declaring schema document. Regressi
 tests cover these failure paths and schema diagnostics. Composition coverage also
 includes nested A → B → C execution and child output-contract failure propagation.
 
-## Tested on this development workstation
+## Tested in the development environment
 
 | Check | Result |
 |---|---|
-| Native clang-format | Not installed on the Windows workstation; the required Linux check is recorded below |
+| Native clang-format | Not installed in the development environment; the required Linux check is recorded below |
 | CMake source paths | PASS: all referenced source files present |
 | LASO include resolution and documentation links | PASS |
 | Safe YAML/configuration document scan | PASS: 13 documents |
 | Git whitespace check | PASS |
 | Private terminology and obvious credential-pattern scan | PASS: no matches |
 
-No Windows C++ compilation was attempted because LASO is intentionally Linux-only.
+No non-Linux C++ compilation was attempted because LASO is intentionally Linux-only.
 
-## Tested on a remote Ubuntu 24.04.5 host
+## Tested on Ubuntu 24.04.5 x86-64
 
 | Check | Result |
 |---|---|
@@ -121,19 +121,21 @@ and sanitizer runtime; global ASLR settings were not weakened to work around it.
 
 ## Worker-hardening branch validation
 
-This branch was validated from upstream commit
-`960170f992e8339c9c78d56732e863b2028d5fa3` using GCC and Clang Debug/Release,
-ASan/UBSan, and an isolated local PostgreSQL 16 cluster. SQLite CTest ran 177
-tests (**175 passed, 2 PostgreSQL tests skipped**); PostgreSQL-enabled CTest
-completed **177/177**; and the ASan/UBSan CTest ran 177 tests (**175 passed,
-2 PostgreSQL tests skipped**) with leak detection enabled. The added
-worker tests cover no/partial/full usage, persistence, wall/token/cost budgets,
-transport-versus-job failures, and the supervised local process protocol. The
-process-worker suite adds 10 focused tests, including a separate-process
-pipeline and bounded child cleanup. SQLite and PostgreSQL server smoke tests both
-passed health, version, Hello, and run inspection; PostgreSQL state remained
-available after a server restart. The shipped worker-adapter example completed
-successfully. No credentials or DSNs were written to tracked files.
+This branch was validated in an isolated Linux x86-64 environment from upstream
+commit `c9887eabd585a414789d6c43514e1ee3a221ca8b` using GCC Debug, an isolated
+local PostgreSQL 16 cluster, and serial Ninja builds. SQLite CTest ran **179
+tests: 175 passed and 4 skipped** (the PostgreSQL cases and gated real OpenCode
+cases); PostgreSQL-enabled CTest completed **179/179** (the two gated real
+OpenCode cases skipped); and ASan/UBSan CTest ran **179 tests: 175 passed and 4
+skipped** with leak detection enabled. The added worker tests cover durable
+approval/permission/question requests, policy decisions, idempotent replay,
+cancellation, strict protocol bounds, OpenCode session continuation after
+adapter restart, explicit project-root rejection, and normalized results and
+usage. The real OpenCode test used the installed adapter and a temporary fixture;
+it did not require a paid provider for the test suite. That fixture did not trigger
+a real OpenCode permission or question event, so that vendor-specific interaction
+path remains partially validated; the generic LASO request path is covered by
+deterministic tests.
 
 The schema-contract tests additionally cover valid and invalid input/output,
 registration-time missing or malformed schemas, safe local references, forbidden

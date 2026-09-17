@@ -18,6 +18,7 @@ public:
   WorkerStatus status(const std::string &external_job_id) override;
   WorkerStatus result(const std::string &external_job_id) override;
   bool cancel(const std::string &external_job_id) override;
+  void set_interaction_handler(WorkerInteractionHandler) override;
   void start() override;
   void stop() noexcept override;
 

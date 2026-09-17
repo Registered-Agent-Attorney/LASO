@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added durable, policy-controlled worker `approval`, `permission`, and
+  `question` requests to the versioned process protocol. Added an opt-in
+  supervised OpenCode 1.18.x adapter with session continuation, bounded
+  structured result/usage normalization, explicit project-root checks, and
+  conservative restart/cancellation behavior. Remote workers, vendor-specific
+  Codex/Claude adapters, and distributed execution remain deferred.
+
 - Added backend-neutral worker usage accounting for optional durations, token,
   tool/action, identity, cost-unit, and structured metadata fields. Added
   deterministic wall-time and per-run token/cost budgets; no billing or vendor

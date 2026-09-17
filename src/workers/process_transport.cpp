@@ -77,6 +77,11 @@ struct ProcessWorkerTransport::Impl {
     return metadata_;
   }
 
+  void set_interaction_handler(WorkerInteractionHandler handler) {
+    std::lock_guard lock(mutex);
+    interaction_handler = std::move(handler);
+  }
+
   void start() {
     std::lock_guard lock(mutex);
     if (pid > 0)
@@ -181,6 +186,8 @@ private:
   int input_fd = -1, output_fd = -1, error_fd = -1;
   std::uint64_t request_number = 0;
   std::string stderr_capture;
+  std::string output_buffer;
+  WorkerInteractionHandler interaction_handler;
 
   void ensure_started_locked() {
     if (pid <= 0 || !metadata_.healthy)
@@ -193,6 +200,8 @@ private:
   }
 
   void spawn_locked() {
+    output_buffer.clear();
+    stderr_capture.clear();
     int child_input[2] = {-1, -1}, child_output[2] = {-1, -1}, child_error[2] = {-1, -1};
     if (::pipe(child_input) < 0 || ::pipe(child_output) < 0 || ::pipe(child_error) < 0) {
       close_fd(child_input[0]);
@@ -332,6 +341,7 @@ private:
     close_fd(error_fd);
     metadata_.healthy = false;
     metadata_.status = "failed";
+    output_buffer.clear();
   }
 
   void terminate_locked() noexcept {
@@ -400,9 +410,18 @@ private:
   }
 
   std::string read_frame_locked(Clock::time_point deadline) {
-    std::string frame;
     char buffer[4096];
     for (;;) {
+      const auto newline = output_buffer.find('\n');
+      if (newline != std::string::npos) {
+        if (newline > process_protocol::max_frame_bytes)
+          throw WorkerTransportError("Worker response exceeds the frame limit");
+        auto frame = output_buffer.substr(0, newline);
+        output_buffer.erase(0, newline + 1);
+        if (!frame.empty() && frame.back() == '\r')
+          frame.pop_back();
+        return frame;
+      }
       pollfd descriptors[2] = {{output_fd, POLLIN, 0}, {error_fd, POLLIN, 0}};
       const auto count = ::poll(descriptors, error_fd >= 0 ? 2 : 1, remaining_ms(deadline));
       if (count == 0)
@@ -417,17 +436,9 @@ private:
       if (descriptors[0].revents & (POLLIN | POLLHUP | POLLERR)) {
         const auto received = ::read(output_fd, buffer, sizeof(buffer));
         if (received > 0) {
-          frame.append(buffer, static_cast<std::size_t>(received));
-          const auto newline = frame.find('\n');
-          if (newline != std::string::npos) {
-            if (newline > process_protocol::max_frame_bytes || frame.size() > newline + 1)
-              throw WorkerTransportError("Worker sent multiple or oversized frames");
-            frame.resize(newline);
-            if (!frame.empty() && frame.back() == '\r')
-              frame.pop_back();
-            return frame;
-          }
-          if (frame.size() > process_protocol::max_frame_bytes)
+          output_buffer.append(buffer, static_cast<std::size_t>(received));
+          if (output_buffer.find('\n') == std::string::npos &&
+              output_buffer.size() > process_protocol::max_frame_bytes)
             throw WorkerTransportError("Worker response exceeds the frame limit");
         } else if (received == 0) {
           throw WorkerTransportError("Worker response was truncated");
@@ -456,24 +467,64 @@ private:
     const auto wire = request.dump();
     if (wire.size() > process_protocol::max_frame_bytes)
       throw WorkerTransportError("Worker request exceeds the frame limit");
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     write_frame_locked(wire, deadline);
-    const auto response_wire = read_frame_locked(deadline);
-    const auto response = Json::parse(response_wire, nullptr, false);
-    if (response.is_discarded() || !response.is_object())
-      throw WorkerTransportError("Worker response is not valid JSON");
-    if (!response.contains("protocol_version") ||
-        !response.at("protocol_version").is_number_unsigned() ||
-        response.at("protocol_version").get<std::uint32_t>() != process_protocol::version)
-      throw WorkerTransportError("Worker protocol version is incompatible");
-    if (!response.contains("request_id") || !response.at("request_id").is_string() ||
-        response.at("request_id").get<std::string>() != request_id)
-      throw WorkerTransportError("Worker response request id does not match");
-    if (!response.contains("ok") || !response.at("ok").is_boolean())
-      throw WorkerTransportError("Worker response has no valid success flag");
-    if (!response.at("ok").get<bool>())
-      throw WorkerTransportError("Worker rejected protocol request");
-    return response;
+    for (;;) {
+      const auto response_wire = read_frame_locked(deadline);
+      const auto response = Json::parse(response_wire, nullptr, false);
+      if (response.is_discarded() || !response.is_object())
+        throw WorkerTransportError("Worker response is not valid JSON");
+      if (!response.contains("protocol_version") ||
+          !response.at("protocol_version").is_number_unsigned() ||
+          response.at("protocol_version").get<std::uint32_t>() != process_protocol::version)
+        throw WorkerTransportError("Worker protocol version is incompatible");
+      const auto message_type = response.value("message_type", std::string{"response"});
+      if (message_type == "worker_request") {
+        deadline = std::max(deadline, Clock::now() +
+                                          std::chrono::milliseconds(config.interaction_timeout_ms));
+        if (!response.contains("request_id") || !response.at("request_id").is_string() ||
+            response.at("request_id").get<std::string>().size() >
+                process_protocol::max_interaction_id_bytes)
+          throw WorkerTransportError("Worker interaction request id is invalid");
+        WorkerInteractionRequest interaction;
+        try {
+          interaction = response.get<WorkerInteractionRequest>();
+        } catch (...) {
+          throw WorkerTransportError("Worker interaction request is invalid");
+        }
+        if (interaction.request_id.empty() || interaction.worker_job_id.empty() ||
+            interaction.title.size() > process_protocol::max_interaction_text_bytes ||
+            interaction.summary.size() > process_protocol::max_interaction_text_bytes ||
+            !interaction.payload.is_object() ||
+            interaction.payload.dump().size() > process_protocol::max_interaction_payload_bytes)
+          throw WorkerTransportError("Worker interaction request exceeds its limits");
+        if (!interaction_handler)
+          throw WorkerTransportError("Worker interaction handler is unavailable");
+        const auto answer = interaction_handler(interaction);
+        if (answer.request_id != interaction.request_id)
+          throw WorkerTransportError("Worker interaction response id does not match");
+        Json response_message{{"protocol_version", process_protocol::version},
+                              {"message_type", "worker_response"},
+                              {"request_id", answer.request_id},
+                              {"decision", answer.state},
+                              {"payload", answer.payload},
+                              {"reason", answer.reason}};
+        if (response_message.dump().size() > process_protocol::max_frame_bytes)
+          throw WorkerTransportError("Worker interaction response exceeds the frame limit");
+        write_frame_locked(response_message.dump(), deadline);
+        continue;
+      }
+      if (message_type != "response")
+        throw WorkerTransportError("Worker sent an unsolicited protocol message");
+      if (!response.contains("request_id") || !response.at("request_id").is_string() ||
+          response.at("request_id").get<std::string>() != request_id)
+        throw WorkerTransportError("Worker response request id does not match");
+      if (!response.contains("ok") || !response.at("ok").is_boolean())
+        throw WorkerTransportError("Worker response has no valid success flag");
+      if (!response.at("ok").get<bool>())
+        throw WorkerTransportError("Worker rejected protocol request");
+      return response;
+    }
   }
 
   Json request_response_locked(const std::string &operation, const std::string &job_id,
@@ -602,5 +653,8 @@ void ProcessWorkerTransport::start() {
 }
 void ProcessWorkerTransport::stop() noexcept {
   impl_->stop();
+}
+void ProcessWorkerTransport::set_interaction_handler(WorkerInteractionHandler handler) {
+  impl_->set_interaction_handler(std::move(handler));
 }
 } // namespace laso
