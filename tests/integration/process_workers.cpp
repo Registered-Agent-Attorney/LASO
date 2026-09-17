@@ -1,5 +1,6 @@
 #include "../support.hpp"
 #include <cstdlib>
+#include <atomic>
 #include <fstream>
 #include <laso/workers/process_transport.hpp>
 #include <thread>
@@ -134,6 +135,22 @@ TEST(ProcessWorker, CooperativeCancellationIsAcknowledged) {
   ASSERT_EQ(submission.state, WorkerJobState::Queued);
   EXPECT_TRUE(transport.cancel(submission.external_job_id));
   EXPECT_EQ(transport.status(submission.external_job_id).state, WorkerJobState::Cancelled);
+}
+
+TEST(ProcessWorker, WorkerInteractionIsCorrelatedAndAnsweredByLASO) {
+  ProcessWorkerTransport transport("process", worker_config("interaction", 1500));
+  std::atomic<unsigned> requests = 0;
+  transport.set_interaction_handler([&](const WorkerInteractionRequest &interaction) {
+    ++requests;
+    EXPECT_EQ(interaction.type, WorkerInteractionType::Permission);
+    EXPECT_EQ(interaction.worker_job_id, "job-process-1");
+    return WorkerInteractionResponse{interaction.request_id, WorkerInteractionState::Approved,
+                                     Json{{"scope", "once"}}, "approved by test policy"};
+  });
+  transport.start();
+  const auto submission = transport.submit(request());
+  EXPECT_EQ(submission.state, WorkerJobState::Completed);
+  EXPECT_EQ(requests.load(), 1U);
 }
 
 TEST(ProcessWorker, ConfigurationUsesExplicitExecutableAndEnvironmentBoundary) {
