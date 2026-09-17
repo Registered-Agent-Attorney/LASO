@@ -93,6 +93,17 @@ TEST(Configuration, ParsesDeclarativeEventSource) {
   EXPECT_TRUE(c.event_sources.at("offline").enabled);
   EXPECT_EQ(c.event_sources.at("offline").config.at("mode"), "once");
 }
+TEST(Configuration, ParsesWorkerBudgets) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "laso.yaml";
+  std::ofstream(path) << "max_worker_wall_time_ms: 120000\n"
+                         "max_worker_tokens_per_run: 500000\n"
+                         "max_worker_cost_units_per_run: 2.5\n";
+  const auto c = load_config(path);
+  EXPECT_EQ(c.max_worker_wall_time_ms, 120000U);
+  EXPECT_EQ(c.max_worker_tokens_per_run, 500000U);
+  EXPECT_DOUBLE_EQ(c.max_worker_cost_units_per_run, 2.5);
+}
 TEST(Pipeline, RejectsUnboundedCycle) {
   auto yaml = fixture("bounded-loop");
   auto position = yaml.find(", max_iterations: 2}");
