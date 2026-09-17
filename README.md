@@ -59,6 +59,10 @@ PostgreSQL is an optional build and runtime backend. Install `libpqxx-dev` and
 environment variables). SQLite remains the default. DSNs are never included
 in LASO error messages or logs.
 
+The OpenCode worker adapter is optional and disabled by default. Build it only
+when needed with `-DLASO_BUILD_OPENCODE_ADAPTER=ON`; native and generic
+process-worker support remain available in the default build.
+
 The default build has no PostgreSQL development-library requirement. Produced
 binaries are `build/bin/laso`, `build/bin/laso-server`, and
 `build/laso_tests`. Example C plugins are
