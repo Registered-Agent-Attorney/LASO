@@ -90,7 +90,7 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | PostgreSQL-enabled GCC Debug CTest suite | **PASS: 177/177; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
-| Debian 13 container | **Validated by the public PR workflow; post-fix result pending the public workflow** |
+| Debian 13 container | **PASS: post-merge workflow 35243451484** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
@@ -110,7 +110,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **Pending the post-fix PR workflow** |
+| GitHub Actions execution | **PASS: post-merge workflow 35243451484; GCC, Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL jobs succeeded** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
@@ -122,7 +122,7 @@ and sanitizer runtime; global ASLR settings were not weakened to work around it.
 ## Worker-hardening branch validation
 
 This branch was validated from upstream commit
-`e8bff28d4f1cf2c2e93ece067a988a47edf8bd02` using GCC and Clang Debug/Release,
+`960170f992e8339c9c78d56732e863b2028d5fa3` using GCC and Clang Debug/Release,
 ASan/UBSan, and an isolated local PostgreSQL 16 cluster. SQLite CTest ran 177
 tests (**175 passed, 2 PostgreSQL tests skipped**); PostgreSQL-enabled CTest
 completed **177/177**; and the ASan/UBSan CTest ran 177 tests (**175 passed,
