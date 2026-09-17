@@ -270,14 +270,14 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
       server.port(), boost::beast::http::verb::post,
       "/api/v1/pipelines/process-worker-e2e/runs", {{"input", {{"value", 7}}}});
   ASSERT_EQ(started.result_int(), 202);
-  const auto run_id = Json::parse(started.body).at("id").get<std::string>();
+  const auto run_id = Json::parse(started.body()).at("id").get<std::string>();
 
   std::string interaction_id;
   for (unsigned attempt = 0; attempt < 100 && interaction_id.empty(); ++attempt) {
     const auto listed = http_request(server.port(), boost::beast::http::verb::get,
                                      "/api/v1/worker-requests?limit=50");
     ASSERT_EQ(listed.result_int(), 200);
-    for (const auto &item : Json::parse(listed.body))
+    for (const auto &item : Json::parse(listed.body()))
       if (item.value("run_id", std::string{}) == run_id &&
           item.value("state", std::string{}) == "pending") {
         interaction_id = item.at("id").get<std::string>();
@@ -292,13 +292,13 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
       server.port(), boost::beast::http::verb::post,
       "/api/v1/worker-requests/" + interaction_id + "/approve");
   ASSERT_EQ(approved.result_int(), 202);
-  EXPECT_EQ(Json::parse(approved.body).at("state"), "approved");
+  EXPECT_EQ(Json::parse(approved.body()).at("state"), "approved");
 
   for (unsigned attempt = 0; attempt < 100; ++attempt) {
     const auto inspected = http_request(
         server.port(), boost::beast::http::verb::get, "/api/v1/runs/" + run_id);
     ASSERT_EQ(inspected.result_int(), 200);
-    const auto run = Json::parse(inspected.body);
+    const auto run = Json::parse(inspected.body());
     if (run.value("state", std::string{}) == "Completed")
       break;
     ASSERT_NE(run.value("state", std::string{}), "Failed");
@@ -306,7 +306,7 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
   }
   const auto completed = http_request(server.port(), boost::beast::http::verb::get,
                                       "/api/v1/runs/" + run_id);
-  EXPECT_EQ(Json::parse(completed.body).at("state"), "Completed");
+  EXPECT_EQ(Json::parse(completed.body()).at("state"), "Completed");
   server.stop();
   service.shutdown();
   executor.join();
