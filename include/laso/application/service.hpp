@@ -7,6 +7,7 @@
 #include <laso/schema/validator.hpp>
 #include <laso/security/security.hpp>
 #include <laso/storage/factory.hpp>
+#include <laso/workers/process_transport.hpp>
 
 namespace laso {
 class Service {
@@ -92,6 +93,7 @@ private:
   EventIngress ingress_;
   std::shared_ptr<WorkerManager> worker_manager_;
   PluginLoader plugins_;
+  std::vector<std::shared_ptr<ProcessWorkerTransport>> process_workers_;
   Runtime runtime_;
   LocalArtifactStore artifacts_;
   LocalScheduler scheduler_;

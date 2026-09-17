@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <laso/core/config.hpp>
 #include <laso/workers/manager.hpp>
+#include <limits>
 #include <set>
 #include <sstream>
 
@@ -12,6 +14,9 @@ constexpr auto max_external_id_bytes = std::size_t{512};
 constexpr auto max_metadata_bytes = std::size_t{64} * 1024;
 constexpr auto max_result_bytes = std::size_t{1024} * 1024;
 constexpr auto max_artifact_metadata_bytes = std::size_t{64} * 1024;
+constexpr auto max_usage_metadata_bytes = std::size_t{64} * 1024;
+constexpr auto max_usage_identity_bytes = std::size_t{128};
+constexpr std::uint64_t max_usage_metric = 1000000000000000ULL;
 
 bool bounded_identifier(const std::string &value, std::size_t maximum) {
   return !value.empty() && value.size() <= maximum &&
@@ -40,11 +45,18 @@ WorkerJobState event_state(const std::string &type) {
 } // namespace
 
 WorkerManager::WorkerManager(Storage &storage, WorkerRegistry &registry, unsigned max_active,
-                             unsigned max_per_worker, unsigned max_artifacts)
+                             unsigned max_per_worker, unsigned max_artifacts,
+                             std::uint64_t max_wall_time_ms, std::uint64_t max_tokens_per_run,
+                             double max_cost_units_per_run)
     : storage_(storage), registry_(registry), max_active_(max_active),
-      max_per_worker_(max_per_worker), max_artifacts_(max_artifacts) {
+      max_per_worker_(max_per_worker), max_artifacts_(max_artifacts),
+      max_wall_time_ms_(max_wall_time_ms), max_tokens_per_run_(max_tokens_per_run),
+      max_cost_units_per_run_(max_cost_units_per_run) {
   if (max_active_ == 0 || max_active_ > 4096 || max_per_worker_ == 0 ||
-      max_per_worker_ > max_active_ || max_artifacts_ == 0 || max_artifacts_ > 64)
+      max_per_worker_ > max_active_ || max_artifacts_ == 0 || max_artifacts_ > 64 ||
+      max_wall_time_ms_ > max_usage_metric || max_tokens_per_run_ > max_usage_metric ||
+      !std::isfinite(max_cost_units_per_run_) || max_cost_units_per_run_ < 0 ||
+      max_cost_units_per_run_ > static_cast<double>(max_usage_metric))
     throw Error(ErrorCode::Configuration, "Invalid worker limits");
 }
 
@@ -52,6 +64,13 @@ WorkerJob WorkerManager::job(const std::string &id) const {
   if (!bounded_identifier(id, max_job_id_bytes))
     throw Error(ErrorCode::Validation, "Invalid worker job id");
   return storage_.get(RecordKind::WorkerJob, id).get<WorkerJob>();
+}
+
+WorkerJob WorkerManager::refresh(const std::string &id) {
+  auto value = job(id);
+  if (worker_job_terminal(value.state) || value.external_job_id.empty())
+    return value;
+  return reconcile(std::move(value), true);
 }
 
 std::vector<Json> WorkerManager::jobs(const std::string &run_id, std::size_t limit,
@@ -115,6 +134,95 @@ std::string WorkerManager::durable_job_id(const std::string &idempotency_key) {
   return out.str();
 }
 
+void WorkerManager::merge_usage(WorkerUsage &target, const WorkerUsage &incoming) {
+  if (incoming.queue_duration_ms)
+    target.queue_duration_ms = incoming.queue_duration_ms;
+  if (incoming.wall_duration_ms)
+    target.wall_duration_ms = incoming.wall_duration_ms;
+  if (incoming.input_tokens)
+    target.input_tokens = incoming.input_tokens;
+  if (incoming.output_tokens)
+    target.output_tokens = incoming.output_tokens;
+  if (incoming.total_tokens)
+    target.total_tokens = incoming.total_tokens;
+  if (incoming.tool_calls)
+    target.tool_calls = incoming.tool_calls;
+  if (incoming.action_count)
+    target.action_count = incoming.action_count;
+  if (incoming.cost_units)
+    target.cost_units = incoming.cost_units;
+  if (!incoming.provider.empty())
+    target.provider = incoming.provider;
+  if (!incoming.model.empty())
+    target.model = incoming.model;
+  if (!incoming.executor.empty())
+    target.executor = incoming.executor;
+  if (incoming.metadata.is_object())
+    target.metadata.update(incoming.metadata);
+  if (!target.total_tokens && target.input_tokens && target.output_tokens &&
+      *target.input_tokens <= std::numeric_limits<std::uint64_t>::max() - *target.output_tokens)
+    target.total_tokens = *target.input_tokens + *target.output_tokens;
+}
+
+std::optional<std::uint64_t> WorkerManager::total_tokens(const WorkerUsage &usage) {
+  if (usage.total_tokens)
+    return usage.total_tokens;
+  if (usage.input_tokens && usage.output_tokens &&
+      *usage.input_tokens <= std::numeric_limits<std::uint64_t>::max() - *usage.output_tokens)
+    return *usage.input_tokens + *usage.output_tokens;
+  return std::nullopt;
+}
+
+std::string WorkerManager::budget_violation(const WorkerJob &value) const {
+  const auto metric_exceeds = [](const auto &metric) {
+    return metric && *metric > max_usage_metric;
+  };
+  if (metric_exceeds(value.usage.queue_duration_ms) ||
+      metric_exceeds(value.usage.wall_duration_ms) || metric_exceeds(value.usage.input_tokens) ||
+      metric_exceeds(value.usage.output_tokens) || metric_exceeds(value.usage.total_tokens) ||
+      metric_exceeds(value.usage.tool_calls) || metric_exceeds(value.usage.action_count))
+    return "reported worker usage exceeds the representable limit";
+  if (value.usage.metadata.dump().size() > max_usage_metadata_bytes)
+    return "worker usage metadata exceeds the limit";
+  if (value.usage.provider.size() > max_usage_identity_bytes ||
+      value.usage.model.size() > max_usage_identity_bytes ||
+      value.usage.executor.size() > max_usage_identity_bytes)
+    return "worker usage identity exceeds the limit";
+  if (value.usage.cost_units &&
+      (!std::isfinite(*value.usage.cost_units) || *value.usage.cost_units < 0 ||
+       *value.usage.cost_units > static_cast<double>(max_usage_metric)))
+    return "reported worker cost_units is invalid";
+  if (max_wall_time_ms_ != 0 && value.usage.wall_duration_ms &&
+      *value.usage.wall_duration_ms > max_wall_time_ms_)
+    return "worker wall-time budget exceeded";
+
+  std::uint64_t prior_tokens = 0;
+  double prior_cost = 0;
+  if (max_tokens_per_run_ != 0 || max_cost_units_per_run_ != 0) {
+    for (const auto &record : storage_.list(RecordKind::WorkerJob, value.run_id, 10000, 0)) {
+      const auto prior = record.get<WorkerJob>();
+      if (prior.id == value.id)
+        continue;
+      if (const auto tokens = total_tokens(prior.usage)) {
+        if (prior_tokens > std::numeric_limits<std::uint64_t>::max() - *tokens)
+          return "worker token budget exceeded";
+        prior_tokens += *tokens;
+      }
+      if (prior.usage.cost_units)
+        prior_cost += *prior.usage.cost_units;
+    }
+  }
+  if (max_tokens_per_run_ != 0)
+    if (const auto tokens = total_tokens(value.usage);
+        tokens &&
+        (prior_tokens > max_tokens_per_run_ || *tokens > max_tokens_per_run_ - prior_tokens))
+      return "worker token budget exceeded";
+  if (max_cost_units_per_run_ != 0 && value.usage.cost_units &&
+      prior_cost + *value.usage.cost_units > max_cost_units_per_run_)
+    return "worker cost_units budget exceeded";
+  return {};
+}
+
 void WorkerManager::persist(WorkerJob &value) {
   if (value.error.size() > 512)
     value.error.resize(512);
@@ -131,10 +239,12 @@ void WorkerManager::persist(WorkerJob &value) {
       value.result_metadata.dump().size() > max_metadata_bytes ||
       value.artifacts.size() > max_artifacts_)
     throw Error(ErrorCode::Validation, "Worker result exceeds limit");
+  if (value.usage.metadata.dump().size() > max_usage_metadata_bytes)
+    throw Error(ErrorCode::Validation, "Worker usage metadata exceeds limit");
   storage_.commit({{RecordKind::WorkerJob, value.id, value.run_id, Json(value)}});
 }
 
-WorkerJob WorkerManager::reconcile(WorkerJob value) {
+WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
   if (worker_job_terminal(value.state) || value.external_job_id.empty())
     return value;
   auto adapter = registry_.get(value.worker_id);
@@ -144,6 +254,10 @@ WorkerJob WorkerManager::reconcile(WorkerJob value) {
     const auto status = adapter->status(value.external_job_id);
     if (status.state == WorkerJobState::Unknown)
       return value;
+    std::lock_guard state_lock(state_mutex_);
+    value = job(value.id);
+    if (worker_job_terminal(value.state))
+      return value;
     if (!valid_worker_job_transition(value.state, status.state) && value.state != status.state)
       return value;
     if (status.state != value.state)
@@ -152,13 +266,34 @@ WorkerJob WorkerManager::reconcile(WorkerJob value) {
       value.result = status.result;
     if (status.metadata.is_object() && status.metadata.dump().size() <= max_metadata_bytes)
       value.result_metadata = status.metadata;
+    merge_usage(value.usage, status.usage);
     if (!status.artifacts.empty() && status.artifacts.size() <= max_artifacts_)
       value.artifacts = status.artifacts;
     if (!status.error.empty())
       value.error = bounded_error(status.error);
+    if (const auto violation = budget_violation(value); !violation.empty()) {
+      value.state = WorkerJobState::Failed;
+      value.failure_kind = WorkerFailureKind::Budget;
+      value.error = violation;
+    } else if (value.state == WorkerJobState::Failed &&
+               value.failure_kind == WorkerFailureKind::None) {
+      value.failure_kind = WorkerFailureKind::Job;
+    }
     if (worker_job_terminal(value.state) && value.completed_at.empty())
       value.completed_at = timestamp();
     persist(value);
+  } catch (const WorkerTransportError &error) {
+    if (fail_transport) {
+      std::lock_guard state_lock(state_mutex_);
+      value = job(value.id);
+      if (!worker_job_terminal(value.state)) {
+        value.state = WorkerJobState::Failed;
+        value.failure_kind = WorkerFailureKind::Transport;
+        value.error = bounded_error(error.what());
+        value.completed_at = timestamp();
+        persist(value);
+      }
+    }
   } catch (const Error &) { // NOLINT(bugprone-empty-catch): recovery is best effort.
     // Recovery is deliberately conservative. An adapter failure does not
     // invent a terminal result or submit a second external task.
@@ -186,13 +321,9 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
 
   auto worker_id = resolve_worker(request.worker_id, request.capability);
   auto adapter = registry_.get(worker_id);
-  const auto metadata = adapter->metadata();
-  if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "failed" ||
-      metadata.status == "unavailable")
-    throw Error(ErrorCode::Capacity, "Worker is unavailable");
-
   const auto durable_id = durable_job_id(request.idempotency_key);
   auto existing_job = [&]() -> std::optional<WorkerJob> {
+    std::lock_guard state_lock(state_mutex_);
     try {
       auto existing = job(durable_id);
       if (existing.idempotency_key != request.idempotency_key)
@@ -212,9 +343,19 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
       throw Error(ErrorCode::Conflict, "Worker idempotency key belongs to another worker");
     if (worker_job_terminal(existing->state))
       return *existing;
+  }
+
+  const auto metadata = adapter->metadata();
+  if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "failed" ||
+      metadata.status == "unavailable")
+    throw Error(ErrorCode::Capacity, "Worker is unavailable");
+
+  if (existing.has_value()) {
     if (!existing->external_job_id.empty())
-      return reconcile(std::move(*existing));
+      return reconcile(std::move(*existing), false);
     if (!metadata.supports_recovery) {
+      std::lock_guard state_lock(state_mutex_);
+      existing = job(durable_id);
       existing->state = WorkerJobState::Unknown;
       existing->error = "External submission outcome is unknown; adapter recovery is unavailable";
       persist(*existing);
@@ -222,54 +363,96 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
     }
     auto retry_request = request;
     retry_request.job_id = existing->id;
-    auto submission = adapter->submit(retry_request);
-    existing->external_job_id = submission.external_job_id;
-    existing->state = submission.state;
-    existing->result_metadata = submission.metadata;
-    if (existing->external_job_id.empty() ||
-        existing->external_job_id.size() > max_external_id_bytes)
-      throw Error(ErrorCode::Plugin, "Worker returned an invalid external job id");
-    if (worker_job_terminal(existing->state))
-      existing->completed_at = timestamp();
-    persist(*existing);
-    return *existing;
+    try {
+      const auto submission = adapter->submit(retry_request);
+      std::lock_guard state_lock(state_mutex_);
+      existing = job(durable_id);
+      if (worker_job_terminal(existing->state))
+        return *existing;
+      existing->external_job_id = submission.external_job_id;
+      existing->state = submission.state;
+      existing->result_metadata = submission.metadata;
+      if (!submission.result.is_null())
+        existing->result = submission.result;
+      if (!submission.artifacts.empty())
+        existing->artifacts = submission.artifacts;
+      if (!submission.error.empty())
+        existing->error = bounded_error(submission.error);
+      merge_usage(existing->usage, submission.usage);
+      if (existing->external_job_id.empty() ||
+          existing->external_job_id.size() > max_external_id_bytes)
+        throw WorkerTransportError("Worker returned an invalid external job id");
+      if (worker_job_terminal(existing->state))
+        existing->completed_at = timestamp();
+      if (const auto violation = budget_violation(*existing); !violation.empty()) {
+        existing->state = WorkerJobState::Failed;
+        existing->failure_kind = WorkerFailureKind::Budget;
+        existing->error = violation;
+        existing->completed_at = timestamp();
+      } else if (existing->state == WorkerJobState::Failed) {
+        existing->failure_kind = WorkerFailureKind::Job;
+      }
+      persist(*existing);
+      return *existing;
+    } catch (const WorkerTransportError &error) {
+      std::lock_guard state_lock(state_mutex_);
+      existing = job(durable_id);
+      if (!worker_job_terminal(existing->state)) {
+        existing->state = WorkerJobState::Failed;
+        existing->failure_kind = WorkerFailureKind::Transport;
+        existing->error = bounded_error(error.what());
+        existing->completed_at = timestamp();
+        persist(*existing);
+      }
+      return *existing;
+    } catch (...) {
+      std::lock_guard state_lock(state_mutex_);
+      existing = job(durable_id);
+      if (!worker_job_terminal(existing->state)) {
+        existing->state = WorkerJobState::Failed;
+        existing->failure_kind = WorkerFailureKind::Job;
+        existing->error = "Worker retry submission failed";
+        existing->completed_at = timestamp();
+        persist(*existing);
+      }
+      return *existing;
+    }
   }
-
-  std::size_t active = 0, worker_active = 0;
-  for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
-    const auto stored = record.get<WorkerJob>();
-    if (worker_job_terminal(stored.state))
-      continue;
-    ++active;
-    if (stored.worker_id == worker_id)
-      ++worker_active;
-  }
-  if (active >= max_active_)
-    throw Error(ErrorCode::Capacity, "Worker job capacity is exhausted");
-  if (worker_active >= max_per_worker_)
-    throw Error(ErrorCode::Capacity, "Worker-specific job capacity is exhausted");
 
   WorkerJob created;
-  created.id = durable_id;
-  created.worker_id = worker_id;
-  created.run_id = request.run_id;
-  created.node_id = request.node_id;
-  created.attempt = request.attempt;
-  created.idempotency_key = request.idempotency_key;
-  created.request_metadata = {{"task_type", request.task_type},
-                              {"capability", request.capability},
-                              {"deadline", request.deadline},
-                              {"artifact_ids", request.artifact_ids}};
-  if (request.metadata.is_object() && request.metadata.contains("classification"))
-    created.request_metadata["classification"] = request.metadata.at("classification");
-  if (!storage_.claim({RecordKind::WorkerJob, created.id, created.run_id, Json(created)})) {
-    existing = existing_job();
-    if (!existing.has_value())
-      throw Error(ErrorCode::Storage, "Worker job claim disappeared");
-    return *existing;
+  {
+    std::lock_guard state_lock(state_mutex_);
+    std::size_t active = 0, worker_active = 0;
+    for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
+      const auto stored = record.get<WorkerJob>();
+      if (worker_job_terminal(stored.state))
+        continue;
+      ++active;
+      if (stored.worker_id == worker_id)
+        ++worker_active;
+    }
+    if (active >= max_active_)
+      throw Error(ErrorCode::Capacity, "Worker job capacity is exhausted");
+    if (worker_active >= max_per_worker_)
+      throw Error(ErrorCode::Capacity, "Worker-specific job capacity is exhausted");
+
+    created.id = durable_id;
+    created.worker_id = worker_id;
+    created.run_id = request.run_id;
+    created.node_id = request.node_id;
+    created.attempt = request.attempt;
+    created.idempotency_key = request.idempotency_key;
+    created.request_metadata = {{"task_type", request.task_type},
+                                {"capability", request.capability},
+                                {"deadline", request.deadline},
+                                {"artifact_ids", request.artifact_ids}};
+    if (request.metadata.is_object() && request.metadata.contains("classification"))
+      created.request_metadata["classification"] = request.metadata.at("classification");
+    if (!storage_.claim({RecordKind::WorkerJob, created.id, created.run_id, Json(created)}))
+      return job(durable_id);
+    created.state = WorkerJobState::Submitting;
+    persist(created);
   }
-  created.state = WorkerJobState::Submitting;
-  persist(created);
 
   try {
     auto outbound = request;
@@ -277,67 +460,122 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
     const auto submission = adapter->submit(outbound);
     if (submission.external_job_id.empty() ||
         submission.external_job_id.size() > max_external_id_bytes)
-      throw Error(ErrorCode::Plugin, "Worker returned an invalid external job id");
+      throw WorkerTransportError("Worker returned an invalid external job id");
+
+    std::lock_guard state_lock(state_mutex_);
     const auto observed = job(created.id);
     if (worker_job_terminal(observed.state))
       return observed;
+    created = observed;
     created.external_job_id = submission.external_job_id;
     created.state = submission.state;
     created.result_metadata = submission.metadata;
+    if (!submission.result.is_null())
+      created.result = submission.result;
+    if (!submission.artifacts.empty())
+      created.artifacts = submission.artifacts;
+    if (!submission.error.empty())
+      created.error = bounded_error(submission.error);
+    merge_usage(created.usage, submission.usage);
     if (worker_job_terminal(created.state))
       created.completed_at = timestamp();
+    if (const auto violation = budget_violation(created); !violation.empty()) {
+      created.state = WorkerJobState::Failed;
+      created.failure_kind = WorkerFailureKind::Budget;
+      created.error = violation;
+      created.completed_at = timestamp();
+    } else if (created.state == WorkerJobState::Failed) {
+      created.failure_kind = WorkerFailureKind::Job;
+    }
     persist(created);
+  } catch (const WorkerTransportError &error) {
+    std::lock_guard state_lock(state_mutex_);
+    created = job(created.id);
+    if (!worker_job_terminal(created.state)) {
+      created.state = WorkerJobState::Failed;
+      created.failure_kind = WorkerFailureKind::Transport;
+      created.error = bounded_error(error.what());
+      created.completed_at = timestamp();
+      log_diagnostic("worker.transport_failed",
+                     {{"worker_job_id", created.id}, {"worker_id", created.worker_id}});
+      persist(created);
+    }
   } catch (const Error &error) {
-    created.state = WorkerJobState::Failed;
-    created.error =
-        bounded_error(error.code == ErrorCode::Plugin ? error.what() : "Worker submission failed");
-    log_diagnostic("worker.submission_failed", {{"worker_job_id", created.id},
-                                                {"worker_id", created.worker_id},
-                                                {"reason", created.error}});
-    persist(created);
+    std::lock_guard state_lock(state_mutex_);
+    created = job(created.id);
+    if (!worker_job_terminal(created.state)) {
+      created.state = WorkerJobState::Failed;
+      created.failure_kind = WorkerFailureKind::Job;
+      created.error = bounded_error(error.code == ErrorCode::Plugin ? error.what()
+                                                                    : "Worker submission failed");
+      created.completed_at = timestamp();
+      log_diagnostic("worker.submission_failed", {{"worker_job_id", created.id},
+                                                  {"worker_id", created.worker_id},
+                                                  {"reason", created.error}});
+      persist(created);
+    }
   } catch (...) {
-    created.state = WorkerJobState::Failed;
-    created.error = "Worker submission failed";
-    log_diagnostic("worker.submission_failed",
-                   {{"worker_job_id", created.id}, {"worker_id", created.worker_id}});
-    persist(created);
+    std::lock_guard state_lock(state_mutex_);
+    created = job(created.id);
+    if (!worker_job_terminal(created.state)) {
+      created.state = WorkerJobState::Failed;
+      created.failure_kind = WorkerFailureKind::Job;
+      created.error = "Worker submission failed";
+      created.completed_at = timestamp();
+      log_diagnostic("worker.submission_failed",
+                     {{"worker_job_id", created.id}, {"worker_id", created.worker_id}});
+      persist(created);
+    }
   }
-  return created;
+  return job(created.id);
 }
 
 void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state,
                            const std::string &reason) {
+  std::string worker_id;
+  std::string external_job_id;
+  {
+    std::lock_guard state_lock(state_mutex_);
+    auto value = job(id);
+    if (worker_job_terminal(value.state))
+      return;
+    value.cancellation_requested = true;
+    value.cancellation_error = bounded_error(reason);
+    if (value.external_job_id.empty()) {
+      if (requested_state == WorkerJobState::TimedOut) {
+        value.state = WorkerJobState::TimedOut;
+        value.completed_at = timestamp();
+      }
+      persist(value);
+      return;
+    }
+    worker_id = value.worker_id;
+    external_job_id = value.external_job_id;
+    persist(value);
+  }
+
+  bool acknowledged = false;
+  std::string cancellation_error;
+  try {
+    acknowledged = registry_.get(worker_id)->cancel(external_job_id);
+  } catch (...) {
+    cancellation_error = "Worker cancellation failed";
+  }
+
+  std::lock_guard state_lock(state_mutex_);
   auto value = job(id);
   if (worker_job_terminal(value.state))
     return;
-  value.cancellation_requested = true;
-  value.cancellation_error = bounded_error(reason);
-  if (value.external_job_id.empty()) {
-    if (requested_state == WorkerJobState::TimedOut) {
-      value.state = WorkerJobState::TimedOut;
-      value.completed_at = timestamp();
-    }
-    persist(value);
-    return;
-  }
-  try {
-    const auto acknowledged = registry_.get(value.worker_id)->cancel(value.external_job_id);
-    if (requested_state == WorkerJobState::TimedOut) {
-      value.state = WorkerJobState::TimedOut;
-      value.completed_at = timestamp();
-    } else if (acknowledged) {
-      value.cancellation_acknowledged = true;
-      value.state = WorkerJobState::Cancelled;
-      value.completed_at = timestamp();
-    } else {
-      value.cancellation_error = "Worker did not acknowledge cancellation";
-    }
-  } catch (...) {
-    value.cancellation_error = "Worker cancellation failed";
-    if (requested_state == WorkerJobState::TimedOut) {
-      value.state = WorkerJobState::TimedOut;
-      value.completed_at = timestamp();
-    }
+  if (requested_state == WorkerJobState::TimedOut) {
+    value.state = WorkerJobState::TimedOut;
+    value.completed_at = timestamp();
+  } else if (acknowledged) {
+    value.cancellation_acknowledged = true;
+    value.state = WorkerJobState::Cancelled;
+    value.completed_at = timestamp();
+  } else {
+    value.cancellation_error =
+        cancellation_error.empty() ? "Worker did not acknowledge cancellation" : cancellation_error;
   }
   persist(value);
 }
@@ -345,6 +583,7 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
 void WorkerManager::apply_event(const Event &event) {
   if (stopped_ || event.type.rfind("worker.job.", 0) != 0 || !event.payload.is_object())
     return;
+  std::lock_guard state_lock(state_mutex_);
   const auto job_id = event.payload.value("job_id", std::string{});
   if (!bounded_identifier(job_id, max_job_id_bytes))
     return;
@@ -369,6 +608,14 @@ void WorkerManager::apply_event(const Event &event) {
       const auto progress = event.payload.value("progress", Json::object());
       if (progress.dump().size() <= max_metadata_bytes)
         value.result_metadata["progress"] = progress;
+      if (event.payload.contains("usage"))
+        merge_usage(value.usage, event.payload.at("usage").get<WorkerUsage>());
+      if (const auto violation = budget_violation(value); !violation.empty()) {
+        value.state = WorkerJobState::Failed;
+        value.failure_kind = WorkerFailureKind::Budget;
+        value.error = violation;
+        value.completed_at = timestamp();
+      }
       persist(value);
       return;
     }
@@ -383,12 +630,20 @@ void WorkerManager::apply_event(const Event &event) {
       value.result = event.payload.value("result", event.payload.value("output", Json::object()));
       value.result_metadata = event.payload.value("metadata", Json::object());
       value.artifacts = event.payload.value("artifacts", std::vector<Json>{});
+      if (event.payload.contains("usage"))
+        merge_usage(value.usage, event.payload.at("usage").get<WorkerUsage>());
     } else if (next == WorkerJobState::Failed) {
       value.error = bounded_error(event.payload.value("error", std::string{"Worker failed"}));
+      value.failure_kind = WorkerFailureKind::Job;
     } else if (next == WorkerJobState::Cancelled) {
       value.cancellation_acknowledged = true;
     }
-    if (worker_job_terminal(next))
+    if (const auto violation = budget_violation(value); !violation.empty()) {
+      value.state = WorkerJobState::Failed;
+      value.failure_kind = WorkerFailureKind::Budget;
+      value.error = violation;
+    }
+    if (worker_job_terminal(value.state))
       value.completed_at = timestamp();
     persist(value);
   } catch (const Error &) {

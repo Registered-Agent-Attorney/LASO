@@ -1,5 +1,6 @@
 #include "../pipeline/yaml.hpp"
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <laso/core/config.hpp>
 #include <laso/pipeline/parser.hpp>
@@ -35,7 +36,11 @@ void Config::validate() {
       max_event_trigger_depth == 0 || max_event_trigger_depth > 64 ||
       max_event_trigger_deliveries == 0 || max_event_trigger_deliveries > 100000 ||
       max_worker_jobs == 0 || max_worker_jobs > 4096 || max_worker_jobs_per_worker == 0 ||
-      max_worker_jobs_per_worker > max_worker_jobs)
+      max_worker_jobs_per_worker > max_worker_jobs ||
+      max_worker_wall_time_ms > 1000000000000000ULL ||
+      max_worker_tokens_per_run > 1000000000000000ULL ||
+      !std::isfinite(max_worker_cost_units_per_run) || max_worker_cost_units_per_run < 0 ||
+      max_worker_cost_units_per_run > 1000000000000000.0)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
   if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
@@ -57,6 +62,38 @@ void Config::validate() {
         worker.plugin.size() > 128 || worker.component.size() > 128 ||
         worker.event_schema.size() > 512 || worker.config.dump().size() > std::size_t{1024} * 1024)
       throw Error(ErrorCode::Configuration, "Invalid worker configuration");
+  }
+  if (process_workers.size() > 64)
+    throw Error(ErrorCode::Configuration, "Too many process workers");
+  for (const auto &[id, worker] : process_workers) {
+    if (!std::regex_match(id, source_id_pattern) || worker.executable.empty() ||
+        worker.executable.size() > 4096 || worker.executable.front() != '/')
+      throw Error(ErrorCode::Configuration, "Invalid process worker executable");
+    std::size_t argument_bytes = 0;
+    for (const auto &arg : worker.args) {
+      if (arg.size() > 4096 || argument_bytes > 65536 || arg.size() + 1 > 65536 - argument_bytes)
+        throw Error(ErrorCode::Configuration, "Invalid process worker arguments");
+      argument_bytes += arg.size() + 1;
+    }
+    if (worker.args.size() > 128 || worker.environment_allowlist.size() > 64 ||
+        worker.environment.size() > 64 || worker.startup_timeout_ms == 0 ||
+        worker.startup_timeout_ms > 60000 || worker.request_timeout_ms == 0 ||
+        worker.request_timeout_ms > 60000)
+      throw Error(ErrorCode::Configuration, "Invalid process worker limits");
+    static const std::regex env_name("[A-Za-z_][A-Za-z0-9_]{0,127}");
+    std::set<std::string> allowlisted_names;
+    for (const auto &name : worker.environment_allowlist)
+      if (!std::regex_match(name, env_name) || !allowlisted_names.insert(name).second)
+        throw Error(ErrorCode::Configuration, "Invalid process worker environment name");
+    std::size_t configured_environment_bytes = 0;
+    for (const auto &[name, value] : worker.environment) {
+      if (!std::regex_match(name, env_name) || value.size() > 4096 ||
+          name.find('\0') != std::string::npos || value.find('\0') != std::string::npos ||
+          name.size() + value.size() + 2 > 65536 ||
+          configured_environment_bytes > 65536 - (name.size() + value.size() + 2))
+        throw Error(ErrorCode::Configuration, "Invalid process worker environment");
+      configured_environment_bytes += name.size() + value.size() + 2;
+    }
   }
 }
 Config load_config(const std::filesystem::path &supplied,
@@ -173,6 +210,59 @@ Config load_config(const std::filesystem::path &supplied,
             if (!c.worker_plugins.emplace(id, std::move(cfg)).second)
               throw Error(ErrorCode::Configuration, "Duplicate worker id");
           }
+        } else if (key == "process_workers") {
+          if (!pair.second.IsMap())
+            throw Error(ErrorCode::Configuration, "process_workers must be a map");
+          for (const auto &worker : pair.second) {
+            const auto id = worker.first.as<std::string>();
+            if (!std::regex_match(id, std::regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")))
+              throw Error(ErrorCode::Configuration, "Invalid process worker id");
+            const auto node = worker.second;
+            if (!node.IsMap())
+              throw Error(ErrorCode::Configuration, "Process worker must be a map");
+            std::set<std::string> fields;
+            for (const auto &field : node)
+              if (!fields.insert(field.first.as<std::string>()).second)
+                throw Error(ErrorCode::Configuration, "Duplicate process worker field");
+            for (const auto &field : fields)
+              if (field != "executable" && field != "args" && field != "environment_allowlist" &&
+                  field != "environment" && field != "startup_timeout_ms" &&
+                  field != "request_timeout_ms")
+                throw Error(ErrorCode::Configuration, "Unknown process worker field");
+            ProcessWorkerConfig cfg;
+            if (!node["executable"])
+              throw Error(ErrorCode::Configuration, "Process worker executable is required");
+            cfg.executable = node["executable"].as<std::string>();
+            auto sequence = [](const YAML::Node &value, const char *name) {
+              std::vector<std::string> result;
+              if (!value.IsSequence())
+                throw Error(ErrorCode::Configuration, std::string(name) + " must be a sequence");
+              for (const auto &entry : value)
+                result.push_back(entry.as<std::string>());
+              return result;
+            };
+            if (node["args"])
+              cfg.args = sequence(node["args"], "args");
+            if (node["environment_allowlist"])
+              cfg.environment_allowlist =
+                  sequence(node["environment_allowlist"], "environment_allowlist");
+            if (node["environment"]) {
+              if (!node["environment"].IsMap())
+                throw Error(ErrorCode::Configuration, "environment must be a map");
+              for (const auto &entry : node["environment"])
+                if (!cfg.environment
+                         .emplace(entry.first.as<std::string>(), entry.second.as<std::string>())
+                         .second)
+                  throw Error(ErrorCode::Configuration,
+                              "Duplicate process worker environment name");
+            }
+            if (node["startup_timeout_ms"])
+              cfg.startup_timeout_ms = node["startup_timeout_ms"].as<std::uint64_t>();
+            if (node["request_timeout_ms"])
+              cfg.request_timeout_ms = node["request_timeout_ms"].as<std::uint64_t>();
+            if (!c.process_workers.emplace(id, std::move(cfg)).second)
+              throw Error(ErrorCode::Configuration, "Duplicate process worker id");
+          }
         } else
           values[key] = pair.second.as<std::string>();
       }
@@ -201,6 +291,9 @@ Config load_config(const std::filesystem::path &supplied,
                     "MAX_EVENT_TRIGGER_DELIVERIES",
                     "MAX_WORKER_JOBS",
                     "MAX_WORKER_JOBS_PER_WORKER",
+                    "MAX_WORKER_WALL_TIME_MS",
+                    "MAX_WORKER_TOKENS_PER_RUN",
+                    "MAX_WORKER_COST_UNITS_PER_RUN",
                     "JSON_LOGS",
                     "ALLOW_NETWORK",
                     "ALLOW_REMOTE_API",
@@ -229,6 +322,28 @@ Config load_config(const std::filesystem::path &supplied,
       if (end != s.size() || result > 100000)
         throw std::out_of_range("limit");
       return static_cast<unsigned>(result);
+    } catch (...) {
+      throw Error(ErrorCode::Configuration, "Invalid numeric configuration");
+    }
+  };
+  auto uint64 = [](const std::string &s) {
+    try {
+      std::size_t end = 0;
+      const auto result = std::stoull(s, &end);
+      if (end != s.size() || result > 1000000000000000ULL)
+        throw std::out_of_range("limit");
+      return static_cast<std::uint64_t>(result);
+    } catch (...) {
+      throw Error(ErrorCode::Configuration, "Invalid numeric configuration");
+    }
+  };
+  auto real = [](const std::string &s) {
+    try {
+      std::size_t end = 0;
+      const auto result = std::stod(s, &end);
+      if (end != s.size() || !std::isfinite(result) || result < 0 || result > 1e15)
+        throw std::out_of_range("limit");
+      return result;
     } catch (...) {
       throw Error(ErrorCode::Configuration, "Invalid numeric configuration");
     }
@@ -284,6 +399,12 @@ Config load_config(const std::filesystem::path &supplied,
       c.max_worker_jobs = integer(v);
     else if (k == "max_worker_jobs_per_worker")
       c.max_worker_jobs_per_worker = integer(v);
+    else if (k == "max_worker_wall_time_ms")
+      c.max_worker_wall_time_ms = uint64(v);
+    else if (k == "max_worker_tokens_per_run")
+      c.max_worker_tokens_per_run = uint64(v);
+    else if (k == "max_worker_cost_units_per_run")
+      c.max_worker_cost_units_per_run = real(v);
     else
       throw Error(ErrorCode::Configuration, "Unknown configuration field");
   }

@@ -1,3 +1,4 @@
+#include <cmath>
 #include <laso/workers/worker.hpp>
 
 namespace laso {
@@ -29,6 +30,64 @@ bool valid_worker_job_transition(WorkerJobState from, WorkerJobState to) {
   default:
     return false;
   }
+}
+
+void to_json(Json &j, const WorkerUsage &usage) {
+  j = Json::object();
+  if (usage.queue_duration_ms)
+    j["queue_duration_ms"] = *usage.queue_duration_ms;
+  if (usage.wall_duration_ms)
+    j["wall_duration_ms"] = *usage.wall_duration_ms;
+  if (usage.input_tokens)
+    j["input_tokens"] = *usage.input_tokens;
+  if (usage.output_tokens)
+    j["output_tokens"] = *usage.output_tokens;
+  if (usage.total_tokens)
+    j["total_tokens"] = *usage.total_tokens;
+  if (usage.tool_calls)
+    j["tool_calls"] = *usage.tool_calls;
+  if (usage.action_count)
+    j["action_count"] = *usage.action_count;
+  if (usage.cost_units)
+    j["cost_units"] = *usage.cost_units;
+  if (!usage.provider.empty())
+    j["provider"] = usage.provider;
+  if (!usage.model.empty())
+    j["model"] = usage.model;
+  if (!usage.executor.empty())
+    j["executor"] = usage.executor;
+  if (!usage.metadata.empty())
+    j["metadata"] = usage.metadata;
+}
+
+void from_json(const Json &j, WorkerUsage &usage) {
+  if (!j.is_object())
+    throw Error(ErrorCode::Validation, "Worker usage must be an object");
+  auto optional_uint = [&](const char *name) -> std::optional<std::uint64_t> {
+    if (!j.contains(name) || j.at(name).is_null())
+      return std::nullopt;
+    return j.at(name).get<std::uint64_t>();
+  };
+  usage.queue_duration_ms = optional_uint("queue_duration_ms");
+  usage.wall_duration_ms = optional_uint("wall_duration_ms");
+  usage.input_tokens = optional_uint("input_tokens");
+  usage.output_tokens = optional_uint("output_tokens");
+  usage.total_tokens = optional_uint("total_tokens");
+  usage.tool_calls = optional_uint("tool_calls");
+  usage.action_count = optional_uint("action_count");
+  if (j.contains("cost_units") && !j.at("cost_units").is_null()) {
+    usage.cost_units = j.at("cost_units").get<double>();
+    if (!std::isfinite(*usage.cost_units) || *usage.cost_units < 0)
+      throw Error(ErrorCode::Validation, "Worker cost_units must be finite and non-negative");
+  } else {
+    usage.cost_units = std::nullopt;
+  }
+  usage.provider = j.value("provider", std::string{});
+  usage.model = j.value("model", std::string{});
+  usage.executor = j.value("executor", std::string{});
+  usage.metadata = j.value("metadata", Json::object());
+  if (!usage.metadata.is_object())
+    throw Error(ErrorCode::Validation, "Worker usage metadata must be an object");
 }
 
 void to_json(Json &j, const WorkerMetadata &m) {
@@ -76,6 +135,7 @@ void to_json(Json &j, const WorkerJob &job) {
        {"external_job_id", job.external_job_id},
        {"attempt", job.attempt},
        {"status", job.state},
+       {"failure_kind", job.failure_kind},
        {"submitted_at", job.submitted_at},
        {"started_at", job.started_at},
        {"completed_at", job.completed_at},
@@ -86,7 +146,8 @@ void to_json(Json &j, const WorkerJob &job) {
        {"request_metadata", job.request_metadata},
        {"result", job.result},
        {"result_metadata", job.result_metadata},
-       {"artifacts", job.artifacts}};
+       {"artifacts", job.artifacts},
+       {"usage", job.usage}};
 }
 
 void from_json(const Json &j, WorkerJob &job) {
@@ -98,6 +159,7 @@ void from_json(const Json &j, WorkerJob &job) {
   job.external_job_id = j.value("external_job_id", std::string{});
   job.attempt = j.value("attempt", 1U);
   j.at("status").get_to(job.state);
+  job.failure_kind = j.value("failure_kind", WorkerFailureKind::None);
   job.submitted_at = j.value("submitted_at", std::string{});
   job.started_at = j.value("started_at", std::string{});
   job.completed_at = j.value("completed_at", std::string{});
@@ -109,5 +171,7 @@ void from_json(const Json &j, WorkerJob &job) {
   job.result = j.value("result", Json::object());
   job.result_metadata = j.value("result_metadata", Json::object());
   job.artifacts = j.value("artifacts", std::vector<Json>{});
+  if (j.contains("usage"))
+    job.usage = j.at("usage").get<WorkerUsage>();
 }
 } // namespace laso

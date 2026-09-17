@@ -386,7 +386,7 @@ Files that should not need persistence changes in the first pass:
 1. **Extract the backend-neutral construction seam.** Introduce storage factory
    and lease interfaces, convert `Service` to own `unique_ptr<Storage>`, add
    `storage_backend: sqlite` config, and prove the unchanged SQLite default with
-   the existing 116/116 suite.
+   the then-existing 116/116 suite.
 2. **Make SQLite an explicit adapter with migration tests.** Preserve v1 file
    compatibility, move schema setup into a SQLite migration component, retain
    WAL/full-sync/file-lease behavior, and parameterize the storage conformance

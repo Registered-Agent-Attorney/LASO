@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
 #include <laso/policies/policy.hpp>
 #include <laso/providers/provider.hpp>
@@ -14,6 +15,15 @@ struct WorkerConfig {
   bool enabled = true;
   Json config = Json::object();
 };
+struct ProcessWorkerConfig {
+  std::string executable;
+  std::vector<std::string> args;
+  // The child starts with no inherited environment by default. Only these
+  // explicitly named parent variables and literal overrides are passed.
+  std::vector<std::string> environment_allowlist;
+  std::map<std::string, std::string> environment;
+  std::uint64_t startup_timeout_ms = 5000, request_timeout_ms = 5000;
+};
 struct Config {
   std::filesystem::path data_dir = ".laso", db_path;
   std::string storage_backend = "sqlite";
@@ -26,9 +36,13 @@ struct Config {
            max_pending_scheduler_launches = 128, max_event_trigger_depth = 16,
            max_event_trigger_deliveries = 1024, max_worker_jobs = 32,
            max_worker_jobs_per_worker = 16;
+  // Zero disables a budget. Token and cost budgets accumulate per run.
+  std::uint64_t max_worker_wall_time_ms = 0, max_worker_tokens_per_run = 0;
+  double max_worker_cost_units_per_run = 0.0;
   bool json_logs = false, allow_network = false, allow_remote_api = false;
   std::map<std::string, EventSourceConfig> event_sources;
   std::map<std::string, WorkerConfig> worker_plugins;
+  std::map<std::string, ProcessWorkerConfig> process_workers;
   std::map<std::string, ModelBinding> models{{"research", {"mock", "mock-v1"}},
                                              {"reviewer", {"mock", "mock-v1"}}};
   std::vector<PolicyRule> rules;

@@ -1,6 +1,6 @@
 # Validation record
 
-Snapshot validated: 2026-09-16. The Windows development workstation was used for
+Snapshot validated: 2026-09-17. The Windows development workstation was used for
 source review and packaging. Native validation was performed over SSH in an isolated
 directory on a remote Ubuntu 24.04.5 LTS (x86-64) host.
 
@@ -11,8 +11,8 @@ SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress
 and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
 Linux CI are present.
 
-The test inventory contains **157 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario, for **159 CTest entries**. Composition,
+The test inventory contains **175 GoogleTest cases** plus **2 CTest entries** for CLI
+validation and a process smoke/restart scenario, for **177 CTest entries**. Composition,
 storage, event-ingress, and worker-adapter coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
@@ -21,7 +21,10 @@ PostgreSQL runtime/reopen behavior, event-source ABI/lifecycle, bounded host ing
 source schema validation, durable external-event deduplication, source-state restart,
 offline plugin-to-trigger-to-pipeline execution, durable worker-job lifecycle,
 worker idempotency, concurrent duplicate submission, worker status/result/cancel
-correlation, schema and policy enforcement at the worker boundary, late terminal
+correlation, optional normalized usage, execution budgets, transport/job failure
+classification, supervised process-worker framing, protocol mismatch, bounded
+timeouts, cancellation, shutdown, process exit, and separate-process pipeline
+execution, schema and policy enforcement at the worker boundary, late terminal
 event rejection, and manager restart reconciliation.
 
 ## Statically reviewed
@@ -63,7 +66,7 @@ includes nested A → B → C execution and child output-contract failure propag
 
 | Check | Result |
 |---|---|
-| clang-format 18.1.8, `--dry-run --Werror` | PASS: all discovered C/C++ files |
+| Native clang-format | Not installed on the Windows workstation; the required Linux check is recorded below |
 | CMake source paths | PASS: all referenced source files present |
 | LASO include resolution and documentation links | PASS |
 | Safe YAML/configuration document scan | PASS: 13 documents |
@@ -79,24 +82,23 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| GCC Release CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Debug CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Release CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 159/159; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
+| GCC Debug CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| GCC Release CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Debug CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Release CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 177/177; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
-| Debian 13 container, GCC 14.2 Debug build | **PASS** |
-| Debian 13 container CTest suite | **PASS: 137/137 in the public Debian 13 container job; Docker was unavailable on the validation host for a duplicate local run** |
+| Debian 13 container | **Validated by the public PR workflow; post-fix result pending the public workflow** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
-| CLI and process restart smoke tests | **PASS** |
+| CLI and process restart smoke tests | **PASS: CLI validation and process smoke executed; process smoke used a local extracted jq 1.7 because jq is not installed system-wide** |
 | Offline shipped examples | **PASS: all shipped offline pipeline definitions validated; event-source plugin → durable event trigger → completed run and worker plugin → durable job → validated output exercised; optional local-openai not run** |
 | HTTP health/run integration tests | **PASS** |
 | valid, invalid, incompatible, and symlinked `.so` plugin tests | **PASS** |
-| Loopback-only local model provider and GPU inference | **PASS: completed LASO agent run with GPU memory allocation and active utilization observed** |
+| GPU inference | **Not part of this worker-hardening audit** |
 
 clang-tidy reported advisory findings because `WarningsAsErrors` is intentionally
 empty in the v0.1 baseline. They include enum-size suggestions, explicit handling
@@ -108,7 +110,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **PASS: run 35174288166 for commit 725810eca86ee62cc035bfaa6e1f30cc12b63c85; Ubuntu GCC/Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL 16 jobs succeeded** |
+| GitHub Actions execution | **Pending the post-fix PR workflow** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
@@ -117,6 +119,22 @@ are actual executions; pending and blocked rows do not imply success. The TSan
 failure occurred before LASO tests ran and must be repeated on a compatible kernel
 and sanitizer runtime; global ASLR settings were not weakened to work around it.
 
+## Worker-hardening branch validation
+
+This branch was validated from upstream commit
+`e8bff28d4f1cf2c2e93ece067a988a47edf8bd02` using GCC and Clang Debug/Release,
+ASan/UBSan, and an isolated local PostgreSQL 16 cluster. SQLite CTest ran 177
+tests (**175 passed, 2 PostgreSQL tests skipped**); PostgreSQL-enabled CTest
+completed **177/177**; and the ASan/UBSan CTest ran 177 tests (**175 passed,
+2 PostgreSQL tests skipped**) with leak detection enabled. The added
+worker tests cover no/partial/full usage, persistence, wall/token/cost budgets,
+transport-versus-job failures, and the supervised local process protocol. The
+process-worker suite adds 10 focused tests, including a separate-process
+pipeline and bounded child cleanup. SQLite and PostgreSQL server smoke tests both
+passed health, version, Hello, and run inspection; PostgreSQL state remained
+available after a server restart. The shipped worker-adapter example completed
+successfully. No credentials or DSNs were written to tracked files.
+
 The schema-contract tests additionally cover valid and invalid input/output,
 registration-time missing or malformed schemas, safe local references, forbidden
 remote references, traversal rejection, payload limits, explicit ValidatorNode
@@ -124,9 +142,11 @@ use, and concurrent cache access.
 
 The worker-adapter tests additionally cover ABI-compatible plugin discovery and
 health, normal `WorkerNode` execution, worker-boundary schemas and policy approval,
-durable idempotency under sequential and concurrent submission, terminal late-event
-handling, and reconciliation after manager restart. Worker job requests persist
-bounded metadata only; instructions and payloads are not copied into job records.
+durable idempotency under sequential and concurrent submission, optional usage
+metadata, budget acceptance/rejection and accumulation, transport-versus-job
+failure classification, terminal late-event handling, and reconciliation after
+manager restart. Worker job requests persist bounded metadata only; instructions
+and payloads are not copied into job records.
 
 The shared storage conformance tests run against SQLite on every default build and
 against a real disposable PostgreSQL service when `LASO_TEST_POSTGRES_DSN` is set.
