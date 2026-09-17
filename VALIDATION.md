@@ -108,7 +108,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **Workflow includes event-source coverage in the full suite plus Ubuntu GCC/Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL 16 service jobs; public status is authoritative for the pushed commit** |
+| GitHub Actions execution | **PASS: run 35174288166 for commit 725810eca86ee62cc035bfaa6e1f30cc12b63c85; Ubuntu GCC/Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL 16 jobs succeeded** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
