@@ -114,7 +114,7 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
     const auto version = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations")
                              .front()[0]
                              .as<int>();
-    if (version > 4)
+    if (version > 5)
       throw Error(ErrorCode::Storage, "Unsupported PostgreSQL database schema version");
     if (version == 0) {
       for (const auto name : table_names) {
