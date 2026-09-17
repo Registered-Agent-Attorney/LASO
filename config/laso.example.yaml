@@ -16,6 +16,8 @@ max_subpipeline_depth: 16
 max_pending_scheduler_launches: 128
 max_event_trigger_depth: 16
 max_event_trigger_deliveries: 1024
+max_worker_jobs: 32
+max_worker_jobs_per_worker: 16
 log_level: info
 json_logs: false
 allow_network: false

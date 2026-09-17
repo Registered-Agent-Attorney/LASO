@@ -33,7 +33,9 @@ void Config::validate() {
       max_tools > 1024 || max_subpipeline_depth == 0 || max_subpipeline_depth > 64 ||
       max_pending_scheduler_launches == 0 || max_pending_scheduler_launches > 4096 ||
       max_event_trigger_depth == 0 || max_event_trigger_depth > 64 ||
-      max_event_trigger_deliveries == 0 || max_event_trigger_deliveries > 100000)
+      max_event_trigger_deliveries == 0 || max_event_trigger_deliveries > 100000 ||
+      max_worker_jobs == 0 || max_worker_jobs > 4096 || max_worker_jobs_per_worker == 0 ||
+      max_worker_jobs_per_worker > max_worker_jobs)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
   if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
@@ -47,6 +49,14 @@ void Config::validate() {
         source.plugin.size() > 128 || source.component.size() > 128 || source.schema.size() > 512 ||
         source.config.dump().size() > std::size_t{1024} * 1024)
       throw Error(ErrorCode::Configuration, "Invalid event source configuration");
+  }
+  if (worker_plugins.size() > 64)
+    throw Error(ErrorCode::Configuration, "Too many workers");
+  for (const auto &[id, worker] : worker_plugins) {
+    if (!std::regex_match(id, source_id_pattern) || worker.plugin.empty() ||
+        worker.plugin.size() > 128 || worker.component.size() > 128 ||
+        worker.event_schema.size() > 512 || worker.config.dump().size() > std::size_t{1024} * 1024)
+      throw Error(ErrorCode::Configuration, "Invalid worker configuration");
   }
 }
 Config load_config(const std::filesystem::path &supplied,
@@ -130,6 +140,39 @@ Config load_config(const std::filesystem::path &supplied,
             if (!c.event_sources.emplace(id, std::move(cfg)).second)
               throw Error(ErrorCode::Configuration, "Duplicate event source id");
           }
+        } else if (key == "worker_plugins") {
+          if (!pair.second.IsMap())
+            throw Error(ErrorCode::Configuration, "worker_plugins must be a map");
+          for (const auto &worker : pair.second) {
+            const auto id = worker.first.as<std::string>();
+            if (!std::regex_match(id, std::regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")))
+              throw Error(ErrorCode::Configuration, "Invalid worker id");
+            const auto node = worker.second;
+            if (!node.IsMap())
+              throw Error(ErrorCode::Configuration, "Worker must be a map");
+            std::set<std::string> fields;
+            for (const auto &field : node)
+              if (!fields.insert(field.first.as<std::string>()).second)
+                throw Error(ErrorCode::Configuration, "Duplicate worker field");
+            for (const auto &field : fields)
+              if (field != "plugin" && field != "component" && field != "event_schema" &&
+                  field != "enabled" && field != "config")
+                throw Error(ErrorCode::Configuration, "Unknown worker field");
+            WorkerConfig cfg;
+            if (!node["plugin"])
+              throw Error(ErrorCode::Configuration, "Worker plugin is required");
+            cfg.plugin = node["plugin"].as<std::string>();
+            if (node["component"])
+              cfg.component = node["component"].as<std::string>();
+            if (node["event_schema"])
+              cfg.event_schema = node["event_schema"].as<std::string>();
+            if (node["enabled"])
+              cfg.enabled = node["enabled"].as<bool>();
+            if (node["config"])
+              cfg.config = detail::yaml_value(node["config"]);
+            if (!c.worker_plugins.emplace(id, std::move(cfg)).second)
+              throw Error(ErrorCode::Configuration, "Duplicate worker id");
+          }
         } else
           values[key] = pair.second.as<std::string>();
       }
@@ -156,6 +199,8 @@ Config load_config(const std::filesystem::path &supplied,
                     "MAX_PENDING_SCHEDULER_LAUNCHES",
                     "MAX_EVENT_TRIGGER_DEPTH",
                     "MAX_EVENT_TRIGGER_DELIVERIES",
+                    "MAX_WORKER_JOBS",
+                    "MAX_WORKER_JOBS_PER_WORKER",
                     "JSON_LOGS",
                     "ALLOW_NETWORK",
                     "ALLOW_REMOTE_API",
@@ -235,6 +280,10 @@ Config load_config(const std::filesystem::path &supplied,
       c.max_event_trigger_depth = integer(v);
     else if (k == "max_event_trigger_deliveries")
       c.max_event_trigger_deliveries = integer(v);
+    else if (k == "max_worker_jobs")
+      c.max_worker_jobs = integer(v);
+    else if (k == "max_worker_jobs_per_worker")
+      c.max_worker_jobs_per_worker = integer(v);
     else
       throw Error(ErrorCode::Configuration, "Unknown configuration field");
   }

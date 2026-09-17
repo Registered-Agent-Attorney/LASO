@@ -12,13 +12,15 @@ LASO_PLUGIN_DIR=trusted-plugins ./build/bin/laso plugin list
 LASO_PLUGIN_DIR=trusted-plugins ./build/bin/laso run start examples/native-plugin/pipeline.yaml
 ```
 
-The main CMake build also builds the tool, model-provider, and offline event-source
-examples under `build/plugins`. Do not mix test fixtures into a deployment plugin
+The main CMake build also builds the tool, model-provider, offline event-source,
+and offline worker examples. The worker example is placed under
+`build/worker-plugins`; the other examples are under `build/plugins`. Do not mix test fixtures into a deployment plugin
 directory. Query reports ABI 1; the project version and plugin's own version are
 separate.
 
 Read [the ownership and compatibility contract](../docs/plugin-abi.md) before
 implementing a plugin. Tool, model-provider, and event-source registration are
-implemented; the remaining component kinds return `LASO_UNSUPPORTED`. Plugins are
+and worker registration are implemented; the remaining component kinds return
+`LASO_UNSUPPORTED`. Plugins are
 privileged native code, loaded only from explicitly configured locations. The
 samples have no network or shell behavior.

@@ -98,3 +98,12 @@ and a bounded delivery queue. Scheduler-created runs expose `initiation_type`,
 schedule/trigger IDs, due/event IDs, and root event IDs through normal run
 inspection. The scheduler shuts down by cancelling its wait timer and does not
 hold runtime node permits while waiting for capacity.
+
+Worker nodes use this same runtime execution path. A submission is persisted
+before the adapter callback, and the node yields while it observes the bounded
+durable `WorkerJob` state. Retries use a distinct attempt/idempotency identity;
+terminal worker states reject late status changes. Recovery-capable adapters are
+queried after restart, while ambiguous submissions remain `Unknown`. Worker
+callbacks are not invoked while the runtime mutex is held, so synchronous plugin
+events cannot re-enter runtime state and deadlock. Global run/node limits and the
+configured global/per-worker worker-job limits apply to worker execution.

@@ -5,6 +5,7 @@
 #include <laso/events/events.hpp>
 #include <laso/providers/provider.hpp>
 #include <laso/tools/tool.hpp>
+#include <laso/workers/worker.hpp>
 #include <memory>
 #include <optional>
 #include <set>
@@ -70,33 +71,50 @@ public:
       : tools_(tools), providers_(providers), event_submitter_(std::move(event_submitter)),
         event_state_persist_(std::move(event_state_persist)),
         event_state_load_(std::move(event_state_load)) {}
+  PluginLoader(ToolRegistry &tools, ProviderRegistry &providers, WorkerRegistry &workers,
+               EventSubmitter event_submitter = {}, EventStatePersist event_state_persist = {},
+               EventStateLoad event_state_load = {})
+      : tools_(tools), providers_(providers), workers_(&workers),
+        event_submitter_(std::move(event_submitter)),
+        event_state_persist_(std::move(event_state_persist)),
+        event_state_load_(std::move(event_state_load)) {}
   ~PluginLoader() noexcept;
   // Call during startup, before workers or consumers access the registries.
   void discover(const std::vector<std::filesystem::path> &configured_directories,
-                const std::map<std::string, EventSourceConfig> &event_sources = {});
+                const std::map<std::string, EventSourceConfig> &event_sources = {},
+                const std::map<std::string, WorkerConfig> &worker_plugins = {});
   void start_event_sources();
   void stop_event_sources() noexcept;
+  void start_workers();
+  void stop_workers() noexcept;
   void set_event_source_enabled(const std::string &id, bool enabled);
   const std::vector<PluginInfo> &plugins() const {
     return plugins_;
   }
   Json event_sources() const;
   Json event_source(const std::string &id) const;
+  Json workers() const;
+  Json worker(const std::string &id) const;
 
 private:
   struct EventSource;
   ToolRegistry &tools_;
   ProviderRegistry &providers_;
+  WorkerRegistry *workers_ = nullptr;
   EventSubmitter event_submitter_;
   EventStatePersist event_state_persist_;
   EventStateLoad event_state_load_;
   std::vector<PluginInfo> plugins_;
   std::vector<std::shared_ptr<void>> libraries_;
   std::vector<std::shared_ptr<EventSource>> event_sources_;
+  std::vector<std::shared_ptr<WorkerAdapter>> worker_adapters_;
   std::map<std::string, EventSourceConfig> event_configs_;
+  std::map<std::string, WorkerConfig> worker_configs_;
   std::set<std::string> matched_event_configs_;
+  std::set<std::string> matched_worker_configs_;
   mutable std::mutex lifecycle_mutex_;
   bool event_sources_started_ = false;
+  bool workers_started_ = false;
   void load(const std::filesystem::path &);
 };
 } // namespace laso

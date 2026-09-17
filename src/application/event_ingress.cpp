@@ -24,8 +24,8 @@ IngressResult rejected(std::string message) {
 EventIngress::EventIngress(Storage &storage, EventBus &events, SchemaValidator &schemas,
                            unsigned max_trigger_depth, std::size_t max_pending,
                            std::size_t max_per_source)
-    : storage_(storage), events_(events), schemas_(schemas), max_trigger_depth_(max_trigger_depth),
-      max_pending_(max_pending), max_per_source_(max_per_source) {
+    : storage_(storage), events_(events), schemas_(schemas), max_pending_(max_pending),
+      max_per_source_(max_per_source) {
   if (max_trigger_depth == 0 || max_pending == 0 || max_per_source == 0)
     throw Error(ErrorCode::Configuration, "Invalid event ingress limits");
 }

@@ -15,7 +15,8 @@ typedef enum laso_status {
   LASO_BUFFER_LIMIT = 5,
   LASO_DUPLICATE = 6,
   LASO_BACKPRESSURE = 7,
-  LASO_STOPPED = 8
+  LASO_STOPPED = 8,
+  LASO_UNAVAILABLE = 9
 } laso_status;
 typedef enum laso_component_kind {
   LASO_COMPONENT_TOOL = 1,
@@ -26,7 +27,8 @@ typedef enum laso_component_kind {
   LASO_COMPONENT_SCHEDULER = 6,
   LASO_COMPONENT_ARTIFACT = 7,
   LASO_COMPONENT_TELEMETRY = 8,
-  LASO_COMPONENT_NODE = 9
+  LASO_COMPONENT_NODE = 9,
+  LASO_COMPONENT_WORKER = 10
 } laso_component_kind;
 typedef int32_t (*laso_event_emit_fn)(void *host_context, const char *event_json,
                                       uint64_t event_length);
@@ -54,6 +56,17 @@ typedef int32_t (*laso_health_fn)(void *instance, const laso_call_context *conte
 typedef int32_t (*laso_event_start_fn)(void *instance, const char *config_json,
                                        uint64_t config_length, const laso_call_context *context);
 typedef int32_t (*laso_event_stop_fn)(void *instance, const laso_call_context *context);
+typedef int32_t (*laso_worker_submit_fn)(void *instance, const char *request_json,
+                                         uint64_t request_length, const laso_call_context *context);
+typedef int32_t (*laso_worker_status_fn)(void *instance, const char *external_job_id,
+                                         uint64_t external_job_id_length,
+                                         const laso_call_context *context);
+typedef int32_t (*laso_worker_cancel_fn)(void *instance, const char *external_job_id,
+                                         uint64_t external_job_id_length,
+                                         const laso_call_context *context);
+typedef int32_t (*laso_worker_result_fn)(void *instance, const char *external_job_id,
+                                         uint64_t external_job_id_length,
+                                         const laso_call_context *context);
 typedef struct laso_component {
   uint32_t struct_size;
   uint32_t kind;
@@ -66,6 +79,14 @@ typedef struct laso_component {
    * original tool/model component layout and ABI-v1 plugin behavior. */
   laso_event_start_fn event_start;
   laso_event_stop_fn event_stop;
+  /* Required for LASO_COMPONENT_WORKER. These callbacks are short and may
+   * use emit_event asynchronously until worker_stop returns. */
+  laso_event_start_fn worker_start;
+  laso_event_stop_fn worker_stop;
+  laso_worker_submit_fn worker_submit;
+  laso_worker_status_fn worker_status;
+  laso_worker_cancel_fn worker_cancel;
+  laso_worker_result_fn worker_result;
 } laso_component;
 typedef struct laso_host_api {
   uint32_t struct_size;

@@ -90,6 +90,18 @@ int cli_main(int argc, char **argv) {
   event_source_enable->add_option("id", target)->required();
   auto *event_source_disable = event_source->add_subcommand("disable");
   event_source_disable->add_option("id", target)->required();
+  auto *worker = app.add_subcommand("worker");
+  worker->require_subcommand(1);
+  auto *worker_list = worker->add_subcommand("list");
+  auto *worker_show = worker->add_subcommand("show");
+  worker_show->add_option("id", target)->required();
+  auto *worker_job = app.add_subcommand("worker-job");
+  worker_job->require_subcommand(1);
+  auto *worker_job_list = worker_job->add_subcommand("list");
+  auto *worker_job_show = worker_job->add_subcommand("show");
+  worker_job_show->add_option("id", target)->required();
+  auto *worker_job_cancel = worker_job->add_subcommand("cancel");
+  worker_job_cancel->add_option("id", target)->required();
   app.require_subcommand(1);
   try {
     app.parse(argc, argv);
@@ -209,6 +221,17 @@ int cli_main(int argc, char **argv) {
     } else if (*event_source_disable) {
       service.set_event_source_enabled(target, false);
       result = service.event_source(target);
+    } else if (*worker_list)
+      result = service.workers();
+    else if (*worker_show)
+      result = service.worker(target);
+    else if (*worker_job_list)
+      result = service.worker_jobs();
+    else if (*worker_job_show)
+      result = service.worker_job(target);
+    else if (*worker_job_cancel) {
+      service.cancel_worker_job(target);
+      result = service.worker_job(target);
     }
     if (run_executor) {
       executor.start();

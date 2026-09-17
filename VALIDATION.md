@@ -11,15 +11,18 @@ SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress
 and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
 Linux CI are present.
 
-The test inventory contains **147 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario, for **149 CTest entries**. Composition,
-storage, and event-ingress coverage includes
+The test inventory contains **157 GoogleTest cases** plus **2 CTest entries** for CLI
+validation and a process smoke/restart scenario, for **159 CTest entries**. Composition,
+storage, event-ingress, and worker-adapter coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
 run inspection, backend conformance, pagination, rollback, concurrent persistence,
 PostgreSQL runtime/reopen behavior, event-source ABI/lifecycle, bounded host ingress,
 source schema validation, durable external-event deduplication, source-state restart,
-and offline plugin-to-trigger-to-pipeline execution.
+offline plugin-to-trigger-to-pipeline execution, durable worker-job lifecycle,
+worker idempotency, concurrent duplicate submission, worker status/result/cancel
+correlation, schema and policy enforcement at the worker boundary, late terminal
+event rejection, and manager restart reconciliation.
 
 ## Statically reviewed
 
@@ -36,6 +39,10 @@ and offline plugin-to-trigger-to-pipeline execution.
 - Event-source lifecycle isolation, thread-safe host emission, source identity checks,
   bounded ingress, durable external-event claims, callback shutdown behavior, and
   trigger provenance/depth integration were reviewed.
+- Worker ABI prefix compatibility, bounded request/result handling, durable job
+  idempotency, status/result/cancel correlation, callback serialization, recovery
+  reconciliation, terminal-state protection, worker limits, and secret-safe job
+  metadata were reviewed.
 - Ubuntu GCC/Clang, Debian 13, PostgreSQL, clang-tidy, formatting, and ASan/UBSan
   CI jobs are defined in `.github/workflows/linux.yml`.
 
@@ -72,12 +79,12 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| GCC Release CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Debug CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Release CTest suite | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 149/149 scheduled; 147 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 149/149; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
+| GCC Debug CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| GCC Release CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Debug CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Release CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 159/159; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
@@ -86,7 +93,7 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
 | CLI and process restart smoke tests | **PASS** |
-| Offline shipped examples | **PASS: all shipped offline pipeline definitions validated; event-source plugin → durable event trigger → completed run exercised; optional local-openai not run** |
+| Offline shipped examples | **PASS: all shipped offline pipeline definitions validated; event-source plugin → durable event trigger → completed run and worker plugin → durable job → validated output exercised; optional local-openai not run** |
 | HTTP health/run integration tests | **PASS** |
 | valid, invalid, incompatible, and symlinked `.so` plugin tests | **PASS** |
 | Loopback-only local model provider and GPU inference | **PASS: completed LASO agent run with GPU memory allocation and active utilization observed** |
@@ -114,6 +121,12 @@ The schema-contract tests additionally cover valid and invalid input/output,
 registration-time missing or malformed schemas, safe local references, forbidden
 remote references, traversal rejection, payload limits, explicit ValidatorNode
 use, and concurrent cache access.
+
+The worker-adapter tests additionally cover ABI-compatible plugin discovery and
+health, normal `WorkerNode` execution, worker-boundary schemas and policy approval,
+durable idempotency under sequential and concurrent submission, terminal late-event
+handling, and reconciliation after manager restart. Worker job requests persist
+bounded metadata only; instructions and payloads are not copied into job records.
 
 The shared storage conformance tests run against SQLite on every default build and
 against a real disposable PostgreSQL service when `LASO_TEST_POSTGRES_DSN` is set.
