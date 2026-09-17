@@ -26,6 +26,47 @@ Config worker_config(const std::filesystem::path &dir) {
       "offline", WorkerConfig{"example-worker", "example-worker", "", true, Json::object()});
   return result;
 }
+
+class UsageWorker final : public WorkerTransport {
+public:
+  WorkerMetadata metadata() const override {
+    WorkerMetadata result;
+    result.id = "usage";
+    result.name = "usage";
+    result.enabled = true;
+    result.healthy = true;
+    result.status = "healthy";
+    result.event_source_id = "worker.usage";
+    result.supports_recovery = true;
+    result.supports_cancellation = true;
+    return result;
+  }
+  WorkerSubmission submit(const WorkerRequest &) override {
+    if (transport_failure)
+      throw WorkerTransportError("synthetic transport failure");
+    WorkerSubmission result;
+    result.external_job_id = "external-usage";
+    result.state = job_failure ? WorkerJobState::Failed : WorkerJobState::Queued;
+    result.usage = submission_usage;
+    return result;
+  }
+  WorkerStatus status(const std::string &) override {
+    WorkerStatus result;
+    result.state = status_state;
+    result.result = status_result;
+    result.usage = status_usage;
+    return result;
+  }
+  WorkerStatus result(const std::string &) override { return {}; }
+  bool cancel(const std::string &) override { return true; }
+  void start() override {}
+  void stop() noexcept override {}
+
+  WorkerUsage submission_usage, status_usage;
+  WorkerJobState status_state = WorkerJobState::Queued;
+  Json status_result = nullptr;
+  bool transport_failure = false, job_failure = false;
+};
 } // namespace
 
 TEST(Workers, PluginLoadsStartsAndReportsHealth) {
@@ -320,4 +361,159 @@ TEST(Workers, ExistingWorkerJobIsReconciledAfterManagerRestart) {
     EXPECT_EQ(recovered.result.at("recovered"), true);
     EXPECT_EQ(adapter->submissions.load(), 1U);
   }
+}
+
+TEST(Workers, UsageMetadataIsOptionalPartialAndFullyNormalized) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  WorkerManager manager(*storage, registry);
+  WorkerRequest request;
+  request.worker_id = "usage";
+  request.run_id = "usage-run";
+  request.node_id = "work";
+  request.idempotency_key = "usage-none";
+  const auto no_usage = manager.submit(request);
+  EXPECT_TRUE(no_usage.usage.queue_duration_ms == std::nullopt);
+  EXPECT_TRUE(no_usage.usage.total_tokens == std::nullopt);
+
+  adapter->submission_usage.input_tokens = 12;
+  request.idempotency_key = "usage-partial";
+  const auto partial = manager.submit(request);
+  ASSERT_TRUE(partial.usage.input_tokens.has_value());
+  EXPECT_EQ(*partial.usage.input_tokens, 12U);
+  EXPECT_TRUE(partial.usage.total_tokens == std::nullopt);
+
+  adapter->submission_usage.output_tokens = 8;
+  adapter->submission_usage.wall_duration_ms = 25;
+  adapter->submission_usage.provider = "provider";
+  adapter->submission_usage.model = "model";
+  adapter->submission_usage.executor = "executor";
+  adapter->submission_usage.tool_calls = 2;
+  adapter->submission_usage.action_count = 3;
+  adapter->submission_usage.cost_units = 0.5;
+  adapter->submission_usage.metadata = {{"source", "test"}};
+  request.idempotency_key = "usage-full";
+  const auto full = manager.submit(request);
+  ASSERT_TRUE(full.usage.total_tokens.has_value());
+  EXPECT_EQ(*full.usage.total_tokens, 20U);
+  EXPECT_EQ(*full.usage.input_tokens, 12U);
+  EXPECT_EQ(*full.usage.output_tokens, 8U);
+  EXPECT_EQ(full.usage.metadata.at("source"), "test");
+  EXPECT_EQ(storage->get(RecordKind::WorkerJob, full.id).get<WorkerJob>().usage.model, "model");
+}
+
+TEST(Workers, UsageMetadataPersistsAcrossRestartAndCompletionEvents) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "state.db";
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  WorkerJob created;
+  {
+    auto storage = make_storage(path);
+    WorkerManager manager(*storage, registry);
+    WorkerRequest request;
+    request.worker_id = "usage";
+    request.run_id = "restart-usage";
+    request.node_id = "work";
+    request.idempotency_key = "restart-usage:1";
+    created = manager.submit(request);
+  }
+  {
+    auto storage = make_storage(path);
+    WorkerManager manager(*storage, registry);
+    Event completed;
+    completed.source_id = "";
+    completed.type = "worker.job.completed";
+    completed.payload = { {"job_id", created.id}, {"external_job_id", "external-usage"},
+                          {"result", {{"ok", true}}},
+                          {"usage", {{"queue_duration_ms", 4}, {"wall_duration_ms", 9},
+                                      {"input_tokens", 2}, {"output_tokens", 3},
+                                      {"cost_units", 0.25}}} };
+    // The synthetic adapter has no event source identity; use the persisted
+    // adapter identity only after replacing it with the expected source.
+    completed.source_id = "worker.usage";
+    manager.receive(completed);
+    const auto recovered = manager.job(created.id);
+    EXPECT_EQ(recovered.state, WorkerJobState::Completed);
+    EXPECT_EQ(recovered.result.at("ok"), true);
+    ASSERT_TRUE(recovered.usage.total_tokens.has_value());
+    EXPECT_EQ(*recovered.usage.total_tokens, 5U);
+    EXPECT_EQ(*recovered.usage.queue_duration_ms, 4U);
+  }
+}
+
+TEST(Workers, WorkerBudgetsAcceptAndRejectDeterministically) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  WorkerManager manager(*storage, registry, 32, 16, 16, 100, 10, 2.0);
+  WorkerRequest request;
+  request.worker_id = "usage";
+  request.run_id = "budget-run";
+  request.node_id = "work";
+  adapter->submission_usage.wall_duration_ms = 50;
+  adapter->submission_usage.total_tokens = 6;
+  adapter->submission_usage.cost_units = 1.0;
+  request.idempotency_key = "budget-accepted";
+  EXPECT_EQ(manager.submit(request).state, WorkerJobState::Queued);
+
+  adapter->submission_usage.wall_duration_ms = 101;
+  adapter->submission_usage.total_tokens = 5;
+  adapter->submission_usage.cost_units = 1.0;
+  request.idempotency_key = "budget-wall";
+  const auto wall_rejected = manager.submit(request);
+  EXPECT_EQ(wall_rejected.state, WorkerJobState::Failed);
+  EXPECT_EQ(wall_rejected.failure_kind, WorkerFailureKind::Budget);
+  EXPECT_EQ(wall_rejected.error, "worker wall-time budget exceeded");
+
+  adapter->submission_usage.wall_duration_ms = 50;
+  request.idempotency_key = "budget-total";
+  const auto total_rejected = manager.submit(request);
+  EXPECT_EQ(total_rejected.state, WorkerJobState::Failed);
+  EXPECT_EQ(total_rejected.failure_kind, WorkerFailureKind::Budget);
+  EXPECT_EQ(total_rejected.error, "worker token budget exceeded");
+
+  auto cost_storage = make_storage(dir.path / "cost.db");
+  WorkerManager cost_manager(*cost_storage, registry, 32, 16, 16, 0, 0, 2.0);
+  adapter->submission_usage.total_tokens = 1;
+  adapter->submission_usage.cost_units = 1.5;
+  request.run_id = "cost-run";
+  request.idempotency_key = "cost-accepted";
+  EXPECT_EQ(cost_manager.submit(request).state, WorkerJobState::Queued);
+  adapter->submission_usage.cost_units = 0.6;
+  request.idempotency_key = "cost-rejected";
+  const auto cost_rejected = cost_manager.submit(request);
+  EXPECT_EQ(cost_rejected.state, WorkerJobState::Failed);
+  EXPECT_EQ(cost_rejected.failure_kind, WorkerFailureKind::Budget);
+  EXPECT_EQ(cost_rejected.error, "worker cost_units budget exceeded");
+}
+
+TEST(Workers, TransportAndJobFailuresRemainDistinguishable) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  WorkerManager manager(*storage, registry);
+  WorkerRequest request;
+  request.worker_id = "usage";
+  request.run_id = "failure-run";
+  request.node_id = "work";
+  request.idempotency_key = "transport";
+  adapter->transport_failure = true;
+  const auto transport = manager.submit(request);
+  EXPECT_EQ(transport.state, WorkerJobState::Failed);
+  EXPECT_EQ(transport.failure_kind, WorkerFailureKind::Transport);
+  adapter->transport_failure = false;
+  adapter->job_failure = true;
+  request.idempotency_key = "job";
+  const auto job = manager.submit(request);
+  EXPECT_EQ(job.state, WorkerJobState::Failed);
+  EXPECT_EQ(job.failure_kind, WorkerFailureKind::Job);
 }
