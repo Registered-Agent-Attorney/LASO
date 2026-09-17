@@ -11,8 +11,8 @@ SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress
 and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
 Linux CI are present.
 
-The test inventory contains **157 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario, for **159 CTest entries**. Composition,
+The test inventory contains **162 GoogleTest cases** plus **2 CTest entries** for CLI
+validation and a process smoke/restart scenario, for **164 CTest entries**. Composition,
 storage, event-ingress, and worker-adapter coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
@@ -80,12 +80,9 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| GCC Release CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Debug CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Release CTest suite | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 159/159 scheduled; 157 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 159/159; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
+| GCC Debug CTest suite | **PASS: 164/164 scheduled; 162 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 164/164 scheduled; 162 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 164/164; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container, GCC 14.2 Debug build | **PASS** |
@@ -93,7 +90,7 @@ No Windows C++ compilation was attempted because LASO is intentionally Linux-onl
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
-| CLI and process restart smoke tests | **PASS** |
+| CLI and process restart smoke tests | **PASS: CLI validation and process smoke executed; process smoke used a local extracted jq 1.7 because jq is not installed system-wide** |
 | Offline shipped examples | **PASS: all shipped offline pipeline definitions validated; event-source plugin → durable event trigger → completed run and worker plugin → durable job → validated output exercised; optional local-openai not run** |
 | HTTP health/run integration tests | **PASS** |
 | valid, invalid, incompatible, and symlinked `.so` plugin tests | **PASS** |
@@ -117,6 +114,19 @@ another distribution or deployment environment. Ubuntu and Debian results above
 are actual executions; pending and blocked rows do not imply success. The TSan
 failure occurred before LASO tests ran and must be repeated on a compatible kernel
 and sanitizer runtime; global ASLR settings were not weakened to work around it.
+
+## Worker-hardening branch validation
+
+On the Linux x86-64 validation environment, this branch was validated from upstream commit
+`c9887eabd585a414789d6c43514e1ee3a221ca8b` using GCC Debug, an isolated local
+PostgreSQL 16 cluster on `127.0.0.1`, and serial Ninja builds. SQLite CTest
+completed **164/164**; PostgreSQL-enabled CTest completed **164/164**; and the
+ASan/UBSan CTest completed **164/164** with leak detection enabled. The added
+worker tests cover no/partial/full usage, persistence, wall/token/cost budgets,
+and transport-versus-job failures. SQLite and PostgreSQL server smoke tests both
+passed health, version, Hello, and run inspection; PostgreSQL state remained
+available after a server restart. The shipped worker-adapter example completed
+successfully. No credentials or DSNs were written to tracked files.
 
 The schema-contract tests additionally cover valid and invalid input/output,
 registration-time missing or malformed schemas, safe local references, forbidden
