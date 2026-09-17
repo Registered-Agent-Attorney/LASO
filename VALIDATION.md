@@ -132,7 +132,6 @@ approval/permission/question requests, policy decisions, idempotent replay,
 cancellation, strict protocol bounds, OpenCode session continuation after
 adapter restart, explicit project-root rejection, and normalized results and
 usage. The real OpenCode test used the installed adapter and a temporary fixture;
-<<<<<<< HEAD
 it did not require a paid provider for the test suite. That fixture did not trigger
 a real OpenCode permission or question event, so that vendor-specific interaction
 path remains partially validated; the generic LASO request path is covered by
