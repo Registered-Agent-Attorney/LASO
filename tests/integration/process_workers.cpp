@@ -61,10 +61,9 @@ http_request(unsigned short port, boost::beast::http::verb method,
   stream.connect({asio::ip::make_address("127.0.0.1"), port});
   http::request<http::string_body> request{method, target, 11};
   request.set(http::field::host, "localhost");
-  if (method != http::verb::get) {
+  if (method != http::verb::get)
     request.body() = body.dump();
-    request.prepare_payload();
-  }
+  request.prepare_payload();
   http::write(stream, request);
   boost::beast::flat_buffer buffer;
   http::response<http::string_body> response;
