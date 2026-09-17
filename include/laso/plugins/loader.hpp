@@ -107,7 +107,7 @@ private:
   std::vector<PluginInfo> plugins_;
   std::vector<std::shared_ptr<void>> libraries_;
   std::vector<std::shared_ptr<EventSource>> event_sources_;
-  std::vector<std::shared_ptr<WorkerAdapter>> worker_adapters_;
+  std::vector<std::shared_ptr<WorkerTransport>> worker_adapters_;
   std::map<std::string, EventSourceConfig> event_configs_;
   std::map<std::string, WorkerConfig> worker_configs_;
   std::set<std::string> matched_event_configs_;
