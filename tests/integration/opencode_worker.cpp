@@ -17,6 +17,10 @@ ProcessWorkerConfig opencode_config(const std::filesystem::path &root, unsigned 
       "--port",         std::to_string(port),
       "--allowed-root", root.string(),
       "--timeout-ms",   "120000"};
+  // Keep the opt-in integration tests independent of host-wide OpenCode state,
+  // including state created by another OpenCode major version.
+  result.environment["XDG_DATA_HOME"] = (root / ".opencode-data").string();
+  result.environment["XDG_CONFIG_HOME"] = (root / ".opencode-config").string();
   result.startup_timeout_ms = 120000;
   result.request_timeout_ms = 120000;
   return result;
