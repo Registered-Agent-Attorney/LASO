@@ -83,6 +83,10 @@ int main(int argc, char **argv) {
       std::cout << std::string(process_protocol::max_frame_bytes + 1, 'x') << '\n' << std::flush;
       continue;
     }
+    if (mode == "truncated") {
+      std::cout << "{\"protocol_version\":1" << std::flush;
+      std::_Exit(74);
+    }
     if (mode == "crash" || (mode == "exit-after-hello" && operation != "shutdown"))
       std::_Exit(73);
     if (mode == "hang" && operation != "shutdown")

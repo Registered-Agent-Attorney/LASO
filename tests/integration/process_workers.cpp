@@ -101,6 +101,7 @@ TEST(ProcessWorker, WorkerFailureIsDistinctFromTransportFailure) {
 
 TEST(ProcessWorker, MalformedOversizedExitAndHangAreBoundedFailures) {
   for (const auto &mode : {std::string("malformed"), std::string("oversized"),
+                           std::string("truncated"),
                            std::string("exit-after-hello"), std::string("hang")}) {
     ProcessWorkerTransport transport("process", worker_config(mode, 150));
     ASSERT_NO_THROW(transport.start()) << mode;
