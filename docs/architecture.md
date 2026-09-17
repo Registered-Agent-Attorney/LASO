@@ -126,3 +126,8 @@ implementation of the transport boundary. The optional
 through a bounded versioned NDJSON protocol; it is a lifecycle boundary, not a
 sandbox. Remote transports and distributed worker leasing remain deferred. See
 [worker adapters](workers.md) and the [process protocol](worker-process-protocol.md).
+
+Workers may also send a bounded, durable approval/permission/question request
+through that protocol. Policy remains in LASO and the request channel is not
+general RPC. The optional OpenCode adapter uses this seam without placing
+OpenCode-specific parsing in Core.

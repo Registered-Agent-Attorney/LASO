@@ -157,6 +157,69 @@ TEST(Workers, PolicyApprovalGuardsWorkerExecution) {
   EXPECT_EQ(service.get(RecordKind::Run, run_id).get<laso::Run>().state, RunState::Completed);
 }
 
+TEST(Workers, WorkerInteractionsAreDurableIdempotentAndCancellable) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  PolicyEngine policy;
+  WorkerManager manager(*storage, registry, policy);
+  WorkerInteractionRequest request;
+  request.request_id = "worker-request-1";
+  request.worker_job_id = "job-1";
+  request.worker_id = "worker";
+  request.type = WorkerInteractionType::Question;
+  request.title = "Need clarification";
+  request.summary = "Choose a bounded answer";
+  request.created_at = timestamp();
+  request.payload = {{"choices", Json::array({"yes", "no"})}};
+  std::optional<WorkerInteractionResponse> result;
+  std::jthread waiter([&] { result = manager.handle_interaction(request); });
+  for (unsigned i = 0; i < 50 && storage->list(RecordKind::WorkerInteraction).empty(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  ASSERT_EQ(storage->list(RecordKind::WorkerInteraction).size(), 1U);
+  EXPECT_EQ(storage->get(RecordKind::WorkerInteraction, request.request_id)
+                .at("state"),
+            "pending");
+  manager.resolve_interaction(request.request_id, WorkerInteractionState::Answered,
+                              {{"answer", "yes"}}, "tester", "answered by test");
+  waiter.join();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->state, WorkerInteractionState::Answered);
+  EXPECT_EQ(result->payload.at("answer"), "yes");
+  EXPECT_EQ(manager.handle_interaction(request).state, WorkerInteractionState::Answered);
+}
+
+TEST(Workers, WorkerInteractionPolicyAndUnknownTypesAreExplicit) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  PolicyEngine policy;
+  WorkerManager manager(*storage, registry, policy);
+  WorkerRequest job_request;
+  job_request.worker_id = "usage";
+  job_request.run_id = "interaction-policy";
+  job_request.node_id = "work";
+  job_request.idempotency_key = "interaction-policy-job";
+  const auto job = manager.submit(job_request);
+
+  WorkerInteractionRequest request;
+  request.request_id = "permission-policy";
+  request.worker_job_id = job.id;
+  request.worker_id = "usage";
+  request.type = WorkerInteractionType::Permission;
+  request.title = "Run local test";
+  request.summary = "The worker needs permission";
+  request.payload = {{"resource", "local.test"}};
+  const auto decision = manager.handle_interaction(request);
+  EXPECT_EQ(decision.state, WorkerInteractionState::Approved);
+  EXPECT_EQ(manager.worker_interaction(request.request_id).at("state"), "approved");
+
+  EXPECT_THROW(Json({{"request_type", "unsupported"}}).get<WorkerInteractionRequest>(),
+               std::invalid_argument);
+}
+
 TEST(Workers, WorkerJobIdempotencyAvoidsResubmission) {
   class ImmediateWorker final : public WorkerAdapter {
   public:

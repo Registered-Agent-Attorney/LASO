@@ -49,6 +49,11 @@ public:
                                 std::size_t offset = 0) const;
   Json worker_job(const std::string &id) const;
   void cancel_worker_job(const std::string &id);
+  std::vector<Json> worker_interactions(const std::string &run_id = "", std::size_t limit = 1000,
+                                        std::size_t offset = 0) const;
+  Json worker_interaction(const std::string &id) const;
+  void resolve_worker_interaction(const std::string &, WorkerInteractionState, const Json &,
+                                  const std::string &, const std::string &);
   Runtime &runtime() {
     return runtime_;
   }

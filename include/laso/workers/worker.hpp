@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <laso/core/async.hpp>
 #include <laso/core/registry.hpp>
 #include <optional>
@@ -104,6 +105,55 @@ struct WorkerJob {
 void to_json(Json &, const WorkerJob &);
 void from_json(const Json &, WorkerJob &);
 
+enum class WorkerInteractionType { Approval, Permission, Question };
+NLOHMANN_JSON_SERIALIZE_ENUM(WorkerInteractionType,
+                             {{WorkerInteractionType::Approval, "approval"},
+                              {WorkerInteractionType::Permission, "permission"},
+                              {WorkerInteractionType::Question, "question"}})
+enum class WorkerInteractionState { Pending, Approved, Denied, Answered, Cancelled, Expired };
+NLOHMANN_JSON_SERIALIZE_ENUM(WorkerInteractionState,
+                             {{WorkerInteractionState::Pending, "pending"},
+                              {WorkerInteractionState::Approved, "approved"},
+                              {WorkerInteractionState::Denied, "denied"},
+                              {WorkerInteractionState::Answered, "answered"},
+                              {WorkerInteractionState::Cancelled, "cancelled"},
+                              {WorkerInteractionState::Expired, "expired"}})
+
+// Requests are deliberately narrower than RPC.  A worker can ask for a
+// policy decision or human input, but cannot invoke LASO methods or mutate a
+// run directly.
+struct WorkerInteractionRequest {
+  std::string request_id, worker_job_id, worker_id, external_job_id, session_id;
+  WorkerInteractionType type = WorkerInteractionType::Question;
+  std::string title, summary, created_at, deadline, risk, category;
+  Json payload = Json::object();
+};
+void to_json(Json &, const WorkerInteractionRequest &);
+void from_json(const Json &, WorkerInteractionRequest &);
+
+struct WorkerInteractionResponse {
+  std::string request_id;
+  WorkerInteractionState state = WorkerInteractionState::Denied;
+  Json payload = Json::object();
+  std::string reason;
+};
+void to_json(Json &, const WorkerInteractionResponse &);
+void from_json(const Json &, WorkerInteractionResponse &);
+
+struct WorkerInteraction {
+  std::string id, worker_job_id, worker_id, run_id, external_job_id, session_id;
+  WorkerInteractionType type = WorkerInteractionType::Question;
+  WorkerInteractionState state = WorkerInteractionState::Pending;
+  std::string title, summary, created_at, deadline, risk, category;
+  Json payload = Json::object(), response = Json::object();
+  std::string reason, actor, decided_at;
+};
+void to_json(Json &, const WorkerInteraction &);
+void from_json(const Json &, WorkerInteraction &);
+
+using WorkerInteractionHandler =
+    std::function<WorkerInteractionResponse(const WorkerInteractionRequest &)>;
+
 // The transport boundary is lifecycle- and job-operation-complete. Native
 // plugins continue to implement WorkerAdapter below; supervised or remote
 // implementations can implement this interface without changing WorkerNode.
@@ -115,6 +165,9 @@ public:
   virtual WorkerStatus status(const std::string &external_job_id) = 0;
   virtual WorkerStatus result(const std::string &external_job_id) = 0;
   virtual bool cancel(const std::string &external_job_id) = 0;
+  // Optional for native adapters. Process transports use it to route bounded
+  // worker-originated approval/permission/question requests to LASO.
+  virtual void set_interaction_handler(WorkerInteractionHandler) {}
   virtual void start() = 0;
   virtual void stop() noexcept = 0;
 };
