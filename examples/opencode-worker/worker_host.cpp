@@ -444,7 +444,7 @@ std::optional<WorkerInteractionResponse> read_interaction_response(const std::st
 
 void route_opencode_interaction(OpenCodeServer &server, const Json &event,
                                 const std::string &job_id, const std::string &session,
-                                std::uint64_t timeout_ms) {
+                                const std::string &directory, std::uint64_t timeout_ms) {
   const auto type = event.value("type", std::string{});
   if (type != "permission.asked" && type != "question.asked")
     return;
@@ -491,12 +491,20 @@ void route_opencode_interaction(OpenCodeServer &server, const Json &event,
   if (!answer || answer->state == WorkerInteractionState::Denied ||
       answer->state == WorkerInteractionState::Cancelled ||
       answer->state == WorkerInteractionState::Expired) {
-    if (question)
-      (void)server.request(true, "/question/" + external_id + "/reject", Json::object());
-    else
-      (void)server.request(true, "/permission/" + external_id + "/reply",
-                            Json{{"reply", "reject"}, {"message", answer ? answer->reason :
-                                                                                 "LASO did not resolve the request"}});
+    if (question) {
+      const auto reply = server.request(true, "/question/" + external_id +
+                                                 "/reject?directory=" + encoded(directory),
+                                         Json::object());
+      if (reply.status < 200 || reply.status >= 300)
+        throw std::runtime_error("OpenCode rejected the question response");
+    } else {
+      const auto reply = server.request(
+          true, "/permission/" + external_id + "/reply?directory=" + encoded(directory),
+          Json{{"reply", "reject"},
+               {"message", answer ? answer->reason : "LASO did not resolve the request"}});
+      if (reply.status < 200 || reply.status >= 300)
+        throw std::runtime_error("OpenCode rejected the permission response");
+    }
     return;
   }
   try {
@@ -504,11 +512,17 @@ void route_opencode_interaction(OpenCodeServer &server, const Json &event,
       auto answers = answer->payload.value("answers", Json::array());
       if (!answers.is_array())
         answers = Json::array();
-      (void)server.request(true, "/question/" + external_id + "/reply",
-                           Json{{"answers", std::move(answers)}});
+      const auto reply = server.request(
+          true, "/question/" + external_id + "/reply?directory=" + encoded(directory),
+          Json{{"answers", std::move(answers)}});
+      if (reply.status < 200 || reply.status >= 300)
+        throw std::runtime_error("OpenCode rejected the question response");
     } else {
-      (void)server.request(true, "/permission/" + external_id + "/reply",
-                           Json{{"reply", "once"}});
+      const auto reply = server.request(
+          true, "/permission/" + external_id + "/reply?directory=" + encoded(directory),
+          Json{{"reply", "once"}});
+      if (reply.status < 200 || reply.status >= 300)
+        throw std::runtime_error("OpenCode rejected the permission response");
     }
   } catch (...) {
     // The OpenCode turn remains externally ambiguous if its interaction
@@ -609,7 +623,8 @@ int main(int argc, char **argv) {
           std::jthread watcher([&server, &job_id, &session, &canonical, timeout](std::stop_token stop) {
             server.watch(canonical.string(), stop, [&](const Json &event) {
               try {
-                route_opencode_interaction(server, event, job_id, session, timeout);
+                route_opencode_interaction(server, event, job_id, session, canonical.string(),
+                                           timeout);
               } catch (...) {
                 // A malformed/failed interaction is deliberately not turned
                 // into an approval. The active turn will time out or fail.
