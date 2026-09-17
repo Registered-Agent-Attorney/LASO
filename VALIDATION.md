@@ -11,8 +11,8 @@ SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress
 and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
 Linux CI are present.
 
-The test inventory contains **162 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario, for **164 CTest entries**. Composition,
+The test inventory contains **172 GoogleTest cases** plus **2 CTest entries** for CLI
+validation and a process smoke/restart scenario, for **174 CTest entries**. Composition,
 storage, event-ingress, and worker-adapter coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
@@ -22,8 +22,10 @@ source schema validation, durable external-event deduplication, source-state res
 offline plugin-to-trigger-to-pipeline execution, durable worker-job lifecycle,
 worker idempotency, concurrent duplicate submission, worker status/result/cancel
 correlation, optional normalized usage, execution budgets, transport/job failure
-classification, schema and policy enforcement at the worker boundary, late
-terminal event rejection, and manager restart reconciliation.
+classification, supervised process-worker framing, protocol mismatch, bounded
+timeouts, cancellation, shutdown, process exit, and separate-process pipeline
+execution, schema and policy enforcement at the worker boundary, late terminal
+event rejection, and manager restart reconciliation.
 
 ## Statically reviewed
 
@@ -120,10 +122,13 @@ and sanitizer runtime; global ASLR settings were not weakened to work around it.
 On the Linux x86-64 validation environment, this branch was validated from upstream commit
 `c9887eabd585a414789d6c43514e1ee3a221ca8b` using GCC Debug, an isolated local
 PostgreSQL 16 cluster on `127.0.0.1`, and serial Ninja builds. SQLite CTest
-completed **164/164**; PostgreSQL-enabled CTest completed **164/164**; and the
-ASan/UBSan CTest completed **164/164** with leak detection enabled. The added
+ran 174 tests (**172 passed, 2 PostgreSQL tests skipped**); PostgreSQL-enabled
+CTest completed **174/174**; and the ASan/UBSan CTest ran 174 tests (**172 passed,
+2 PostgreSQL tests skipped**) with leak detection enabled. The added
 worker tests cover no/partial/full usage, persistence, wall/token/cost budgets,
-and transport-versus-job failures. SQLite and PostgreSQL server smoke tests both
+transport-versus-job failures, and the supervised local process protocol. The
+process-worker suite adds 10 focused tests, including a separate-process
+pipeline and bounded child cleanup. SQLite and PostgreSQL server smoke tests both
 passed health, version, Hello, and run inspection; PostgreSQL state remained
 available after a server restart. The shipped worker-adapter example completed
 successfully. No credentials or DSNs were written to tracked files.
