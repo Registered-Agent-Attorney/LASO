@@ -337,6 +337,12 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
     existing->external_job_id = submission.external_job_id;
     existing->state = submission.state;
     existing->result_metadata = submission.metadata;
+    if (!submission.result.is_null())
+      existing->result = submission.result;
+    if (!submission.artifacts.empty())
+      existing->artifacts = submission.artifacts;
+    if (!submission.error.empty())
+      existing->error = bounded_error(submission.error);
     merge_usage(existing->usage, submission.usage);
     if (existing->external_job_id.empty() ||
         existing->external_job_id.size() > max_external_id_bytes)
@@ -404,6 +410,12 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
     created.external_job_id = submission.external_job_id;
     created.state = submission.state;
     created.result_metadata = submission.metadata;
+    if (!submission.result.is_null())
+      created.result = submission.result;
+    if (!submission.artifacts.empty())
+      created.artifacts = submission.artifacts;
+    if (!submission.error.empty())
+      created.error = bounded_error(submission.error);
     merge_usage(created.usage, submission.usage);
     if (worker_job_terminal(created.state))
       created.completed_at = timestamp();
