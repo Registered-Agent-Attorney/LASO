@@ -11,8 +11,8 @@ WorkerNode -> WorkerManager -> ProcessWorkerTransport
 
 ## Installed interface
 
-The Linux x86-64 validation environment validation used OpenCode `1.18.29` and its local headless server
-interface. The adapter starts `opencode serve` directly on a loopback-only
+Validation used OpenCode `1.18.29` and its local headless server interface. The
+adapter starts `opencode serve` directly on a loopback-only
 configured port, uses structured session creation and message endpoints, and
 consumes returned session/message JSON. It does not scrape human terminal
 output. The adapter has no Codex, Claude, provider-auth, or pricing logic.
@@ -86,3 +86,10 @@ root check prevents adapter-directed path escape, while OpenCode itself must be
 trusted for the selected project. Remote worker networking, OS/container
 sandboxing, distributed leasing, and automatic multi-instance execution are
 outside this change.
+
+The adapter is optional and is disabled in the default CMake build. Enable it
+with `-DLASO_BUILD_OPENCODE_ADAPTER=ON` when OpenCode integration is required.
+The generic worker-request and process-transport tests remain part of the
+default build. The bounded real integration exercise did not trigger an
+OpenCode permission or question event; that vendor-specific path is therefore
+partially validated rather than claimed as complete.
