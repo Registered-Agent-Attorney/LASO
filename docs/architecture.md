@@ -1,7 +1,7 @@
 # Architecture and ownership
 
 The public API is C++20. The shared-library extension boundary is C. The framework
-version (0.1.0), YAML format (1), SQLite schema (3), and plugin ABI (1) are distinct.
+version (0.1.0), YAML format (1), SQLite schema (4), and plugin ABI (1) are distinct.
 
 | Target | Responsibility and dependencies |
 |---|---|
@@ -118,5 +118,8 @@ cancel callbacks. `WorkerNode` creates a durable `WorkerJob`, submits through th
 configured adapter, and waits by observing the durable record while status events
 arrive through EventIngress. Completion becomes a normal node message, so the
 existing schema, policy, retry, deadline, cancellation, provenance, and storage
-paths remain authoritative. Worker adapters are privileged in-process code and
-are not distributed LASO workers; see [worker adapters](workers.md).
+paths remain authoritative. Normalized optional usage is persisted with the job,
+and generic wall/token/cost budgets are enforced by the manager without vendor
+pricing or billing logic. `WorkerAdapter` remains the trusted native in-process
+implementation of the transport boundary; a future supervised or remote
+transport is only an architectural seam. See [worker adapters](workers.md).

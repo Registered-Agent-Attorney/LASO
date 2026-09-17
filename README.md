@@ -146,7 +146,11 @@ providers remain available; other component kinds have reserved IDs and return
 sources use the ABI lifecycle suffix and a bounded thread-safe host callback to
 submit canonical events; they never create runs directly. Worker adapters submit
 durable jobs and report status through the same event ingress path; they never
-create pipeline runs directly.
+create pipeline runs directly. Worker usage is optional and normalized when
+reported; generic per-job wall-time and per-run token/cost budgets are available
+without vendor pricing or billing logic. The transport boundary is
+backend-neutral, while the shipped implementation remains the trusted native
+in-process adapter. Supervised or remote workers are future work.
 
 **Loading a native LASO plugin grants that plugin code execution inside the LASO
 process.** Metadata validation does not isolate native code. See the
