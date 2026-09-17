@@ -703,15 +703,17 @@ public:
       return registration_.submit(registration_.instance, text.data(), text.size(), context);
     });
     if (status != LASO_OK)
-      throw Error(ErrorCode::Plugin, "Worker submission failed");
+      throw WorkerTransportError("Worker submission transport failed");
     const auto response = Json::parse(output, nullptr, false);
     if (response.is_discarded() || !response.is_object())
-      throw Error(ErrorCode::Plugin, "Worker submission response is invalid");
+      throw WorkerTransportError("Worker submission response is invalid");
     WorkerSubmission result;
     result.external_job_id = response.value("external_job_id", std::string{});
     if (response.contains("status"))
       result.state = response.at("status").get<WorkerJobState>();
     result.metadata = response.value("metadata", Json::object());
+    if (response.contains("usage"))
+      result.usage = response.at("usage").get<WorkerUsage>();
     return result;
   }
 
@@ -723,7 +725,7 @@ public:
     if (status_code == LASO_UNSUPPORTED)
       return {};
     if (status_code != LASO_OK)
-      throw Error(ErrorCode::Plugin, "Worker status request failed");
+      throw WorkerTransportError("Worker status transport failed");
     return parse_status(output);
   }
 
@@ -735,7 +737,7 @@ public:
     if (status_code == LASO_UNSUPPORTED)
       return {};
     if (status_code != LASO_OK)
-      throw Error(ErrorCode::Plugin, "Worker result request failed");
+      throw WorkerTransportError("Worker result transport failed");
     return parse_status(output);
   }
 
@@ -768,7 +770,7 @@ private:
   static WorkerStatus parse_status(const std::string &output) {
     const auto json = Json::parse(output, nullptr, false);
     if (json.is_discarded() || !json.is_object())
-      throw Error(ErrorCode::Plugin, "Worker status response is invalid");
+      throw WorkerTransportError("Worker status response is invalid");
     WorkerStatus result;
     if (json.contains("status"))
       result.state = json.at("status").get<WorkerJobState>();
@@ -776,6 +778,8 @@ private:
     result.metadata = json.value("metadata", Json::object());
     result.artifacts = json.value("artifacts", std::vector<Json>{});
     result.error = json.value("error", std::string{});
+    if (json.contains("usage"))
+      result.usage = json.at("usage").get<WorkerUsage>();
     return result;
   }
   std::shared_ptr<Library> library_;
@@ -876,8 +880,8 @@ void PluginLoader::load(const std::filesystem::path &path) {
     if (workers_)
       for (const auto &name : workers_->names())
         worker_names.insert(name);
-    std::vector<std::shared_ptr<WorkerAdapter>> worker_batch_adapters;
-    std::map<std::string, std::shared_ptr<WorkerAdapter>> worker_batch;
+    std::vector<std::shared_ptr<WorkerTransport>> worker_batch_adapters;
+    std::map<std::string, std::shared_ptr<WorkerTransport>> worker_batch;
     for (auto &registration : staging.workers) {
       const WorkerConfig *configuration = nullptr;
       std::string worker_id;
