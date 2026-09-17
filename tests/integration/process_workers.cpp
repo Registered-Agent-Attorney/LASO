@@ -264,6 +264,7 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
   HttpServer server(io, api, "127.0.0.1", 0);
   server.start();
   std::jthread executor([&] { io.run(); });
+  std::jthread executor2([&] { io.run(); });
 
   const auto started = http_request(
       server.port(), boost::beast::http::verb::post,
@@ -309,4 +310,5 @@ TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
   server.stop();
   service.shutdown();
   executor.join();
+  executor2.join();
 }
