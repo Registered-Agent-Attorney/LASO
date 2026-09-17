@@ -103,6 +103,12 @@ Service::Service(asio::io_context &io, Config config)
                    std::make_shared<LocalOpenAICompatibleProvider>(config_.local_openai_endpoint));
   tools_.add("echo", std::make_shared<EchoTool>());
   register_functions(functions_);
+  for (const auto &[id, process_config] : config_.process_workers) {
+    auto transport = std::make_shared<ProcessWorkerTransport>(id, process_config);
+    worker_registry_.add(id, transport);
+    process_workers_.push_back(transport);
+    transport->start();
+  }
   plugins_.discover(config_.plugin_dirs, config_.event_sources, config_.worker_plugins);
   for (const auto &source : plugins_.event_sources())
     if (!source.value("event_schema", std::string{}).empty())
@@ -434,10 +440,13 @@ void Service::set_event_source_enabled(const std::string &id, bool enabled) {
   plugins_.set_event_source_enabled(id, enabled);
 }
 Json Service::workers() const {
-  return plugins_.workers();
+  Json result = Json::array();
+  for (const auto &id : worker_registry_.names())
+    result.push_back(worker_registry_.get(id)->metadata());
+  return result;
 }
 Json Service::worker(const std::string &id) const {
-  return plugins_.worker(id);
+  return Json(worker_registry_.get(id)->metadata());
 }
 std::vector<Json> Service::worker_jobs(const std::string &run_id, std::size_t limit,
                                        std::size_t offset) const {
@@ -559,6 +568,8 @@ void Service::shutdown() {
   scheduler_.stop();
   runtime_.shutdown();
   plugins_.stop_workers();
+  for (auto it = process_workers_.rbegin(); it != process_workers_.rend(); ++it)
+    (*it)->stop();
 }
 void Service::recover_history() {
   for (std::size_t offset = 0;; offset += 1000) {
