@@ -1,4 +1,5 @@
 #include "../support.hpp"
+#include <cstdlib>
 #include <fstream>
 #include <laso/workers/process_transport.hpp>
 #include <thread>
@@ -66,8 +67,7 @@ TEST(ProcessWorker, HandshakeAndSubmitStatusResultLifecycle) {
   EXPECT_TRUE(submission.result.at("ok"));
   EXPECT_EQ(submission.usage.total_tokens, std::optional<std::uint64_t>(5));
   EXPECT_EQ(transport.status(submission.external_job_id).state, WorkerJobState::Completed);
-  EXPECT_EQ(transport.result(submission.external_job_id).result.at("worker"),
-            "process-reference");
+  EXPECT_EQ(transport.result(submission.external_job_id).result.at("worker"), "process-reference");
 }
 
 TEST(ProcessWorker, VersionMismatchIsTransportFailure) {
@@ -88,6 +88,23 @@ TEST(ProcessWorker, UsageIsOptionalAndPropagatedWhenReported) {
   EXPECT_EQ(result.usage.output_tokens, std::optional<std::uint64_t>(2));
 }
 
+TEST(ProcessWorker, ExplicitEnvironmentOverridesParentWithoutImplicitInheritance) {
+  struct EnvironmentGuard {
+    ~EnvironmentGuard() {
+      (void)::unsetenv("LASO_PARENT_SECRET");
+    }
+  } guard;
+  ASSERT_EQ(::setenv("LASO_PARENT_SECRET", "must-not-cross-process-boundary", 1), 0);
+  auto config = worker_config("environment");
+  config.environment["LASO_REFERENCE"] = "enabled";
+  ProcessWorkerTransport transport("process", std::move(config));
+  ASSERT_NO_THROW(transport.start());
+  const auto result = transport.submit(request());
+  EXPECT_FALSE(result.result.at("parent_secret_inherited"));
+  EXPECT_EQ(result.result.at("explicit_override"), "enabled");
+  transport.stop();
+}
+
 TEST(ProcessWorker, WorkerFailureIsDistinctFromTransportFailure) {
   ProcessWorkerTransport transport("process", worker_config("failure"));
   transport.start();
@@ -100,9 +117,9 @@ TEST(ProcessWorker, WorkerFailureIsDistinctFromTransportFailure) {
 }
 
 TEST(ProcessWorker, MalformedOversizedExitAndHangAreBoundedFailures) {
-  for (const auto &mode : {std::string("malformed"), std::string("oversized"),
-                           std::string("truncated"),
-                           std::string("exit-after-hello"), std::string("hang")}) {
+  for (const auto &mode :
+       {std::string("malformed"), std::string("oversized"), std::string("truncated"),
+        std::string("exit-after-hello"), std::string("hang")}) {
     ProcessWorkerTransport transport("process", worker_config(mode, 150));
     ASSERT_NO_THROW(transport.start()) << mode;
     EXPECT_THROW(transport.submit(request()), WorkerTransportError) << mode;
@@ -123,10 +140,10 @@ TEST(ProcessWorker, ConfigurationUsesExplicitExecutableAndEnvironmentBoundary) {
   TemporaryDirectory dir;
   const auto path = dir.path / "process.yaml";
   std::ofstream(path) << "process_workers:\n  example:\n    executable: "
-                         << LASO_PROCESS_WORKER_HOST
-                         << "\n    args: [--mode, success]\n    environment_allowlist: [PATH]\n"
-                            "    environment: {LASO_REFERENCE: enabled}\n    startup_timeout_ms: 700\n"
-                            "    request_timeout_ms: 800\n";
+                      << LASO_PROCESS_WORKER_HOST
+                      << "\n    args: [--mode, success]\n    environment_allowlist: [PATH]\n"
+                         "    environment: {LASO_REFERENCE: enabled}\n    startup_timeout_ms: 700\n"
+                         "    request_timeout_ms: 800\n";
   const auto loaded = load_config(path);
   ASSERT_EQ(loaded.process_workers.size(), 1U);
   EXPECT_EQ(loaded.process_workers.at("example").executable, LASO_PROCESS_WORKER_HOST);
@@ -164,6 +181,18 @@ TEST(ProcessWorker, ServiceExecutesPipelineThroughSeparateProcess) {
   EXPECT_EQ(jobs.front().at("status"), "Completed");
   EXPECT_EQ(jobs.front().at("failure_kind"), "none");
   EXPECT_EQ(jobs.front().at("usage").at("total_tokens"), 5);
+}
+
+TEST(ProcessWorker, ServicePollsQueuedProcessWorkerToCompletion) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto config = laso::test::config(dir.path);
+  config.process_workers.emplace("process", worker_config("delay"));
+  config.validate();
+  Service service(io, config);
+  const auto run = execute(service, io, process_pipeline(), {{"value", 7}});
+  EXPECT_EQ(run.state, RunState::Completed);
+  EXPECT_EQ(run.message.payload.at("mode"), "delay");
 }
 
 TEST(ProcessWorker, ServiceRecordsTransportFailureWithoutResubmission) {

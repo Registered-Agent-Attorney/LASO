@@ -60,6 +60,9 @@ unexpected, or version-incompatible frames are transport failures.
 LASO executes the configured absolute executable directly with an argument
 vector; it never interpolates a shell command. The child receives an empty
 environment by default, plus explicitly configured overrides and values named
-by an environment allowlist. This is process isolation and lifecycle
-supervision, not an OS/container sandbox. The child can affect LASO only by
-returning protocol messages.
+by an environment allowlist. Explicit overrides win when a name is present in
+both sources. Configuration rejects NUL characters, duplicate allowlist names,
+and oversized values; the total child environment is bounded to 64 KiB at
+launch. This is process isolation and lifecycle supervision, not an
+OS/container sandbox. The child can affect LASO only by returning protocol
+messages.

@@ -57,8 +57,12 @@ public:
     result.usage = status_usage;
     return result;
   }
-  WorkerStatus result(const std::string &) override { return {}; }
-  bool cancel(const std::string &) override { return true; }
+  WorkerStatus result(const std::string &) override {
+    return {};
+  }
+  bool cancel(const std::string &) override {
+    return true;
+  }
   void start() override {}
   void stop() noexcept override {}
 
@@ -428,11 +432,15 @@ TEST(Workers, UsageMetadataPersistsAcrossRestartAndCompletionEvents) {
     Event completed;
     completed.source_id = "";
     completed.type = "worker.job.completed";
-    completed.payload = { {"job_id", created.id}, {"external_job_id", "external-usage"},
-                          {"result", {{"ok", true}}},
-                          {"usage", {{"queue_duration_ms", 4}, {"wall_duration_ms", 9},
-                                      {"input_tokens", 2}, {"output_tokens", 3},
-                                      {"cost_units", 0.25}}} };
+    completed.payload = {{"job_id", created.id},
+                         {"external_job_id", "external-usage"},
+                         {"result", {{"ok", true}}},
+                         {"usage",
+                          {{"queue_duration_ms", 4},
+                           {"wall_duration_ms", 9},
+                           {"input_tokens", 2},
+                           {"output_tokens", 3},
+                           {"cost_units", 0.25}}}};
     // The synthetic adapter has no event source identity; use the persisted
     // adapter identity only after replacing it with the expected source.
     completed.source_id = "worker.usage";
@@ -492,6 +500,51 @@ TEST(Workers, WorkerBudgetsAcceptAndRejectDeterministically) {
   EXPECT_EQ(cost_rejected.state, WorkerJobState::Failed);
   EXPECT_EQ(cost_rejected.failure_kind, WorkerFailureKind::Budget);
   EXPECT_EQ(cost_rejected.error, "worker cost_units budget exceeded");
+}
+
+TEST(Workers, ConcurrentCompletionUsageUpdatesAreSerializedForBudgets) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  WorkerManager manager(*storage, registry, 32, 16, 16, 0, 10, 0.0);
+  WorkerRequest request;
+  request.worker_id = "usage";
+  request.run_id = "concurrent-budget-run";
+  request.node_id = "work";
+  request.idempotency_key = "concurrent-budget-1";
+  const auto first = manager.submit(request);
+  request.idempotency_key = "concurrent-budget-2";
+  const auto second = manager.submit(request);
+
+  const auto completion = [](const std::string &job_id) {
+    Event event;
+    event.id = "completion-" + job_id;
+    event.source_id = "worker.usage";
+    event.type = "worker.job.completed";
+    event.payload = {{"job_id", job_id},
+                     {"external_job_id", "external-usage"},
+                     {"result", {{"ok", true}}},
+                     {"usage", {{"total_tokens", 6}}}};
+    return event;
+  };
+  auto first_event = completion(first.id);
+  auto second_event = completion(second.id);
+  std::thread first_thread([&] { manager.receive(first_event); });
+  std::thread second_thread([&] { manager.receive(second_event); });
+  first_thread.join();
+  second_thread.join();
+
+  const auto first_after = manager.job(first.id);
+  const auto second_after = manager.job(second.id);
+  EXPECT_NE(first_after.state, second_after.state);
+  EXPECT_TRUE(first_after.state == WorkerJobState::Completed ||
+              second_after.state == WorkerJobState::Completed);
+  EXPECT_TRUE(first_after.state == WorkerJobState::Failed ||
+              second_after.state == WorkerJobState::Failed);
+  const auto failed = first_after.state == WorkerJobState::Failed ? first_after : second_after;
+  EXPECT_EQ(failed.failure_kind, WorkerFailureKind::Budget);
 }
 
 TEST(Workers, TransportAndJobFailuresRemainDistinguishable) {

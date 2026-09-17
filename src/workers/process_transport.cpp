@@ -5,8 +5,11 @@
 #include <cstring>
 #include <fcntl.h>
 #include <laso/workers/process_transport.hpp>
+#include <limits>
+#include <map>
 #include <poll.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -29,8 +32,19 @@ void nonblocking(int fd) {
     throw WorkerTransportError("Unable to configure worker process pipe");
 }
 
+void reserve_process_fd(int &fd) {
+  if (fd >= STDERR_FILENO + 1)
+    return;
+  const auto replacement = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+  if (replacement < 0)
+    throw WorkerTransportError("Unable to reserve worker process pipe");
+  ::close(fd);
+  fd = replacement;
+}
+
 int remaining_ms(Clock::time_point deadline) {
-  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+  const auto remaining =
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
   if (remaining.count() <= 0)
     return 0;
   return static_cast<int>(std::min<std::int64_t>(remaining.count(), 60000));
@@ -54,7 +68,9 @@ struct ProcessWorkerTransport::Impl {
     metadata_.status = "stopped";
   }
 
-  ~Impl() { stop(); }
+  ~Impl() {
+    stop();
+  }
 
   WorkerMetadata metadata() const {
     std::lock_guard lock(mutex);
@@ -69,14 +85,19 @@ struct ProcessWorkerTransport::Impl {
     metadata_.healthy = false;
     try {
       spawn_locked();
-      const auto response = request_locked(
-          "hello", "", "", Json{{"client", "laso"}}, config.startup_timeout_ms);
+      const auto response =
+          request_locked("hello", "", "", Json{{"client", "laso"}}, config.startup_timeout_ms);
       if (!response.value("ok", false))
         throw WorkerTransportError("Worker hello was rejected");
       if (!response.contains("metadata") || !response.at("metadata").is_object() ||
           response.at("metadata").dump().size() > process_protocol::max_metadata_bytes)
         throw WorkerTransportError("Worker hello metadata is invalid");
-      auto reported = response.at("metadata").get<WorkerMetadata>();
+      WorkerMetadata reported;
+      try {
+        reported = response.at("metadata").get<WorkerMetadata>();
+      } catch (...) {
+        throw WorkerTransportError("Worker hello metadata has invalid fields");
+      }
       metadata_ = std::move(reported);
       metadata_.id = id;
       metadata_.plugin = "process";
@@ -111,8 +132,8 @@ struct ProcessWorkerTransport::Impl {
                  {"output_schema", request.output_schema},
                  {"metadata", request.metadata},
                  {"artifact_ids", request.artifact_ids}};
-    return parse_submission_locked(request.job_id, request_response_locked("submit", request.job_id,
-                                                                            "", payload));
+    return parse_submission_locked(request.job_id,
+                                   request_response_locked("submit", request.job_id, "", payload));
   }
 
   WorkerStatus status(const std::string &external_job_id) {
@@ -182,44 +203,110 @@ private:
       close_fd(child_error[1]);
       throw WorkerTransportError("Unable to create worker process pipes");
     }
-    std::vector<std::string> inherited;
+    try {
+      reserve_process_fd(child_input[0]);
+      reserve_process_fd(child_input[1]);
+      reserve_process_fd(child_output[0]);
+      reserve_process_fd(child_output[1]);
+      reserve_process_fd(child_error[0]);
+      reserve_process_fd(child_error[1]);
+    } catch (...) {
+      close_fd(child_input[0]);
+      close_fd(child_input[1]);
+      close_fd(child_output[0]);
+      close_fd(child_output[1]);
+      close_fd(child_error[0]);
+      close_fd(child_error[1]);
+      throw;
+    }
+    const auto close_spawn_fds = [&]() noexcept {
+      close_fd(child_input[0]);
+      close_fd(child_input[1]);
+      close_fd(child_output[0]);
+      close_fd(child_output[1]);
+      close_fd(child_error[0]);
+      close_fd(child_error[1]);
+    };
+    std::map<std::string, std::string> environment_values;
     for (const auto &name : config.environment_allowlist)
       if (const auto *value = std::getenv(name.c_str()))
-        inherited.push_back(name + "=" + value);
+        environment_values[name] = value;
     for (const auto &[name, value] : config.environment)
-      inherited.push_back(name + "=" + value);
-    pid = ::fork();
-    if (pid < 0) {
-      close_fd(child_input[0]);
-      close_fd(child_input[1]);
-      close_fd(child_output[0]);
-      close_fd(child_output[1]);
-      close_fd(child_error[0]);
-      close_fd(child_error[1]);
-      throw WorkerTransportError("Unable to start worker process");
+      environment_values[name] = value;
+    std::size_t environment_bytes = 0;
+    std::vector<std::string> environment_entries;
+    environment_entries.reserve(environment_values.size());
+    for (const auto &[name, value] : environment_values) {
+      if (name.size() > std::numeric_limits<std::size_t>::max() - value.size() - 2 ||
+          name.size() + value.size() + 2 > 65536 ||
+          environment_bytes > 65536 - (name.size() + value.size() + 2)) {
+        close_spawn_fds();
+        throw WorkerTransportError("Worker environment exceeds the limit");
+      }
+      environment_entries.push_back(name + "=" + value);
+      environment_bytes += name.size() + value.size() + 2;
     }
-    if (pid == 0) {
-      ::setpgid(0, 0);
-      ::dup2(child_input[0], STDIN_FILENO);
-      ::dup2(child_output[1], STDOUT_FILENO);
-      ::dup2(child_error[1], STDERR_FILENO);
-      close_fd(child_input[0]);
-      close_fd(child_input[1]);
-      close_fd(child_output[0]);
-      close_fd(child_output[1]);
-      close_fd(child_error[0]);
-      close_fd(child_error[1]);
-      std::vector<char *> environment;
-      for (auto &entry : inherited)
-        environment.push_back(entry.data());
-      environment.push_back(nullptr);
-      std::vector<char *> arguments;
-      arguments.push_back(const_cast<char *>(config.executable.c_str()));
-      for (auto &arg : config.args)
-        arguments.push_back(arg.data());
-      arguments.push_back(nullptr);
-      ::execve(config.executable.c_str(), arguments.data(), environment.data());
-      _exit(127);
+    std::vector<char *> environment;
+    environment.reserve(environment_entries.size() + 1);
+    for (auto &entry : environment_entries)
+      environment.push_back(entry.data());
+    environment.push_back(nullptr);
+
+    std::vector<char *> arguments;
+    arguments.reserve(config.args.size() + 2);
+    arguments.push_back(const_cast<char *>(config.executable.c_str()));
+    for (auto &arg : config.args)
+      arguments.push_back(arg.data());
+    arguments.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    if (::posix_spawn_file_actions_init(&actions) != 0) {
+      close_spawn_fds();
+      throw WorkerTransportError("Unable to configure worker process");
+    }
+    if (::posix_spawnattr_init(&attributes) != 0) {
+      (void)::posix_spawn_file_actions_destroy(&actions);
+      close_spawn_fds();
+      throw WorkerTransportError("Unable to configure worker process");
+    }
+    auto destroy_spawn_state = [&]() noexcept {
+      (void)::posix_spawn_file_actions_destroy(&actions);
+      (void)::posix_spawnattr_destroy(&attributes);
+    };
+    const auto add_action = [&](int result) {
+      if (result != 0)
+        throw WorkerTransportError("Unable to configure worker process pipes");
+    };
+    const auto add_close_if_distinct = [&](int descriptor, int target) {
+      if (descriptor != target)
+        add_action(::posix_spawn_file_actions_addclose(&actions, descriptor));
+    };
+    try {
+      add_action(::posix_spawn_file_actions_adddup2(&actions, child_input[0], STDIN_FILENO));
+      add_action(::posix_spawn_file_actions_adddup2(&actions, child_output[1], STDOUT_FILENO));
+      add_action(::posix_spawn_file_actions_adddup2(&actions, child_error[1], STDERR_FILENO));
+      add_close_if_distinct(child_input[0], STDIN_FILENO);
+      add_close_if_distinct(child_input[1], STDIN_FILENO);
+      add_close_if_distinct(child_output[0], STDOUT_FILENO);
+      add_close_if_distinct(child_output[1], STDOUT_FILENO);
+      add_close_if_distinct(child_error[0], STDERR_FILENO);
+      add_close_if_distinct(child_error[1], STDERR_FILENO);
+      short flags = POSIX_SPAWN_SETPGROUP;
+      add_action(::posix_spawnattr_setflags(&attributes, flags));
+      add_action(::posix_spawnattr_setpgroup(&attributes, 0));
+    } catch (...) {
+      destroy_spawn_state();
+      close_spawn_fds();
+      throw;
+    }
+    const auto spawn_result = ::posix_spawn(&pid, config.executable.c_str(), &actions, &attributes,
+                                            arguments.data(), environment.data());
+    destroy_spawn_state();
+    if (spawn_result != 0) {
+      pid = -1;
+      close_spawn_fds();
+      throw WorkerTransportError("Unable to start worker process");
     }
     close_fd(child_input[0]);
     close_fd(child_output[1]);
@@ -299,8 +386,8 @@ private:
     for (;;) {
       const auto count = ::read(error_fd, buffer, sizeof(buffer));
       if (count > 0) {
-        if (stderr_capture.size() > process_protocol::max_stderr_bytes -
-                                  static_cast<std::size_t>(count))
+        if (stderr_capture.size() >
+            process_protocol::max_stderr_bytes - static_cast<std::size_t>(count))
           throw WorkerTransportError("Worker stderr exceeds the capture limit");
         stderr_capture.append(buffer, static_cast<std::size_t>(count));
       } else if (count < 0 && (errno == EAGAIN || errno == EINTR)) {
@@ -333,8 +420,7 @@ private:
           frame.append(buffer, static_cast<std::size_t>(received));
           const auto newline = frame.find('\n');
           if (newline != std::string::npos) {
-            if (newline > process_protocol::max_frame_bytes ||
-                frame.size() > newline + 1)
+            if (newline > process_protocol::max_frame_bytes || frame.size() > newline + 1)
               throw WorkerTransportError("Worker sent multiple or oversized frames");
             frame.resize(newline);
             if (!frame.empty() && frame.back() == '\r')
@@ -358,8 +444,8 @@ private:
   }
 
   Json request_locked(const std::string &operation, const std::string &job_id,
-                     const std::string &external_job_id, const Json &payload,
-                     std::uint64_t timeout_ms) {
+                      const std::string &external_job_id, const Json &payload,
+                      std::uint64_t timeout_ms) {
     const auto request_id = "req-" + std::to_string(++request_number);
     Json request{{"protocol_version", process_protocol::version},
                  {"request_id", request_id},
@@ -376,7 +462,8 @@ private:
     const auto response = Json::parse(response_wire, nullptr, false);
     if (response.is_discarded() || !response.is_object())
       throw WorkerTransportError("Worker response is not valid JSON");
-    if (!response.contains("protocol_version") || !response.at("protocol_version").is_number_unsigned() ||
+    if (!response.contains("protocol_version") ||
+        !response.at("protocol_version").is_number_unsigned() ||
         response.at("protocol_version").get<std::uint32_t>() != process_protocol::version)
       throw WorkerTransportError("Worker protocol version is incompatible");
     if (!response.contains("request_id") || !response.at("request_id").is_string() ||
@@ -495,7 +582,9 @@ private:
 ProcessWorkerTransport::ProcessWorkerTransport(std::string id, ProcessWorkerConfig config)
     : impl_(std::make_unique<Impl>(std::move(id), std::move(config))) {}
 ProcessWorkerTransport::~ProcessWorkerTransport() noexcept = default;
-WorkerMetadata ProcessWorkerTransport::metadata() const { return impl_->metadata(); }
+WorkerMetadata ProcessWorkerTransport::metadata() const {
+  return impl_->metadata();
+}
 WorkerSubmission ProcessWorkerTransport::submit(const WorkerRequest &request) {
   return impl_->submit(request);
 }
@@ -508,6 +597,10 @@ WorkerStatus ProcessWorkerTransport::result(const std::string &external_job_id) 
 bool ProcessWorkerTransport::cancel(const std::string &external_job_id) {
   return impl_->cancel(external_job_id);
 }
-void ProcessWorkerTransport::start() { impl_->start(); }
-void ProcessWorkerTransport::stop() noexcept { impl_->stop(); }
+void ProcessWorkerTransport::start() {
+  impl_->start();
+}
+void ProcessWorkerTransport::stop() noexcept {
+  impl_->stop();
+}
 } // namespace laso
