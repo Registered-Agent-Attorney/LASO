@@ -94,7 +94,7 @@ target_link_libraries(laso_plugin_loader PUBLIC laso_core PRIVATE ${CMAKE_DL_LIB
 add_library(laso_runtime src/runtime/executor.cpp src/nodes/nodes.cpp src/runtime/runtime.cpp src/runtime/graph.cpp src/runtime/execution.cpp src/scheduler/scheduler.cpp)
 laso_target(laso_runtime)
 target_link_libraries(laso_runtime PUBLIC laso_core laso_storage)
-add_library(laso_application src/application/service.cpp src/application/event_ingress.cpp src/workers/manager.cpp)
+add_library(laso_application src/application/service.cpp src/application/event_ingress.cpp src/workers/manager.cpp src/workers/process_transport.cpp)
 laso_target(laso_application)
 target_link_libraries(laso_application PUBLIC laso_runtime laso_storage laso_plugin_loader)
 add_library(laso_api src/api/api.cpp src/api/server.cpp)

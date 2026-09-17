@@ -62,6 +62,32 @@ void Config::validate() {
         worker.event_schema.size() > 512 || worker.config.dump().size() > std::size_t{1024} * 1024)
       throw Error(ErrorCode::Configuration, "Invalid worker configuration");
   }
+  if (process_workers.size() > 64)
+    throw Error(ErrorCode::Configuration, "Too many process workers");
+  for (const auto &[id, worker] : process_workers) {
+    if (!std::regex_match(id, source_id_pattern) || worker.executable.empty() ||
+        worker.executable.size() > 4096 || worker.executable.front() != '/')
+      throw Error(ErrorCode::Configuration, "Invalid process worker executable");
+    std::size_t argument_bytes = 0;
+    for (const auto &arg : worker.args) {
+      if (arg.size() > 4096 || argument_bytes > 65536 ||
+          arg.size() + 1 > 65536 - argument_bytes)
+        throw Error(ErrorCode::Configuration, "Invalid process worker arguments");
+      argument_bytes += arg.size() + 1;
+    }
+    if (worker.args.size() > 128 || worker.environment_allowlist.size() > 64 ||
+        worker.environment.size() > 64 || worker.startup_timeout_ms == 0 ||
+        worker.startup_timeout_ms > 60000 || worker.request_timeout_ms == 0 ||
+        worker.request_timeout_ms > 60000)
+      throw Error(ErrorCode::Configuration, "Invalid process worker limits");
+    static const std::regex env_name("[A-Za-z_][A-Za-z0-9_]{0,127}");
+    for (const auto &name : worker.environment_allowlist)
+      if (!std::regex_match(name, env_name))
+        throw Error(ErrorCode::Configuration, "Invalid process worker environment name");
+    for (const auto &[name, value] : worker.environment)
+      if (!std::regex_match(name, env_name) || value.size() > 4096)
+        throw Error(ErrorCode::Configuration, "Invalid process worker environment");
+  }
 }
 Config load_config(const std::filesystem::path &supplied,
                    const std::map<std::string, std::string> &overrides) {
@@ -176,6 +202,55 @@ Config load_config(const std::filesystem::path &supplied,
               cfg.config = detail::yaml_value(node["config"]);
             if (!c.worker_plugins.emplace(id, std::move(cfg)).second)
               throw Error(ErrorCode::Configuration, "Duplicate worker id");
+          }
+        } else if (key == "process_workers") {
+          if (!pair.second.IsMap())
+            throw Error(ErrorCode::Configuration, "process_workers must be a map");
+          for (const auto &worker : pair.second) {
+            const auto id = worker.first.as<std::string>();
+            if (!std::regex_match(id, std::regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")))
+              throw Error(ErrorCode::Configuration, "Invalid process worker id");
+            const auto node = worker.second;
+            if (!node.IsMap())
+              throw Error(ErrorCode::Configuration, "Process worker must be a map");
+            std::set<std::string> fields;
+            for (const auto &field : node)
+              if (!fields.insert(field.first.as<std::string>()).second)
+                throw Error(ErrorCode::Configuration, "Duplicate process worker field");
+            for (const auto &field : fields)
+              if (field != "executable" && field != "args" &&
+                  field != "environment_allowlist" && field != "environment" &&
+                  field != "startup_timeout_ms" && field != "request_timeout_ms")
+                throw Error(ErrorCode::Configuration, "Unknown process worker field");
+            ProcessWorkerConfig cfg;
+            if (!node["executable"])
+              throw Error(ErrorCode::Configuration, "Process worker executable is required");
+            cfg.executable = node["executable"].as<std::string>();
+            auto sequence = [](const YAML::Node &value, const char *name) {
+              std::vector<std::string> result;
+              if (!value.IsSequence())
+                throw Error(ErrorCode::Configuration, std::string(name) + " must be a sequence");
+              for (const auto &entry : value)
+                result.push_back(entry.as<std::string>());
+              return result;
+            };
+            if (node["args"])
+              cfg.args = sequence(node["args"], "args");
+            if (node["environment_allowlist"])
+              cfg.environment_allowlist = sequence(node["environment_allowlist"],
+                                                   "environment_allowlist");
+            if (node["environment"]) {
+              if (!node["environment"].IsMap())
+                throw Error(ErrorCode::Configuration, "environment must be a map");
+              for (const auto &entry : node["environment"])
+                cfg.environment.emplace(entry.first.as<std::string>(), entry.second.as<std::string>());
+            }
+            if (node["startup_timeout_ms"])
+              cfg.startup_timeout_ms = node["startup_timeout_ms"].as<std::uint64_t>();
+            if (node["request_timeout_ms"])
+              cfg.request_timeout_ms = node["request_timeout_ms"].as<std::uint64_t>();
+            if (!c.process_workers.emplace(id, std::move(cfg)).second)
+              throw Error(ErrorCode::Configuration, "Duplicate process worker id");
           }
         } else
           values[key] = pair.second.as<std::string>();
