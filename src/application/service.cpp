@@ -51,12 +51,10 @@ Service::Service(asio::io_context &io, Config config)
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
                config_.max_pending_scheduler_launches, 32),
-      worker_manager_(std::make_shared<WorkerManager>(*storage_, worker_registry_, policy_,
-                                                      config_.max_worker_jobs,
-                                                      config_.max_worker_jobs_per_worker,
-                                                      16, config_.max_worker_wall_time_ms,
-                                                      config_.max_worker_tokens_per_run,
-                                                      config_.max_worker_cost_units_per_run)),
+      worker_manager_(std::make_shared<WorkerManager>(
+          *storage_, worker_registry_, policy_, config_.max_worker_jobs,
+          config_.max_worker_jobs_per_worker, 16, config_.max_worker_wall_time_ms,
+          config_.max_worker_tokens_per_run, config_.max_worker_cost_units_per_run)),
       plugins_(
           tools_, providers_, worker_registry_,
           [this](const std::string &source, const std::string &plugin, const std::string &component,

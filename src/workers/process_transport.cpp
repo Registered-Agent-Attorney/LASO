@@ -481,7 +481,7 @@ private:
       const auto message_type = response.value("message_type", std::string{"response"});
       if (message_type == "worker_request") {
         deadline = std::max(deadline, Clock::now() +
-                                       std::chrono::milliseconds(config.interaction_timeout_ms));
+                                          std::chrono::milliseconds(config.interaction_timeout_ms));
         if (!response.contains("request_id") || !response.at("request_id").is_string() ||
             response.at("request_id").get<std::string>().size() >
                 process_protocol::max_interaction_id_bytes)
@@ -648,8 +648,12 @@ WorkerStatus ProcessWorkerTransport::result(const std::string &external_job_id) 
 bool ProcessWorkerTransport::cancel(const std::string &external_job_id) {
   return impl_->cancel(external_job_id);
 }
-void ProcessWorkerTransport::start() { impl_->start(); }
-void ProcessWorkerTransport::stop() noexcept { impl_->stop(); }
+void ProcessWorkerTransport::start() {
+  impl_->start();
+}
+void ProcessWorkerTransport::stop() noexcept {
+  impl_->stop();
+}
 void ProcessWorkerTransport::set_interaction_handler(WorkerInteractionHandler handler) {
   impl_->set_interaction_handler(std::move(handler));
 }

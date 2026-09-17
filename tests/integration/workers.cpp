@@ -177,9 +177,7 @@ TEST(Workers, WorkerInteractionsAreDurableIdempotentAndCancellable) {
   for (unsigned i = 0; i < 50 && storage->list(RecordKind::WorkerInteraction).empty(); ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   ASSERT_EQ(storage->list(RecordKind::WorkerInteraction).size(), 1U);
-  EXPECT_EQ(storage->get(RecordKind::WorkerInteraction, request.request_id)
-                .at("state"),
-            "pending");
+  EXPECT_EQ(storage->get(RecordKind::WorkerInteraction, request.request_id).at("state"), "pending");
   manager.resolve_interaction(request.request_id, WorkerInteractionState::Answered,
                               {{"answer", "yes"}}, "tester", "answered by test");
   waiter.join();

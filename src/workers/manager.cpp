@@ -619,13 +619,16 @@ WorkerInteractionResponse interaction_response(const WorkerInteraction &interact
   result.reason = interaction.reason;
   return result;
 }
-}
+} // namespace
 
-WorkerInteractionResponse WorkerManager::handle_interaction(const WorkerInteractionRequest &request) {
+WorkerInteractionResponse
+WorkerManager::handle_interaction(const WorkerInteractionRequest &request) {
   if (stopped_)
     throw WorkerTransportError("LASO worker interaction service is stopped");
-  if (request.request_id.empty() || request.request_id.size() > process_protocol::max_interaction_id_bytes ||
-      request.worker_job_id.empty() || request.worker_job_id.size() > process_protocol::max_interaction_id_bytes ||
+  if (request.request_id.empty() ||
+      request.request_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.worker_job_id.empty() ||
+      request.worker_job_id.size() > process_protocol::max_interaction_id_bytes ||
       request.worker_id.size() > process_protocol::max_interaction_id_bytes ||
       request.external_job_id.size() > process_protocol::max_interaction_id_bytes ||
       request.session_id.size() > process_protocol::max_interaction_id_bytes ||
@@ -640,8 +643,8 @@ WorkerInteractionResponse WorkerManager::handle_interaction(const WorkerInteract
   WorkerInteraction interaction;
   bool existing = true;
   try {
-    interaction = storage_.get(RecordKind::WorkerInteraction, request.request_id)
-                      .get<WorkerInteraction>();
+    interaction =
+        storage_.get(RecordKind::WorkerInteraction, request.request_id).get<WorkerInteraction>();
     if (interaction.worker_job_id != request.worker_job_id || interaction.type != request.type)
       throw WorkerTransportError("Worker interaction id was reused with different content");
   } catch (const Error &error) {
@@ -654,8 +657,8 @@ WorkerInteractionResponse WorkerManager::handle_interaction(const WorkerInteract
     interaction.worker_job_id = request.worker_job_id;
     interaction.worker_id = request.worker_id;
     try {
-      interaction.run_id = storage_.get(RecordKind::WorkerJob, request.worker_job_id)
-                               .value("run_id", std::string{});
+      interaction.run_id =
+          storage_.get(RecordKind::WorkerJob, request.worker_job_id).value("run_id", std::string{});
     } catch (const Error &error) {
       if (error.code != ErrorCode::NotFound)
         throw;
@@ -694,8 +697,8 @@ WorkerInteractionResponse WorkerManager::handle_interaction(const WorkerInteract
       interaction.response = Json{{"decision", "denied"}, {"reason", interaction.reason}};
       interaction.decided_at = timestamp();
     }
-    storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
-                      Json(interaction)}});
+    storage_.commit(
+        {{RecordKind::WorkerInteraction, interaction.id, interaction.run_id, Json(interaction)}});
   }
   if (interaction_terminal(interaction.state))
     return interaction_response(interaction);
@@ -708,30 +711,30 @@ WorkerInteractionResponse WorkerManager::handle_interaction(const WorkerInteract
     interaction.reason = "Worker interaction deadline expired";
     interaction.response = Json{{"decision", "expired"}, {"reason", interaction.reason}};
     interaction.decided_at = timestamp();
-    storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
-                      Json(interaction)}});
+    storage_.commit(
+        {{RecordKind::WorkerInteraction, interaction.id, interaction.run_id, Json(interaction)}});
     return interaction_response(interaction);
   }
 
   const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
   while (!interaction_changed_.wait_until(lock, wait_deadline, [&] {
-           try {
-             interaction = storage_.get(RecordKind::WorkerInteraction, request.request_id)
-                                .get<WorkerInteraction>();
-             return interaction_terminal(interaction.state);
-           } catch (...) {
-             return false;
-           }
-         })) {
-    interaction = storage_.get(RecordKind::WorkerInteraction, request.request_id)
-                      .get<WorkerInteraction>();
+    try {
+      interaction =
+          storage_.get(RecordKind::WorkerInteraction, request.request_id).get<WorkerInteraction>();
+      return interaction_terminal(interaction.state);
+    } catch (...) {
+      return false;
+    }
+  })) {
+    interaction =
+        storage_.get(RecordKind::WorkerInteraction, request.request_id).get<WorkerInteraction>();
     if (!interaction_terminal(interaction.state)) {
       interaction.state = WorkerInteractionState::Expired;
       interaction.reason = "Worker interaction deadline expired";
       interaction.response = Json{{"decision", "expired"}, {"reason", interaction.reason}};
       interaction.decided_at = timestamp();
-      storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
-                        Json(interaction)}});
+      storage_.commit(
+          {{RecordKind::WorkerInteraction, interaction.id, interaction.run_id, Json(interaction)}});
     }
     break;
   }
@@ -750,11 +753,10 @@ Json WorkerManager::worker_interaction(const std::string &id) const {
 void WorkerManager::resolve_interaction(const std::string &id, WorkerInteractionState state,
                                         const Json &payload, const std::string &actor,
                                         const std::string &reason) {
-  const auto supported = state == WorkerInteractionState::Approved ||
-                         state == WorkerInteractionState::Denied ||
-                         state == WorkerInteractionState::Answered ||
-                         state == WorkerInteractionState::Cancelled ||
-                         state == WorkerInteractionState::Expired;
+  const auto supported =
+      state == WorkerInteractionState::Approved || state == WorkerInteractionState::Denied ||
+      state == WorkerInteractionState::Answered || state == WorkerInteractionState::Cancelled ||
+      state == WorkerInteractionState::Expired;
   if (id.empty() || actor.size() > 128 || reason.size() > 2048 || !payload.is_object() ||
       payload.dump().size() > process_protocol::max_interaction_payload_bytes || !supported)
     throw Error(ErrorCode::Validation, "Invalid worker interaction decision");
@@ -762,7 +764,8 @@ void WorkerManager::resolve_interaction(const std::string &id, WorkerInteraction
   auto interaction = storage_.get(RecordKind::WorkerInteraction, id).get<WorkerInteraction>();
   if (interaction.state != WorkerInteractionState::Pending)
     throw Error(ErrorCode::Conflict, "Worker interaction is no longer pending");
-  if (interaction.type != WorkerInteractionType::Question && state == WorkerInteractionState::Answered)
+  if (interaction.type != WorkerInteractionType::Question &&
+      state == WorkerInteractionState::Answered)
     throw Error(ErrorCode::Validation, "Only questions accept an answer");
   if (interaction.type == WorkerInteractionType::Question &&
       (state == WorkerInteractionState::Approved || state == WorkerInteractionState::Denied))
@@ -772,8 +775,8 @@ void WorkerManager::resolve_interaction(const std::string &id, WorkerInteraction
   interaction.reason = reason;
   interaction.actor = actor;
   interaction.decided_at = timestamp();
-  storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
-                    Json(interaction)}});
+  storage_.commit(
+      {{RecordKind::WorkerInteraction, interaction.id, interaction.run_id, Json(interaction)}});
   interaction_changed_.notify_all();
 }
 

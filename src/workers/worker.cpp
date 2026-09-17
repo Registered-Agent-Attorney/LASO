@@ -1,6 +1,6 @@
-#include <laso/workers/worker.hpp>
-#include <laso/workers/process_protocol.hpp>
 #include <cmath>
+#include <laso/workers/process_protocol.hpp>
+#include <laso/workers/worker.hpp>
 #include <stdexcept>
 
 namespace laso {

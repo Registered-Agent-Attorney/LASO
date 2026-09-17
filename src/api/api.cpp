@@ -85,10 +85,12 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
   if (method == "GET" && target == "/api/v1/plugins")
     return {200, service_.plugins()};
   std::smatch match;
-  static const std::regex route_pattern(
-      "/api/v1/(pipelines|runs|approvals|worker-requests|schedules|triggers|event-sources|workers|worker-jobs)(?:/"
-      "([A-Za-z0-9_.@-]{1,128}))?(?:/"
-      "(runs|cancel|resume|events|attempts|messages|approve|reject|respond|answer|deny|enable|disable))?");
+  static const std::regex route_pattern("/api/v1/"
+                                        "(pipelines|runs|approvals|worker-requests|schedules|"
+                                        "triggers|event-sources|workers|worker-jobs)(?:/"
+                                        "([A-Za-z0-9_.@-]{1,128}))?(?:/"
+                                        "(runs|cancel|resume|events|attempts|messages|approve|"
+                                        "reject|respond|answer|deny|enable|disable))?");
   if (!std::regex_match(target, match, route_pattern))
     return {404, {{"error", "Endpoint not found"}}};
   auto collection = match[1].str(), id = match[2].str(), action = match[3].str();
@@ -127,15 +129,15 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     if (method == "GET" && action.empty())
       return {200, service_.worker_interaction(id)};
     if (method == "POST" && !id.empty() &&
-        (action == "respond" || action == "answer" || action == "approve" ||
-         action == "deny" || action == "cancel")) {
-      const auto state = action == "approve"   ? WorkerInteractionState::Approved
+        (action == "respond" || action == "answer" || action == "approve" || action == "deny" ||
+         action == "cancel")) {
+      const auto state = action == "approve" ? WorkerInteractionState::Approved
                          : action == "answer" || action == "respond"
                              ? WorkerInteractionState::Answered
                          : action == "cancel" ? WorkerInteractionState::Cancelled
-                                               : WorkerInteractionState::Denied;
+                                              : WorkerInteractionState::Denied;
       service_.resolve_worker_interaction(id, state, body.value("payload", Json::object()),
-                                           actor.id, body.value("reason", std::string{}));
+                                          actor.id, body.value("reason", std::string{}));
       return {202, service_.worker_interaction(id)};
     }
     return {405, {{"error", "Method not supported"}}};
