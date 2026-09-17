@@ -27,7 +27,8 @@ std::string option(int argc, char **argv, const std::string &name, std::string f
   return fallback;
 }
 
-void response(const Json &request, const Json &body, std::uint32_t protocol = process_protocol::version) {
+void response(const Json &request, const Json &body,
+              std::uint32_t protocol = process_protocol::version) {
   Json result = body;
   result["protocol_version"] = protocol;
   result["request_id"] = request.value("request_id", std::string{});
@@ -45,7 +46,13 @@ Json usage(const std::string &mode) {
 }
 
 Json terminal_result(const std::string &mode) {
-  return Json{{"ok", true}, {"worker", "process-reference"}, {"mode", mode}};
+  Json result{{"ok", true}, {"worker", "process-reference"}, {"mode", mode}};
+  if (mode == "environment") {
+    result["parent_secret_inherited"] = std::getenv("LASO_PARENT_SECRET") != nullptr;
+    result["explicit_override"] =
+        std::getenv("LASO_REFERENCE") != nullptr ? std::getenv("LASO_REFERENCE") : "";
+  }
+  return result;
 }
 } // namespace
 
@@ -63,16 +70,16 @@ int main(int argc, char **argv) {
     const auto operation = request.value("operation", std::string{});
     if (operation == "hello") {
       if (mode == "mismatch") {
-        response(request, { {"ok", true}, {"metadata", Json::object()} }, 999);
+        response(request, {{"ok", true}, {"metadata", Json::object()}}, 999);
         continue;
       }
-      response(request, { {"ok", true},
-                          {"metadata", Json{{"name", "process-reference"},
-                                             {"version", "1"},
-                                             {"description", "deterministic reference worker"},
-                                             {"capabilities", Json::array({"deterministic"})},
-                                             {"supports_recovery", true},
-                                             {"supports_cancellation", true}}} });
+      response(request, {{"ok", true},
+                         {"metadata", Json{{"name", "process-reference"},
+                                           {"version", "1"},
+                                           {"description", "deterministic reference worker"},
+                                           {"capabilities", Json::array({"deterministic"})},
+                                           {"supports_recovery", true},
+                                           {"supports_cancellation", true}}}});
       continue;
     }
     if (mode == "malformed") {

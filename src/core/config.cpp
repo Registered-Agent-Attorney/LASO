@@ -36,7 +36,8 @@ void Config::validate() {
       max_event_trigger_depth == 0 || max_event_trigger_depth > 64 ||
       max_event_trigger_deliveries == 0 || max_event_trigger_deliveries > 100000 ||
       max_worker_jobs == 0 || max_worker_jobs > 4096 || max_worker_jobs_per_worker == 0 ||
-      max_worker_jobs_per_worker > max_worker_jobs || max_worker_wall_time_ms > 1000000000000000ULL ||
+      max_worker_jobs_per_worker > max_worker_jobs ||
+      max_worker_wall_time_ms > 1000000000000000ULL ||
       max_worker_tokens_per_run > 1000000000000000ULL ||
       !std::isfinite(max_worker_cost_units_per_run) || max_worker_cost_units_per_run < 0 ||
       max_worker_cost_units_per_run > 1000000000000000.0)
@@ -70,8 +71,7 @@ void Config::validate() {
       throw Error(ErrorCode::Configuration, "Invalid process worker executable");
     std::size_t argument_bytes = 0;
     for (const auto &arg : worker.args) {
-      if (arg.size() > 4096 || argument_bytes > 65536 ||
-          arg.size() + 1 > 65536 - argument_bytes)
+      if (arg.size() > 4096 || argument_bytes > 65536 || arg.size() + 1 > 65536 - argument_bytes)
         throw Error(ErrorCode::Configuration, "Invalid process worker arguments");
       argument_bytes += arg.size() + 1;
     }
@@ -81,12 +81,19 @@ void Config::validate() {
         worker.request_timeout_ms > 60000)
       throw Error(ErrorCode::Configuration, "Invalid process worker limits");
     static const std::regex env_name("[A-Za-z_][A-Za-z0-9_]{0,127}");
+    std::set<std::string> allowlisted_names;
     for (const auto &name : worker.environment_allowlist)
-      if (!std::regex_match(name, env_name))
+      if (!std::regex_match(name, env_name) || !allowlisted_names.insert(name).second)
         throw Error(ErrorCode::Configuration, "Invalid process worker environment name");
-    for (const auto &[name, value] : worker.environment)
-      if (!std::regex_match(name, env_name) || value.size() > 4096)
+    std::size_t configured_environment_bytes = 0;
+    for (const auto &[name, value] : worker.environment) {
+      if (!std::regex_match(name, env_name) || value.size() > 4096 ||
+          name.find('\0') != std::string::npos || value.find('\0') != std::string::npos ||
+          name.size() + value.size() + 2 > 65536 ||
+          configured_environment_bytes > 65536 - (name.size() + value.size() + 2))
         throw Error(ErrorCode::Configuration, "Invalid process worker environment");
+      configured_environment_bytes += name.size() + value.size() + 2;
+    }
   }
 }
 Config load_config(const std::filesystem::path &supplied,
@@ -218,9 +225,9 @@ Config load_config(const std::filesystem::path &supplied,
               if (!fields.insert(field.first.as<std::string>()).second)
                 throw Error(ErrorCode::Configuration, "Duplicate process worker field");
             for (const auto &field : fields)
-              if (field != "executable" && field != "args" &&
-                  field != "environment_allowlist" && field != "environment" &&
-                  field != "startup_timeout_ms" && field != "request_timeout_ms")
+              if (field != "executable" && field != "args" && field != "environment_allowlist" &&
+                  field != "environment" && field != "startup_timeout_ms" &&
+                  field != "request_timeout_ms")
                 throw Error(ErrorCode::Configuration, "Unknown process worker field");
             ProcessWorkerConfig cfg;
             if (!node["executable"])
@@ -237,13 +244,17 @@ Config load_config(const std::filesystem::path &supplied,
             if (node["args"])
               cfg.args = sequence(node["args"], "args");
             if (node["environment_allowlist"])
-              cfg.environment_allowlist = sequence(node["environment_allowlist"],
-                                                   "environment_allowlist");
+              cfg.environment_allowlist =
+                  sequence(node["environment_allowlist"], "environment_allowlist");
             if (node["environment"]) {
               if (!node["environment"].IsMap())
                 throw Error(ErrorCode::Configuration, "environment must be a map");
               for (const auto &entry : node["environment"])
-                cfg.environment.emplace(entry.first.as<std::string>(), entry.second.as<std::string>());
+                if (!cfg.environment
+                         .emplace(entry.first.as<std::string>(), entry.second.as<std::string>())
+                         .second)
+                  throw Error(ErrorCode::Configuration,
+                              "Duplicate process worker environment name");
             }
             if (node["startup_timeout_ms"])
               cfg.startup_timeout_ms = node["startup_timeout_ms"].as<std::uint64_t>();

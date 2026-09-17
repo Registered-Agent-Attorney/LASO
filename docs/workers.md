@@ -104,7 +104,10 @@ job failures.
 
 Process workers use an absolute executable path and argument vector. Their
 environment is empty by default; `environment_allowlist` and literal
-`environment` overrides are explicit. Startup and request timeouts are bounded.
+`environment` overrides are explicit, with literal overrides taking precedence
+on name collisions. Configuration validates NUL characters, duplicate
+allowlist names, per-value limits, and a 64 KiB aggregate child-environment
+limit. Startup and request timeouts are bounded.
 LASO owns the child, attempts cooperative `shutdown`, and then terminates its
 process group with bounded escalation. A broken child is not silently
 restarted or resubmitted because the external outcome may be ambiguous. This

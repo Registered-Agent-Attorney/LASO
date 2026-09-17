@@ -54,7 +54,7 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
     current = manager_->submit(request);
     for (;;) {
       c.check();
-      current = manager_->job(current.id);
+      current = manager_->refresh(current.id);
       if (current.state == WorkerJobState::Completed) {
         auto message = input;
         message.payload = current.result;

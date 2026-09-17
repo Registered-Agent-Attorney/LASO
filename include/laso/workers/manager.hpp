@@ -13,6 +13,9 @@ public:
                 std::uint64_t max_tokens_per_run = 0, double max_cost_units_per_run = 0.0);
   WorkerJob submit(const WorkerRequest &);
   WorkerJob job(const std::string &) const;
+  // Refresh an active job through a recovery-capable transport.  This is used
+  // by WorkerNode for transports that do not emit asynchronous status events.
+  WorkerJob refresh(const std::string &);
   std::vector<Json> jobs(const std::string &run_id = "", std::size_t limit = 1000,
                          std::size_t offset = 0) const;
   Json workers() const;
@@ -30,8 +33,9 @@ private:
   double max_cost_units_per_run_;
   std::atomic<bool> stopped_{false};
   mutable std::mutex submit_mutex_;
+  mutable std::mutex state_mutex_;
   void apply_event(const Event &);
-  WorkerJob reconcile(WorkerJob);
+  WorkerJob reconcile(WorkerJob, bool fail_transport);
   void persist(WorkerJob &);
   std::string budget_violation(const WorkerJob &) const;
   static void merge_usage(WorkerUsage &, const WorkerUsage &);

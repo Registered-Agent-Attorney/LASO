@@ -1,7 +1,7 @@
 #pragma once
+#include <cstdint>
 #include <laso/core/async.hpp>
 #include <laso/core/registry.hpp>
-#include <cstdint>
 #include <optional>
 
 namespace laso {
@@ -51,8 +51,7 @@ void from_json(const Json &, WorkerUsage &);
 
 class WorkerTransportError : public Error {
 public:
-  explicit WorkerTransportError(const std::string &message)
-      : Error(ErrorCode::Plugin, message) {}
+  explicit WorkerTransportError(const std::string &message) : Error(ErrorCode::Plugin, message) {}
 };
 
 struct WorkerMetadata {

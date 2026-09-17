@@ -1,5 +1,5 @@
-#include <laso/workers/worker.hpp>
 #include <cmath>
+#include <laso/workers/worker.hpp>
 
 namespace laso {
 bool worker_job_terminal(WorkerJobState state) {

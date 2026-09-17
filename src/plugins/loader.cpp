@@ -667,8 +667,11 @@ public:
         return registration_.health(registration_.instance, context);
       });
       const auto health = Json::parse(health_wire, nullptr, false);
-      healthy = health_status == LASO_OK && !health.is_discarded() && health.is_object() &&
-                health.value("healthy", false);
+      if (health_status == LASO_OK && !health.is_discarded() && health.is_object() &&
+          health.contains("healthy") && health.at("healthy").is_boolean())
+        healthy = health.at("healthy").get<bool>();
+      else
+        healthy = false;
     }
     {
       std::lock_guard lock(mutex_);
@@ -707,17 +710,21 @@ public:
     const auto response = Json::parse(output, nullptr, false);
     if (response.is_discarded() || !response.is_object())
       throw WorkerTransportError("Worker submission response is invalid");
-    WorkerSubmission result;
-    result.external_job_id = response.value("external_job_id", std::string{});
-    if (response.contains("status"))
-      result.state = response.at("status").get<WorkerJobState>();
-    result.metadata = response.value("metadata", Json::object());
-    result.result = response.value("result", nullptr);
-    result.artifacts = response.value("artifacts", std::vector<Json>{});
-    result.error = response.value("error", std::string{});
-    if (response.contains("usage"))
-      result.usage = response.at("usage").get<WorkerUsage>();
-    return result;
+    try {
+      WorkerSubmission result;
+      result.external_job_id = response.value("external_job_id", std::string{});
+      if (response.contains("status"))
+        result.state = response.at("status").get<WorkerJobState>();
+      result.metadata = response.value("metadata", Json::object());
+      result.result = response.value("result", nullptr);
+      result.artifacts = response.value("artifacts", std::vector<Json>{});
+      result.error = response.value("error", std::string{});
+      if (response.contains("usage"))
+        result.usage = response.at("usage").get<WorkerUsage>();
+      return result;
+    } catch (...) {
+      throw WorkerTransportError("Worker submission response has invalid fields");
+    }
   }
 
   WorkerStatus status(const std::string &external_job_id) override {
@@ -774,16 +781,20 @@ private:
     const auto json = Json::parse(output, nullptr, false);
     if (json.is_discarded() || !json.is_object())
       throw WorkerTransportError("Worker status response is invalid");
-    WorkerStatus result;
-    if (json.contains("status"))
-      result.state = json.at("status").get<WorkerJobState>();
-    result.result = json.value("result", nullptr);
-    result.metadata = json.value("metadata", Json::object());
-    result.artifacts = json.value("artifacts", std::vector<Json>{});
-    result.error = json.value("error", std::string{});
-    if (json.contains("usage"))
-      result.usage = json.at("usage").get<WorkerUsage>();
-    return result;
+    try {
+      WorkerStatus result;
+      if (json.contains("status"))
+        result.state = json.at("status").get<WorkerJobState>();
+      result.result = json.value("result", nullptr);
+      result.metadata = json.value("metadata", Json::object());
+      result.artifacts = json.value("artifacts", std::vector<Json>{});
+      result.error = json.value("error", std::string{});
+      if (json.contains("usage"))
+        result.usage = json.at("usage").get<WorkerUsage>();
+      return result;
+    } catch (...) {
+      throw WorkerTransportError("Worker status response has invalid fields");
+    }
   }
   std::shared_ptr<Library> library_;
   WorkerRegistration registration_;
