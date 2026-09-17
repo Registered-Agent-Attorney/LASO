@@ -78,6 +78,9 @@ struct WorkerSubmission {
   WorkerJobState state = WorkerJobState::Queued;
   Json metadata = Json::object();
   WorkerUsage usage;
+  Json result = nullptr;
+  std::vector<Json> artifacts;
+  std::string error;
 };
 
 struct WorkerStatus {

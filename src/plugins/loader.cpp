@@ -712,6 +712,9 @@ public:
     if (response.contains("status"))
       result.state = response.at("status").get<WorkerJobState>();
     result.metadata = response.value("metadata", Json::object());
+    result.result = response.value("result", nullptr);
+    result.artifacts = response.value("artifacts", std::vector<Json>{});
+    result.error = response.value("error", std::string{});
     if (response.contains("usage"))
       result.usage = response.at("usage").get<WorkerUsage>();
     return result;
