@@ -35,6 +35,34 @@ void response(const Json &request, const Json &body,
   std::cout << result.dump() << '\n' << std::flush;
 }
 
+bool interaction(const std::string &job_id, const std::string &external_job_id,
+                 const std::string &kind) {
+  const Json request{{"protocol_version", process_protocol::version},
+                     {"message_type", "worker_request"},
+                     {"request_id", "worker-request-" + job_id},
+                     {"worker_job_id", job_id},
+                     {"worker_id", "process-reference"},
+                     {"external_job_id", external_job_id},
+                     {"request_type", kind},
+                     {"title", "Reference worker request"},
+                     {"summary", "The deterministic reference worker needs a decision"},
+                     {"payload", Json{{"resource", "worker.reference"}, {"question", "continue"}}},
+                     {"created_at", timestamp()},
+                     {"risk", "low"},
+                     {"category", "reference"}};
+  std::cout << request.dump() << '\n' << std::flush;
+  std::string line;
+  if (!std::getline(std::cin, line))
+    return false;
+  const auto answer = Json::parse(line, nullptr, false);
+  return !answer.is_discarded() && answer.is_object() &&
+         answer.value("message_type", std::string{}) == "worker_response" &&
+         answer.value("request_id", std::string{}) == request.at("request_id").get<std::string>() &&
+         answer.value("decision", std::string{}) != "denied" &&
+         answer.value("decision", std::string{}) != "cancelled" &&
+         answer.value("decision", std::string{}) != "expired";
+}
+
 Json usage(const std::string &mode) {
   return Json{{"input_tokens", 3},
               {"output_tokens", 2},
@@ -115,6 +143,14 @@ int main(int argc, char **argv) {
       } else if (mode == "delay" || mode == "cancel") {
         response(request, {{"ok", true}, {"state", "Queued"}, {"external_job_id", external}});
       } else {
+        if ((mode == "interaction" || mode == "permission" || mode == "question") &&
+            !interaction(job_id, external, mode == "question" ? "question" : "permission")) {
+          response(request, {{"ok", true},
+                             {"state", "Failed"},
+                             {"external_job_id", external},
+                             {"error", "worker interaction was denied"}});
+          continue;
+        }
         if (mode == "delay-ms")
           std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         Json body{{"ok", true},
