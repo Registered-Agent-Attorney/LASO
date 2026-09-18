@@ -10,7 +10,8 @@ ProcessWorkerConfig codex_config(const std::filesystem::path &root,
                                  const std::string &fixture_mode = "success") {
   ProcessWorkerConfig result;
   result.executable = LASO_CODEX_WORKER;
-  result.args = {"--codex", LASO_CODEX_FIXTURE, "--allowed-root", root.string(), "--timeout-ms", "2000"};
+  result.args = {"--codex",     LASO_CODEX_FIXTURE, "--allowed-root",
+                 root.string(), "--timeout-ms",     "2000"};
   if (fixture_mode != "success")
     result.environment["LASO_CODEX_FIXTURE_MODE"] = fixture_mode;
   result.startup_timeout_ms = 2000;
@@ -28,7 +29,7 @@ WorkerRequest request(const std::filesystem::path &root, const std::string &key,
   result.idempotency_key = key;
   result.run_id = "codex-run";
   result.node_id = "coding";
-  result.metadata = { {"project_dir", root.string()} };
+  result.metadata = {{"project_dir", root.string()}};
   if (!session.empty())
     result.metadata["codex_session_id"] = session;
   return result;
@@ -126,8 +127,7 @@ TEST(CodexWorker, QuestionUsesGenericWorkerChannel) {
                                      "answered by test"};
   });
   ASSERT_NO_THROW(transport.start());
-  const auto result =
-      transport.submit(request(root.path, "codex-question", "request-question"));
+  const auto result = transport.submit(request(root.path, "codex-question", "request-question"));
   EXPECT_EQ(result.state, WorkerJobState::Completed);
 }
 
@@ -135,7 +135,8 @@ TEST(CodexWorker, MalformedAppServerMessagesAreTransportFailures) {
   TemporaryDirectory root;
   ProcessWorkerTransport transport("codex", codex_config(root.path, "malformed"));
   ASSERT_NO_THROW(transport.start());
-  EXPECT_THROW(transport.submit(request(root.path, "codex-malformed", "run")), WorkerTransportError);
+  EXPECT_THROW(transport.submit(request(root.path, "codex-malformed", "run")),
+               WorkerTransportError);
   EXPECT_FALSE(transport.metadata().healthy);
 }
 
@@ -146,8 +147,10 @@ TEST(CodexWorker, RealInstalledCodexFixtureIsOptIn) {
   std::ofstream(root.path / "fixture.txt") << "before\n";
   auto worker_config = codex_config(root.path);
   worker_config.executable = LASO_CODEX_WORKER;
-  worker_config.args = {"--codex", std::getenv("CODEX_BIN") ? std::getenv("CODEX_BIN") : "codex",
-                        "--allowed-root", root.path.string(), "--timeout-ms", "120000"};
+  worker_config.args = {
+      "--codex",        std::getenv("CODEX_BIN") ? std::getenv("CODEX_BIN") : "codex",
+      "--allowed-root", root.path.string(),
+      "--timeout-ms",   "120000"};
   worker_config.startup_timeout_ms = 120000;
   worker_config.request_timeout_ms = 120000;
   worker_config.interaction_timeout_ms = 300000;
@@ -158,10 +161,10 @@ TEST(CodexWorker, RealInstalledCodexFixtureIsOptIn) {
                                      Json{{"scope", "once"}}, "approved by integration test"};
   });
   ASSERT_NO_THROW(transport.start());
-  const auto first = transport.submit(request(
-      root.path, "codex-real-first",
-      "Change fixture.txt so it contains exactly CODEX-ADAPTER-OK and do not modify any other file. "
-      "Reply with CODEX-DONE."));
+  const auto first = transport.submit(request(root.path, "codex-real-first",
+                                              "Change fixture.txt so it contains exactly "
+                                              "CODEX-ADAPTER-OK and do not modify any other file. "
+                                              "Reply with CODEX-DONE."));
   ASSERT_EQ(first.state, WorkerJobState::Completed) << first.error;
   const auto session = first.result.value("session_id", std::string{});
   ASSERT_FALSE(session.empty());
@@ -177,9 +180,9 @@ TEST(CodexWorker, RealInstalledCodexFixtureIsOptIn) {
                                      Json{{"scope", "once"}}, "approved by integration test"};
   });
   ASSERT_NO_THROW(restarted.start());
-  const auto followup = restarted.submit(
-      request(root.path, "codex-real-followup", "Reply with CODEX-RECOVERED and do not edit files.",
-              session));
+  const auto followup =
+      restarted.submit(request(root.path, "codex-real-followup",
+                               "Reply with CODEX-RECOVERED and do not edit files.", session));
   EXPECT_EQ(followup.state, WorkerJobState::Completed) << followup.error;
   EXPECT_EQ(followup.result.value("session_id", std::string{}), session);
   restarted.stop();
