@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -108,7 +109,12 @@ public:
       throw WorkerTransportError("Unable to start Claude process");
     }
     if (pid_ == 0) {
-      (void)::setpgid(0, 0);
+      // Keep the Claude process in the supervised worker-host process group.
+      // ProcessWorkerTransport terminates that group on timeout, protocol
+      // failure, or shutdown, so a host killed before its destructor runs
+      // cannot orphan this child.  The parent-death signal covers standalone
+      // host use as well.
+      (void)::prctl(PR_SET_PDEATHSIG, SIGKILL);
       if (::chdir(directory_.c_str()) != 0)
         _exit(126);
       (void)::dup2(child_in[0], STDIN_FILENO);
@@ -133,7 +139,6 @@ public:
     input_fd_ = child_in[1];
     output_fd_ = child_out[0];
     error_fd_ = child_err[0];
-    (void)::setpgid(pid_, pid_);
     set_nonblocking(output_fd_);
     set_nonblocking(error_fd_);
   }
@@ -200,8 +205,7 @@ public:
 
   void stop() noexcept {
     if (pid_ > 0) {
-      if (::kill(-pid_, SIGTERM) < 0)
-        (void)::kill(pid_, SIGTERM);
+      (void)::kill(pid_, SIGTERM);
       int status = 0;
       const auto deadline = Clock::now() + std::chrono::milliseconds(500);
       while (Clock::now() < deadline) {
@@ -210,8 +214,7 @@ public:
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
       if (::waitpid(pid_, &status, WNOHANG) == 0) {
-        if (::kill(-pid_, SIGKILL) < 0)
-          (void)::kill(pid_, SIGKILL);
+        (void)::kill(pid_, SIGKILL);
         (void)::waitpid(pid_, &status, 0);
       }
     }
