@@ -250,6 +250,88 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
   }
 }
 
+Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lease,
+                                              std::optional<LeaseRecord> global_slot,
+                                              std::optional<LeaseRecord> run_slot,
+                                              std::stop_token stop) {
+  (void)global_slot;
+  (void)run_slot;
+  try {
+    const auto run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
+    if (run.cancellation_requested || terminal(run.state)) {
+      auto cancelled = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+      cancelled.state = NodeWorkState::Cancelled;
+      cancelled.error = "Parent run cancellation requested";
+      cancelled.updated_at = timestamp();
+      commit_node_owned({{RecordKind::NodeWork, cancelled.id, cancelled.run_id, Json(cancelled)}},
+                        cancelled, work_lease);
+      co_return;
+    }
+    auto extensions = deps_.nodes.names();
+    auto pipeline = parse_pipeline(run.definition, {extensions.begin(), extensions.end()});
+    pipeline.resolved_subpipelines = run.resolved_subpipelines;
+    auto branch_state = std::make_shared<ParallelState>(1, work.steps);
+    auto run_nodes = std::make_shared<AsyncLimiter>(config_.max_nodes_per_run);
+    std::stop_callback parent_stop(stop, [branch_state] { branch_state->stop.request_stop(); });
+    co_await execute_branch(pipeline, std::move(work.token), branch_state, run_nodes,
+                            std::chrono::steady_clock::now() + pipeline.timeout.timeout,
+                            run.subpipeline_depth, work_lease, work.id);
+    NodeWork completed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+    const auto current_run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
+    if (current_run.cancellation_requested || terminal(current_run.state)) {
+      completed.state = NodeWorkState::Cancelled;
+      completed.error = "Parent run cancellation requested";
+      completed.updated_at = timestamp();
+      commit_node_owned({{RecordKind::NodeWork, completed.id, completed.run_id, Json(completed)}},
+                        completed, work_lease);
+      co_return;
+    }
+    {
+      std::lock_guard lock(branch_state->mutex);
+      if (branch_state->failed)
+        throw Error(branch_state->code, branch_state->error);
+      if (!branch_state->outputs.front())
+        throw Error(ErrorCode::Execution, "Distributed node work produced no output");
+      completed.result = *branch_state->outputs.front();
+      completed.steps = branch_state->steps;
+    }
+    completed.state = NodeWorkState::Completed;
+    completed.owner_instance_id = work_lease.owner_instance;
+    completed.fencing_token = work_lease.fencing_token;
+    completed.updated_at = timestamp();
+    completed.error.clear();
+    commit_node_owned({{RecordKind::NodeWork, completed.id, completed.run_id, Json(completed)}},
+                      completed, work_lease);
+  } catch (const Error &error) {
+    try {
+      auto failed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+      failed.state = error.code == ErrorCode::Cancellation ? NodeWorkState::Cancelled
+                                                            : NodeWorkState::Failed;
+      failed.error = error.what();
+      failed.updated_at = timestamp();
+      failed.owner_instance_id = work_lease.owner_instance;
+      failed.fencing_token = work_lease.fencing_token;
+      commit_node_owned({{RecordKind::NodeWork, failed.id, failed.run_id, Json(failed)}}, failed,
+                        work_lease);
+    } catch (const Error &) {
+      // A lost fencing token is expected when another instance has taken over.
+    }
+  } catch (...) {
+    try {
+      auto failed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+      failed.state = NodeWorkState::Failed;
+      failed.error = "Distributed node work failed";
+      failed.updated_at = timestamp();
+      failed.owner_instance_id = work_lease.owner_instance;
+      failed.fencing_token = work_lease.fencing_token;
+      commit_node_owned({{RecordKind::NodeWork, failed.id, failed.run_id, Json(failed)}}, failed,
+                        work_lease);
+    } catch (const Error &) {
+    }
+  }
+  co_return;
+}
+
 Task<bool> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipeline,
                                      std::shared_ptr<AsyncLimiter> run_nodes,
                                      std::stop_token parent,
