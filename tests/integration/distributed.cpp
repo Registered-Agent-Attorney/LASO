@@ -482,10 +482,10 @@ edges:
   }
   ASSERT_TRUE(running);
   controller.runtime().cancel(run_id);
-  auto result = controller.get(RecordKind::Run, run_id).get<Run>();
+  auto result = controller.get(RecordKind::Run, run_id).get<laso::Run>();
   for (unsigned i = 0; i < 300 && !terminal(result.state); ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
-    result = controller.get(RecordKind::Run, run_id).get<Run>();
+    result = controller.get(RecordKind::Run, run_id).get<laso::Run>();
   }
   int status = 0;
   ASSERT_EQ(waitpid(child, &status, 0), child);
