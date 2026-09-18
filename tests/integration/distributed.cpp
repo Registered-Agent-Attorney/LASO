@@ -1,6 +1,8 @@
 #include "../support.hpp"
+#include <atomic>
 #include <chrono>
 #include <csignal>
+#include <set>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -322,6 +324,96 @@ edges:
   EXPECT_TRUE(fork_completed);
   EXPECT_EQ(result.message.payload, Json::array({Json{{"value", "shared"}},
                                                  Json{{"value", "shared"}}}));
+}
+
+TEST(DistributedExecution, DistributedBranchRetriesKeepDistinctAttempts) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  TemporaryDirectory first_data;
+  TemporaryDirectory second_data;
+  Config first = config(first_data.path);
+  first.storage_backend = "postgres";
+  first.postgres_dsn = database.dsn;
+  first.postgres_schema = database.schema;
+  first.execution_mode = "multi_instance";
+  first.max_runs = 1;
+  first.max_nodes = 2;
+  first.max_nodes_per_run = 2;
+  first.coordination_lease_ttl_ms = 1000;
+  first.coordination_heartbeat_interval_ms = 100;
+  first.validate();
+  auto second = first;
+  second.data_dir = second_data.path;
+  second.db_path.clear();
+
+  Executor first_executor(first.workers), second_executor(second.workers);
+  Service first_service(first_executor.context(), first);
+  Service second_service(second_executor.context(), second);
+  auto flaky = std::make_shared<Function>([](ExecutionContext &context,
+                                               const Json &input) -> Task<Json> {
+    if (context.attempt == 1)
+      throw Error(ErrorCode::Execution, "synthetic retry");
+    co_return input;
+  });
+  first_service.functions().add("distributed_flaky", flaky);
+  second_service.functions().add("distributed_flaky", flaky);
+  const auto pipeline = R"yaml(
+laso: '1'
+name: distributed-retry
+version: 1
+nodes:
+  input: {type: input}
+  fork: {type: parallel, join: join}
+  flaky:
+    type: function
+    function: distributed_flaky
+    max_attempts: 2
+  stable: {type: function, function: identity}
+  join: {type: join}
+  output: {type: output}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: flaky}
+  - {from: fork, to: stable}
+  - {from: flaky, to: join}
+  - {from: stable, to: join}
+  - {from: join, to: output}
+)yaml";
+  first_service.register_pipeline(pipeline);
+  first_executor.start();
+  second_executor.start();
+  const auto run_id = first_service.start("distributed-retry@1", Json{{"value", "retry"}});
+  laso::Run result;
+  for (unsigned attempt = 0; attempt < 500; ++attempt) {
+    result = first_service.get(RecordKind::Run, run_id).get<laso::Run>();
+    if (terminal(result.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const auto attempts = first_service.list(RecordKind::Attempt, run_id);
+  first_service.shutdown();
+  second_service.shutdown();
+  first_executor.join();
+  second_executor.join();
+  ASSERT_EQ(result.state, RunState::Completed) << result.error;
+  unsigned flaky_attempts = 0;
+  std::set<std::string> attempt_ids;
+  bool failed = false;
+  bool completed = false;
+  for (const auto &value : attempts) {
+    const auto attempt = value.get<NodeExecution>();
+    if (attempt.node_id == "flaky") {
+      ++flaky_attempts;
+      attempt_ids.insert(attempt.id);
+      failed = failed || attempt.state == NodeState::Failed;
+      completed = completed || attempt.state == NodeState::Completed;
+    }
+  }
+  EXPECT_EQ(flaky_attempts, 2U);
+  EXPECT_EQ(attempt_ids.size(), 2U);
+  EXPECT_TRUE(failed);
+  EXPECT_TRUE(completed);
 }
 
 TEST(DistributedExecution, ProcessCrashAllowsNodeWorkTakeoverAndRunRecovery) {
