@@ -288,7 +288,8 @@ Json Service::register_pipeline(const std::string &yaml) {
   return record;
 }
 std::string Service::start(const std::string &name_or_path, const Json &input,
-                           const std::string &actor, bool allow_file, Json origin) {
+                           const std::string &actor, bool allow_file, Json origin,
+                           Json message_metadata) {
   std::string name = name_or_path;
   if (allow_file && std::filesystem::is_regular_file(name_or_path))
     name = register_pipeline(read_document(name_or_path)).at("id").get<std::string>();
@@ -299,7 +300,8 @@ std::string Service::start(const std::string &name_or_path, const Json &input,
   if (record.contains("resolved_subpipelines"))
     p.resolved_subpipelines =
         record.at("resolved_subpipelines").get<std::map<std::string, std::string>>();
-  return runtime_.run(p, input, actor, "", "", 0, "", std::move(origin));
+  return runtime_.run(p, input, actor, "", "", 0, "", std::move(origin),
+                      std::move(message_metadata));
 }
 
 Json Service::create_schedule(const Json &spec) {

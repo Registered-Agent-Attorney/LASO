@@ -5,6 +5,8 @@
 
 namespace laso {
 namespace {
+constexpr std::size_t max_message_metadata_bytes = std::size_t{64} * 1024;
+
 std::vector<Json> list_all(const Storage &storage, RecordKind kind, const std::string &run_id) {
   constexpr std::size_t page_size = 10000;
   std::vector<Json> records;
@@ -78,12 +80,15 @@ void Runtime::transition(Run &r, RunState state, const std::string &event,
 }
 std::string Runtime::run(const PipelineDefinition &p, Json input, std::string actor,
                          std::string parent_id, std::string parent_node_id,
-                         unsigned subpipeline_depth, std::string parent_message_id, Json origin) {
+                         unsigned subpipeline_depth, std::string parent_message_id, Json origin,
+                         Json message_metadata) {
   std::lock_guard lock(mutex_);
   if (stopping_ || active_.size() >= config_.max_runs)
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
   if (input.dump().size() > max_document_bytes)
     throw Error(ErrorCode::Validation, "Run input exceeds 1 MiB");
+  if (!message_metadata.is_object() || message_metadata.dump().size() > max_message_metadata_bytes)
+    throw Error(ErrorCode::Validation, "Run metadata is invalid or exceeds 64 KiB");
   // Do not execute a caller-modified graph that differs from the durable source.
   auto names = deps_.nodes.names();
   auto checked = parse_pipeline(p.source, {names.begin(), names.end()});
@@ -113,6 +118,7 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
   r.message.pipeline_id = r.pipeline_id;
   r.message.node_id = "input";
   r.message.payload = std::move(input);
+  r.message.metadata = std::move(message_metadata);
   if (!r.parent_message_id.empty())
     r.message.provenance.push_back(
         {r.parent_node_id, "", "", "", "", r.parent_message_id, "", timestamp(), ""});

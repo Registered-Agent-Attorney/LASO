@@ -17,6 +17,10 @@ ProcessWorkerConfig opencode_config(const std::filesystem::path &root, unsigned 
       "--port",         std::to_string(port),
       "--allowed-root", root.string(),
       "--timeout-ms",   "120000"};
+  // Keep the opt-in integration tests independent of host-wide OpenCode state,
+  // including state created by another OpenCode major version.
+  result.environment["XDG_DATA_HOME"] = (root / ".opencode-data").string();
+  result.environment["XDG_CONFIG_HOME"] = (root / ".opencode-config").string();
   result.startup_timeout_ms = 120000;
   result.request_timeout_ms = 120000;
   return result;
@@ -75,6 +79,36 @@ TEST(OpenCodeWorker, RealInstalledAdapterCreatesAndContinuesSession) {
   EXPECT_EQ(after_restart.state, WorkerJobState::Completed) << after_restart.error;
   EXPECT_EQ(after_restart.result.value("session_id", std::string{}), session);
   restarted.stop();
+}
+
+TEST(OpenCodeWorker, RealInstalledAdapterRoutesPermissionReplyToProject) {
+  if (!std::getenv("LASO_RUN_REAL_OPENCODE"))
+    GTEST_SKIP() << "Set LASO_RUN_REAL_OPENCODE=1 to run the configured OpenCode integration";
+  TemporaryDirectory root;
+  std::ofstream(root.path / "opencode.jsonc")
+      << R"({"permission":{"read":"allow","edit":"ask","question":"allow"}})";
+  const auto port = 21000U + static_cast<unsigned>(getpid() % 1000);
+  ProcessWorkerTransport transport("opencode", opencode_config(root.path, port));
+  std::string request_id;
+  std::string session_id;
+  transport.set_interaction_handler([&](const WorkerInteractionRequest &request) {
+    request_id = request.request_id;
+    session_id = request.session_id;
+    return WorkerInteractionResponse{request.request_id, WorkerInteractionState::Approved,
+                                     Json::object(), "validation"};
+  });
+  ASSERT_NO_THROW(transport.start());
+  const auto result = transport.submit(opencode_request(
+      root.path, "opencode-permission", "Create result.txt containing exactly 'allowed'."));
+  EXPECT_EQ(result.state, WorkerJobState::Completed) << result.error;
+  EXPECT_FALSE(request_id.empty());
+  EXPECT_FALSE(session_id.empty());
+  ASSERT_TRUE(std::filesystem::exists(root.path / "result.txt"));
+  std::ifstream output(root.path / "result.txt");
+  std::string contents;
+  std::getline(output, contents);
+  EXPECT_EQ(contents, "allowed");
+  transport.stop();
 }
 
 TEST(OpenCodeWorker, RejectsProjectOutsideConfiguredRoot) {

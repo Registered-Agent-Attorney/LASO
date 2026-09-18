@@ -90,6 +90,8 @@ outside this change.
 The adapter is optional and is disabled in the default CMake build. Enable it
 with `-DLASO_BUILD_OPENCODE_ADAPTER=ON` when OpenCode integration is required.
 The generic worker-request and process-transport tests remain part of the
-default build. The bounded real integration exercise did not trigger an
-OpenCode permission or question event; that vendor-specific path is therefore
-partially validated rather than claimed as complete.
+default build. A bounded end-to-end exercise with OpenCode `1.18.29` and a
+disposable synthetic workspace observed a real `permission.asked` event,
+persisted it as a LASO worker request, resolved it through the LASO API, and
+verified that OpenCode continued and the enclosing pipeline completed. The
+OpenCode question path remains not directly validated.

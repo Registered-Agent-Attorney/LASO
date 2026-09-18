@@ -31,7 +31,8 @@ public:
   std::string run(const PipelineDefinition &, Json input = Json::object(),
                   std::string actor = "local", std::string parent_id = "",
                   std::string parent_node_id = "", unsigned subpipeline_depth = 0,
-                  std::string parent_message_id = "", Json origin = Json::object());
+                  std::string parent_message_id = "", Json origin = Json::object(),
+                  Json message_metadata = Json::object());
   void resume(const std::string &id);
   void cancel(const std::string &id);
   void decide(const std::string &approval_id, bool approve, const std::string &actor,

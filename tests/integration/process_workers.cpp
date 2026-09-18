@@ -1,7 +1,9 @@
 #include "../support.hpp"
 #include <atomic>
+#include <boost/beast.hpp>
 #include <cstdlib>
 #include <fstream>
+#include <laso/api/api.hpp>
 #include <laso/workers/process_transport.hpp>
 #include <thread>
 
@@ -47,6 +49,26 @@ bool reference_host_running() {
       return true;
   }
   return false;
+}
+
+boost::beast::http::response<boost::beast::http::string_body>
+http_request(unsigned short port, boost::beast::http::verb method, const std::string &target,
+             const Json &body = Json::object()) {
+  namespace http = boost::beast::http;
+  asio::io_context peer_io;
+  boost::beast::tcp_stream stream(peer_io);
+  stream.expires_after(std::chrono::seconds(5));
+  stream.connect({asio::ip::make_address("127.0.0.1"), port});
+  http::request<http::string_body> request{method, target, 11};
+  request.set(http::field::host, "localhost");
+  if (method != http::verb::get)
+    request.body() = body.dump();
+  request.prepare_payload();
+  http::write(stream, request);
+  boost::beast::flat_buffer buffer;
+  http::response<http::string_body> response;
+  http::read(stream, buffer, response);
+  return response;
 }
 
 std::string process_pipeline() {
@@ -224,4 +246,68 @@ TEST(ProcessWorker, ServiceRecordsTransportFailureWithoutResubmission) {
   const auto jobs = service.worker_jobs(run.id);
   ASSERT_EQ(jobs.size(), 1U);
   EXPECT_EQ(jobs.front().at("failure_kind"), "transport");
+}
+
+TEST(ProcessWorker, HttpApiRemainsResponsiveDuringPendingInteraction) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto config = laso::test::config(dir.path);
+  auto process = worker_config("interaction", 5000);
+  process.interaction_timeout_ms = 5000;
+  config.process_workers.emplace("process", std::move(process));
+  config.rules.push_back({"worker.reference", PolicyDecision::RequireApproval});
+  config.validate();
+  Service service(io, config);
+  service.register_pipeline(process_pipeline());
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  HttpServer server(io, api, "127.0.0.1", 0);
+  server.start();
+  std::jthread executor([&] { io.run(); });
+  std::jthread executor2([&] { io.run(); });
+
+  const auto started =
+      http_request(server.port(), boost::beast::http::verb::post,
+                   "/api/v1/pipelines/process-worker-e2e/runs", {{"input", {{"value", 7}}}});
+  ASSERT_EQ(started.result_int(), 202);
+  const auto run_id = Json::parse(started.body()).at("id").get<std::string>();
+
+  std::string interaction_id;
+  for (unsigned attempt = 0; attempt < 100 && interaction_id.empty(); ++attempt) {
+    const auto listed = http_request(server.port(), boost::beast::http::verb::get,
+                                     "/api/v1/worker-requests?limit=50");
+    ASSERT_EQ(listed.result_int(), 200);
+    for (const auto &item : Json::parse(listed.body()))
+      if (item.value("run_id", std::string{}) == run_id &&
+          item.value("state", std::string{}) == "pending") {
+        interaction_id = item.at("id").get<std::string>();
+        break;
+      }
+    if (interaction_id.empty())
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_FALSE(interaction_id.empty());
+
+  const auto approved = http_request(server.port(), boost::beast::http::verb::post,
+                                     "/api/v1/worker-requests/" + interaction_id + "/approve");
+  ASSERT_EQ(approved.result_int(), 202);
+  EXPECT_EQ(Json::parse(approved.body()).at("state"), "approved");
+
+  for (unsigned attempt = 0; attempt < 100; ++attempt) {
+    const auto inspected =
+        http_request(server.port(), boost::beast::http::verb::get, "/api/v1/runs/" + run_id);
+    ASSERT_EQ(inspected.result_int(), 200);
+    const auto run = Json::parse(inspected.body());
+    if (run.value("state", std::string{}) == "Completed")
+      break;
+    ASSERT_NE(run.value("state", std::string{}), "Failed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const auto completed =
+      http_request(server.port(), boost::beast::http::verb::get, "/api/v1/runs/" + run_id);
+  EXPECT_EQ(Json::parse(completed.body()).at("state"), "Completed");
+  server.stop();
+  service.shutdown();
+  executor.join();
+  executor2.join();
 }

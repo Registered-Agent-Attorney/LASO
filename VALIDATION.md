@@ -131,11 +131,12 @@ skipped** with leak detection enabled. The added worker tests cover durable
 approval/permission/question requests, policy decisions, idempotent replay,
 cancellation, strict protocol bounds, OpenCode session continuation after
 adapter restart, explicit project-root rejection, and normalized results and
-usage. The real OpenCode test used the installed adapter and a temporary fixture;
-it did not require a paid provider for the test suite. That fixture did not trigger
-a real OpenCode permission or question event, so that vendor-specific interaction
-path remains partially validated; the generic LASO request path is covered by
-deterministic tests.
+usage. The real OpenCode test used the installed adapter and a disposable
+synthetic workspace; it did not require a paid provider for the test suite.
+OpenCode `1.18.29` emitted a real `permission.asked` event. LASO persisted the
+request, resolved it through the worker-request API, and the OpenCode turn,
+WorkerNode, and enclosing pipeline completed with the expected synthetic result.
+The OpenCode question path remains not directly validated.
 
 The schema-contract tests additionally cover valid and invalid input/output,
 registration-time missing or malformed schemas, safe local references, forbidden
