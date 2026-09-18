@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added a bounded PostgreSQL connection pool and opaque service-instance identity.
+  Added PostgreSQL lease, heartbeat, expiry, takeover, and fencing primitives with
+  migration version 6 and contention/crash coverage. SQLite and default
+  single-owner service behavior remain unchanged; distributed scheduling is not
+  enabled.
+
 - Added an optional supervised Claude Code adapter using the documented
   structured `stream-json` CLI interface. Session identifiers, resume/follow-up,
   normalized results and usage, project-root checks, bounded process handling,

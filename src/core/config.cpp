@@ -26,6 +26,8 @@ void Config::validate() {
     for (const auto ch : postgres_schema)
       if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
         throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
+  if (coordination_mode != "single_owner" && coordination_mode != "experimental_multi_instance")
+    throw Error(ErrorCode::Configuration, "Invalid coordination mode");
   if (db_path.empty())
     db_path = data_dir / "laso.db";
   if (api_port == 0 || api_port > 65535 || workers == 0 || workers > 64 || max_runs == 0 ||
@@ -40,7 +42,12 @@ void Config::validate() {
       max_worker_wall_time_ms > 1000000000000000ULL ||
       max_worker_tokens_per_run > 1000000000000000ULL ||
       !std::isfinite(max_worker_cost_units_per_run) || max_worker_cost_units_per_run < 0 ||
-      max_worker_cost_units_per_run > 1000000000000000.0)
+      max_worker_cost_units_per_run > 1000000000000000.0 || postgres_pool_min_connections == 0 ||
+      postgres_pool_max_connections < postgres_pool_min_connections ||
+      postgres_pool_max_connections > 64 || postgres_pool_acquisition_timeout_ms == 0 ||
+      postgres_pool_acquisition_timeout_ms > 60000 || coordination_lease_ttl_ms < 1000 ||
+      coordination_lease_ttl_ms > 86400000 || coordination_heartbeat_interval_ms == 0 ||
+      coordination_heartbeat_interval_ms >= coordination_lease_ttl_ms / 2)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
   if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
@@ -115,7 +122,21 @@ Config load_config(const std::filesystem::path &supplied,
         auto key = pair.first.as<std::string>();
         if (!seen.insert(key).second)
           throw Error(ErrorCode::Configuration, "Duplicate configuration field");
-        if (key == "models") {
+        if (key == "coordination") {
+          if (!pair.second.IsMap())
+            throw Error(ErrorCode::Configuration, "coordination must be a map");
+          for (const auto &field : pair.second) {
+            const auto name = field.first.as<std::string>();
+            if (name == "mode")
+              c.coordination_mode = field.second.as<std::string>();
+            else if (name == "lease_ttl_ms")
+              c.coordination_lease_ttl_ms = field.second.as<std::uint64_t>();
+            else if (name == "heartbeat_interval_ms")
+              c.coordination_heartbeat_interval_ms = field.second.as<std::uint64_t>();
+            else
+              throw Error(ErrorCode::Configuration, "Unknown coordination field");
+          }
+        } else if (key == "models") {
           c.models.clear();
           for (const auto &model : pair.second) {
             auto name = model.first.as<std::string>();
@@ -278,6 +299,12 @@ Config load_config(const std::filesystem::path &supplied,
                     "STORAGE_BACKEND",
                     "POSTGRES_DSN",
                     "POSTGRES_SCHEMA",
+                    "COORDINATION_MODE",
+                    "POSTGRES_POOL_MIN_CONNECTIONS",
+                    "POSTGRES_POOL_MAX_CONNECTIONS",
+                    "POSTGRES_POOL_ACQUISITION_TIMEOUT_MS",
+                    "COORDINATION_LEASE_TTL_MS",
+                    "COORDINATION_HEARTBEAT_INTERVAL_MS",
                     "PLUGIN_DIR",
                     "LOG_LEVEL",
                     "API_HOST",
@@ -360,6 +387,18 @@ Config load_config(const std::filesystem::path &supplied,
       c.postgres_dsn = v;
     else if (k == "postgres_schema")
       c.postgres_schema = v;
+    else if (k == "coordination_mode")
+      c.coordination_mode = v;
+    else if (k == "postgres_pool_min_connections")
+      c.postgres_pool_min_connections = integer(v);
+    else if (k == "postgres_pool_max_connections")
+      c.postgres_pool_max_connections = integer(v);
+    else if (k == "postgres_pool_acquisition_timeout_ms")
+      c.postgres_pool_acquisition_timeout_ms = uint64(v);
+    else if (k == "coordination_lease_ttl_ms")
+      c.coordination_lease_ttl_ms = uint64(v);
+    else if (k == "coordination_heartbeat_interval_ms")
+      c.coordination_heartbeat_interval_ms = uint64(v);
     else if (k == "db_path")
       c.db_path = v;
     else if (k == "plugin_dir")

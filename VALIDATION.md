@@ -208,3 +208,11 @@ vendor-specific permission/question path remains version-dependent because the
 headless Claude CLI does not guarantee that every interaction is exposed to a
 custom stream host. No real Claude session or provider transcript was used in
 this validation.
+
+## PostgreSQL coordination validation snapshot
+
+The PostgreSQL-enabled build scheduled **187/187 CTest entries** against an
+isolated PostgreSQL 16 service. Coordination coverage includes bounded pool
+acquisition and replacement, opaque instance IDs, renewal, owner binding,
+expiry takeover, fencing rejection, concurrent takeover, and process-exit
+recovery. No distributed scheduler or multi-instance LASO mode was enabled.

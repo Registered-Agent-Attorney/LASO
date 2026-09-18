@@ -10,6 +10,9 @@ struct StorageOptions {
   std::filesystem::path db_path;
   std::string postgres_dsn;
   std::string postgres_schema = "public";
+  std::size_t postgres_pool_min_connections = 1;
+  std::size_t postgres_pool_max_connections = 4;
+  std::uint64_t postgres_pool_acquisition_timeout_ms = 1000;
 };
 
 std::unique_ptr<Storage> create_storage(const StorageOptions &options);
