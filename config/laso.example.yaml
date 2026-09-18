@@ -31,6 +31,13 @@ max_worker_cost_units_per_run: 0
 #     startup_timeout_ms: 120000
 #     request_timeout_ms: 120000
 #     interaction_timeout_ms: 300000
+#   codex:
+#     executable: /srv/laso/bin/laso-codex-worker
+#     args: [--codex, /usr/local/bin/codex, --allowed-root, /srv/laso/workspaces]
+#     environment_allowlist: [HOME, CODEX_HOME, PATH]
+#     startup_timeout_ms: 120000
+#     request_timeout_ms: 120000
+#     interaction_timeout_ms: 300000
 log_level: info
 json_logs: false
 allow_network: false
