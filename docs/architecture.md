@@ -30,8 +30,9 @@ operation. Plugins are never hot-reloaded during execution.
 The executor owns a configured finite number of `std::jthread` workers and runs
 Asio coroutines. Slot limiters suspend rather than block. One coroutine owns each
 run's mutable snapshot. Each storage adapter serializes its short synchronous
-operations behind its own mutex; the PostgreSQL adapter intentionally uses one
-bounded connection. Runtime admission and cancellation maps have their own mutex.
+operations behind its own backend rules; the PostgreSQL adapter uses a bounded
+RAII connection pool while transactions remain connection-local. Runtime admission
+and cancellation maps have their own mutex.
 HTTP connections and scheduler timers use strands. These are independent locks,
 not a global framework lock. Implementations registered by applications must handle
 concurrent calls.
@@ -96,7 +97,10 @@ schedule occurrence is claimed by an insert-only durable record, using
 `schedule_id|due_at` as its identity. This prevents the obvious restart duplicate
 within the storage ownership model; LASO does not claim distributed exactly-once
 execution. PostgreSQL retains its existing session ownership lease, while the
-claim operation is transactional and safe under concurrent adapter calls.
+claim operation is transactional and safe under concurrent adapter calls. Optional
+PostgreSQL coordination primitives add opaque service identities, database-time
+leases, heartbeats, expiry takeover, and fencing checks, but do not enable
+distributed scheduler or worker execution. See [distributed coordination](adr/0007-distributed-coordination-primitives.md).
 
 Event triggers match an event type and optional scalar metadata fields. Delivery
 records keyed by `trigger_id|event_id` provide restart deduplication. Trigger depth

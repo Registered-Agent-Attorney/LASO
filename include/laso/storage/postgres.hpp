@@ -1,4 +1,5 @@
 #pragma once
+#include <laso/storage/postgres_pool.hpp>
 #include <laso/storage/storage.hpp>
 #include <memory>
 #include <string>
@@ -6,7 +7,8 @@
 namespace laso {
 class PostgresStorage final : public Storage {
 public:
-  PostgresStorage(const std::string &dsn, const std::string &schema = "public");
+  PostgresStorage(const std::string &dsn, const std::string &schema = "public",
+                  PostgresPoolOptions pool_options = {});
   ~PostgresStorage() override;
   PostgresStorage(const PostgresStorage &) = delete;
   PostgresStorage &operator=(const PostgresStorage &) = delete;

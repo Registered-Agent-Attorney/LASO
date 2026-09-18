@@ -2,7 +2,6 @@
 #include <cctype>
 #include <laso/storage/postgres.hpp>
 #include <laso/workers/worker.hpp>
-#include <mutex>
 #include <version>
 // Ubuntu's libpqxx 7.8 package is built without std::source_location support,
 // while a C++20 consumer sees that library feature in <version>.  Keep the
@@ -88,18 +87,19 @@ std::string serialize(const Json &value) {
 } // namespace
 
 struct PostgresStorage::Impl {
-  explicit Impl(const std::string &dsn) : db(dsn) {}
-  pqxx::connection db;
-  mutable std::mutex mutex;
+  std::unique_ptr<pqxx::connection> owner;
+  std::unique_ptr<PostgresConnectionPool> pool;
 };
 
-PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &schema) {
+PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &schema,
+                                 PostgresPoolOptions pool_options) {
   if (dsn.empty())
     throw Error(ErrorCode::Configuration, "PostgreSQL DSN is required");
   validate_schema(schema);
   try {
-    auto candidate = std::make_unique<Impl>(dsn);
-    pqxx::work tx(candidate->db);
+    auto candidate = std::make_unique<Impl>();
+    candidate->owner = std::make_unique<pqxx::connection>(dsn);
+    pqxx::work tx(*candidate->owner);
     const auto lock =
         tx.exec_params("SELECT pg_try_advisory_lock(hashtextextended(current_database() || "
                        "':laso-service-ownership', 0))");
@@ -114,7 +114,7 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
     const auto version = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations")
                              .front()[0]
                              .as<int>();
-    if (version > 5)
+    if (version > 6)
       throw Error(ErrorCode::Storage, "Unsupported PostgreSQL database schema version");
     if (version == 0) {
       for (const auto name : table_names) {
@@ -173,7 +173,17 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
               " (run_id, sequence)");
       tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (5)");
     }
+    if (version < 6) {
+      tx.exec("CREATE TABLE IF NOT EXISTS laso_coordination_leases ("
+              "resource_key TEXT PRIMARY KEY, owner_instance TEXT NOT NULL, "
+              "fencing_token BIGINT NOT NULL, acquired_at TIMESTAMPTZ NOT NULL, "
+              "heartbeat_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL)");
+      tx.exec("CREATE INDEX IF NOT EXISTS laso_coordination_leases_expiry "
+              "ON laso_coordination_leases (expires_at)");
+      tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (6)");
+    }
     tx.commit();
+    candidate->pool = std::make_unique<PostgresConnectionPool>(dsn, schema, pool_options);
     impl_ = std::move(candidate);
   } catch (const Error &) {
     throw;
@@ -189,9 +199,10 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
 PostgresStorage::~PostgresStorage() = default;
 
 void PostgresStorage::commit(const std::vector<Record> &records) {
-  std::lock_guard lock(impl_->mutex);
+  PostgresConnectionPool::Lease connection;
   try {
-    pqxx::work tx(impl_->db);
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
     for (const auto &record : records) {
       if (record.id.empty())
         throw Error(ErrorCode::Validation, "Record id is empty");
@@ -224,20 +235,22 @@ void PostgresStorage::commit(const std::vector<Record> &records) {
   } catch (const pqxx::sql_error &error) {
     translate_sql_error(error);
   } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
     translate_connection_error();
   } catch (const std::exception &) {
     throw Error(ErrorCode::Storage, "PostgreSQL write failed");
   }
 }
 bool PostgresStorage::claim(const Record &record, const std::vector<Record> &associated) {
-  std::lock_guard lock(impl_->mutex);
   if (record.id.empty())
     throw Error(ErrorCode::Validation, "Record id is empty");
   if (record.kind != RecordKind::ScheduleOccurrence && record.kind != RecordKind::TriggerDelivery &&
       record.kind != RecordKind::ExternalEventClaim && record.kind != RecordKind::WorkerJob)
     throw Error(ErrorCode::Validation, "Record kind cannot be claimed");
+  PostgresConnectionPool::Lease connection;
   try {
-    pqxx::work tx(impl_->db);
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
     const auto body = serialize(record.value);
     const auto result =
         tx.exec_params("INSERT INTO " + std::string(table(record.kind)) +
@@ -260,6 +273,7 @@ bool PostgresStorage::claim(const Record &record, const std::vector<Record> &ass
   } catch (const pqxx::sql_error &error) {
     translate_sql_error(error);
   } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
     translate_connection_error();
   } catch (const std::exception &) {
     throw Error(ErrorCode::Storage, "PostgreSQL claim failed");
@@ -267,9 +281,10 @@ bool PostgresStorage::claim(const Record &record, const std::vector<Record> &ass
 }
 
 Json PostgresStorage::get(RecordKind kind, const std::string &id) const {
-  std::lock_guard lock(impl_->mutex);
+  PostgresConnectionPool::Lease connection;
   try {
-    pqxx::work tx(impl_->db);
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
     const auto result =
         tx.exec_params("SELECT body FROM " + std::string(table(kind)) + " WHERE id = $1", id);
     if (result.empty())
@@ -282,6 +297,7 @@ Json PostgresStorage::get(RecordKind kind, const std::string &id) const {
   } catch (const pqxx::sql_error &error) {
     translate_sql_error(error);
   } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
     translate_connection_error();
   } catch (const std::exception &) {
     throw Error(ErrorCode::Storage, "PostgreSQL read failed");
@@ -292,9 +308,10 @@ std::vector<Json> PostgresStorage::list(RecordKind kind, const std::string &run_
                                         std::size_t limit, std::size_t offset) const {
   if (limit > 10000 || offset > 100000000)
     throw Error(ErrorCode::Validation, "Pagination limit exceeded");
-  std::lock_guard lock(impl_->mutex);
+  PostgresConnectionPool::Lease connection;
   try {
-    pqxx::work tx(impl_->db);
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
     const auto sql = "SELECT body FROM " + std::string(table(kind)) +
                      (run_id.empty() ? "" : " WHERE run_id = $1") +
                      (run_id.empty() ? " ORDER BY sequence LIMIT $1 OFFSET $2"
@@ -315,6 +332,7 @@ std::vector<Json> PostgresStorage::list(RecordKind kind, const std::string &run_
   } catch (const pqxx::sql_error &error) {
     translate_sql_error(error);
   } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
     translate_connection_error();
   } catch (const std::exception &) {
     throw Error(ErrorCode::Storage, "PostgreSQL list failed");
