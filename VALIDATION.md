@@ -161,6 +161,12 @@ API/CLI surfaces, and normal-runtime launch provenance.
 
 ## Current optional Codex-adapter validation
 
+The final local Codex matrix for this branch is: default SQLite Debug CTest
+**180 total, 178 passed, 2 PostgreSQL cases skipped**; PostgreSQL-enabled Debug
+CTest **188/188 passed**; and ASan/UBSan CTest **188 total, 186 passed, 2
+PostgreSQL cases skipped**. The PostgreSQL and sanitizer runs both included the
+opt-in real Codex fixture test.
+
 This branch adds seven deterministic and one separately gated Codex adapter test
 to the existing suite. The default build remains Codex-free with 180 CTest
 entries. With `-DLASO_BUILD_CODEX_ADAPTER=ON`, the fixture-only suite contains
