@@ -6,6 +6,7 @@
 #include <laso/scheduler/scheduler.hpp>
 #include <laso/schema/validator.hpp>
 #include <laso/security/security.hpp>
+#include <laso/storage/coordination.hpp>
 #include <laso/storage/factory.hpp>
 #include <laso/workers/process_transport.hpp>
 
@@ -16,6 +17,9 @@ public:
   ~Service() noexcept;
   const Config &config() const {
     return config_;
+  }
+  const std::string &instance_id() const {
+    return instance_id_;
   }
   Json register_pipeline(const std::string &yaml);
   std::string start(const std::string &name_or_path, const Json &input = Json::object(),
@@ -85,6 +89,7 @@ public:
 
 private:
   Config config_;
+  std::string instance_id_;
   std::unique_ptr<ProcessLease> lease_;
   std::unique_ptr<Storage> storage_;
   InProcessEventBus events_;

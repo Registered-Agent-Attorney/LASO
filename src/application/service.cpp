@@ -10,6 +10,9 @@ namespace laso {
 namespace {
 Config checked(Config c) {
   c.validate();
+  if (c.coordination_mode != "single_owner")
+    throw Error(ErrorCode::Configuration,
+                "Experimental multi-instance coordination is not enabled");
   return c;
 }
 std::vector<Json> all_pipeline_records(const Storage &storage) {
@@ -44,10 +47,13 @@ bool same_source(const Json &record, const std::string &yaml) {
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))),
+      instance_id_(generate_service_instance_id()),
       lease_(config_.storage_backend == "sqlite" ? std::make_unique<ProcessLease>(config_.db_path)
                                                  : nullptr),
       storage_(create_storage({config_.storage_backend, config_.db_path, config_.postgres_dsn,
-                               config_.postgres_schema})),
+                               config_.postgres_schema, config_.postgres_pool_min_connections,
+                               config_.postgres_pool_max_connections,
+                               config_.postgres_pool_acquisition_timeout_ms})),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
                config_.max_pending_scheduler_launches, 32),
@@ -92,7 +98,7 @@ Service::Service(asio::io_context &io, Config config)
             events_.publish(event);
             log_event(event);
           },
-          std::make_shared<SystemClock>(), config_.max_pending_scheduler_launches,
+               std::make_shared<SystemClock>(), config_.max_pending_scheduler_launches,
           config_.max_event_trigger_depth, config_.max_event_trigger_deliveries) {
   configure_logging(config_);
   providers_.add("mock", std::make_shared<MockModelProvider>());
