@@ -46,8 +46,7 @@ bool same_source(const Json &record, const std::string &yaml) {
 }
 } // namespace
 Service::Service(asio::io_context &io, Config config)
-    : config_(checked(std::move(config))),
-      instance_id_(generate_service_instance_id()),
+    : config_(checked(std::move(config))), instance_id_(generate_service_instance_id()),
       lease_(config_.storage_backend == "sqlite" ? std::make_unique<ProcessLease>(config_.db_path)
                                                  : nullptr),
       storage_(create_storage({config_.storage_backend, config_.db_path, config_.postgres_dsn,
@@ -98,7 +97,7 @@ Service::Service(asio::io_context &io, Config config)
             events_.publish(event);
             log_event(event);
           },
-               std::make_shared<SystemClock>(), config_.max_pending_scheduler_launches,
+          std::make_shared<SystemClock>(), config_.max_pending_scheduler_launches,
           config_.max_event_trigger_depth, config_.max_event_trigger_deliveries) {
   configure_logging(config_);
   providers_.add("mock", std::make_shared<MockModelProvider>());

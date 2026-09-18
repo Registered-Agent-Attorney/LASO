@@ -1,5 +1,5 @@
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <laso/storage/postgres_pool.hpp>
 #include <mutex>
@@ -48,8 +48,8 @@ struct PostgresConnectionPool::Lease::State {
 };
 
 namespace {
-std::unique_ptr<pqxx::connection> connect(
-    const std::shared_ptr<PostgresConnectionPool::Lease::State> &state) {
+std::unique_ptr<pqxx::connection>
+connect(const std::shared_ptr<PostgresConnectionPool::Lease::State> &state) {
   auto connection = std::make_unique<pqxx::connection>(state->dsn);
   pqxx::work transaction(*connection);
   transaction.exec("CREATE SCHEMA IF NOT EXISTS " + quoted_schema(state->schema));

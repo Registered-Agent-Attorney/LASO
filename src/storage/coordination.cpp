@@ -49,8 +49,8 @@ class PostgresCoordination final : public Coordination {
 public:
   PostgresCoordination(const CoordinationOptions &options, std::string owner)
       : owner_(std::move(owner)), pool_(options.postgres_dsn, options.postgres_schema,
-                                         {options.pool_min_connections, options.pool_max_connections,
-                                          options.pool_acquisition_timeout_ms}) {
+                                        {options.pool_min_connections, options.pool_max_connections,
+                                         options.pool_acquisition_timeout_ms}) {
     if (owner_.empty() || owner_.size() > 128)
       throw Error(ErrorCode::Validation, "Invalid coordination owner instance");
     auto lease = pool_.acquire();
@@ -233,26 +233,29 @@ public:
 
   CoordinationDiagnostics diagnostics() const override {
     const auto pool = pool_.diagnostics();
-    CoordinationDiagnostics result{pool.size, pool.in_use, pool.acquisition_timeouts,
-                                   pool.replacements, acquisition_failures_.load(),
-                                   renewal_failures_.load(), fencing_rejections_.load()};
+    CoordinationDiagnostics result{pool.size,
+                                   pool.in_use,
+                                   pool.acquisition_timeouts,
+                                   pool.replacements,
+                                   acquisition_failures_.load(),
+                                   renewal_failures_.load(),
+                                   fencing_rejections_.load()};
     return result;
   }
 
 private:
   std::string owner_;
   mutable PostgresConnectionPool pool_;
-  std::atomic<std::uint64_t> acquisition_failures_{0}, renewal_failures_{0},
-      fencing_rejections_{0};
+  std::atomic<std::uint64_t> acquisition_failures_{0}, renewal_failures_{0}, fencing_rejections_{0};
 };
 } // namespace
 
 std::unique_ptr<Coordination> create_coordination(const CoordinationOptions &options,
                                                   const std::string &owner_instance) {
   if (options.backend != "postgres")
-    throw Error(ErrorCode::Configuration,
-                options.backend == "sqlite" ? "Coordination is not available for SQLite"
-                                             : "Unsupported coordination backend");
+    throw Error(ErrorCode::Configuration, options.backend == "sqlite"
+                                              ? "Coordination is not available for SQLite"
+                                              : "Unsupported coordination backend");
   return std::make_unique<PostgresCoordination>(options, owner_instance);
 }
 } // namespace laso

@@ -40,8 +40,7 @@ struct Config {
            max_worker_jobs_per_worker = 16;
   // Zero disables a budget. Token and cost budgets accumulate per run.
   std::uint64_t max_worker_wall_time_ms = 0, max_worker_tokens_per_run = 0;
-  std::uint64_t postgres_pool_acquisition_timeout_ms = 1000,
-                coordination_lease_ttl_ms = 30000,
+  std::uint64_t postgres_pool_acquisition_timeout_ms = 1000, coordination_lease_ttl_ms = 30000,
                 coordination_heartbeat_interval_ms = 10000;
   unsigned postgres_pool_min_connections = 1, postgres_pool_max_connections = 4;
   double max_worker_cost_units_per_run = 0.0;
