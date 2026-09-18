@@ -155,7 +155,8 @@ struct Run {
               updated_at = created_at, actor = "local", error, parent_id, parent_node_id,
               parent_message_id, child_id, child_pipeline_id, initiation_type = "manual",
               schedule_id, schedule_occurrence_id, due_at, trigger_id, event_id, root_event_id,
-              owner_instance_id, lease_expires_at, claimed_at, last_renewed_at;
+              owner_instance_id, lease_expires_at, claimed_at, last_renewed_at,
+              pending_parallel_group, pending_parallel_join;
   unsigned pipeline_version = 1, child_pipeline_version = 0, subpipeline_depth = 0;
   unsigned trigger_depth = 0;
   std::uint64_t fencing_token = 0;
@@ -203,6 +204,8 @@ inline void to_json(Json &j, const Run &r) {
        {"lease_expires_at", r.lease_expires_at},
        {"claimed_at", r.claimed_at},
        {"last_renewed_at", r.last_renewed_at},
+       {"pending_parallel_group", r.pending_parallel_group},
+       {"pending_parallel_join", r.pending_parallel_join},
        {"trigger_depth", r.trigger_depth},
        {"child_runs", r.child_runs},
        {"resolved_subpipelines", r.resolved_subpipelines},
@@ -252,6 +255,8 @@ inline void from_json(const Json &j, Run &r) {
   r.lease_expires_at = j.value("lease_expires_at", std::string{});
   r.claimed_at = j.value("claimed_at", std::string{});
   r.last_renewed_at = j.value("last_renewed_at", std::string{});
+  r.pending_parallel_group = j.value("pending_parallel_group", std::string{});
+  r.pending_parallel_join = j.value("pending_parallel_join", std::string{});
   r.trigger_depth = j.value("trigger_depth", 0U);
   r.child_runs = j.value("child_runs", std::vector<std::string>{});
   r.resolved_subpipelines = j.value("resolved_subpipelines", std::map<std::string, std::string>{});
@@ -314,6 +319,78 @@ inline void from_json(const Json &j, NodeExecution &a) {
   j.at("attempt").get_to(a.attempt);
   j.at("state").get_to(a.state);
   j.at("duration_ms").get_to(a.duration_ms);
+}
+enum class NodeWorkState { Queued, Running, Completed, Failed, Cancelled };
+NLOHMANN_JSON_SERIALIZE_ENUM(NodeWorkState, {{NodeWorkState::Queued, "Queued"},
+                                             {NodeWorkState::Running, "Running"},
+                                             {NodeWorkState::Completed, "Completed"},
+                                             {NodeWorkState::Failed, "Failed"},
+                                             {NodeWorkState::Cancelled, "Cancelled"}})
+inline bool valid_node_work_transition(NodeWorkState from, NodeWorkState to) {
+  if (from == to)
+    return true;
+  if (from == NodeWorkState::Queued && to == NodeWorkState::Running)
+    return true;
+  if (from == NodeWorkState::Running &&
+      (to == NodeWorkState::Completed || to == NodeWorkState::Failed ||
+       to == NodeWorkState::Cancelled))
+    return true;
+  return false;
+}
+struct NodeWork {
+  std::string id = uuid(), run_id, group_id, node_id, join, created_at = timestamp(), updated_at = created_at,
+              owner_instance_id, lease_expires_at, claimed_at, last_renewed_at, error;
+  unsigned index = 0, attempt = 0, steps = 0;
+  std::uint64_t fencing_token = 0;
+  NodeWorkState state = NodeWorkState::Queued;
+  ExecutionToken token;
+  std::optional<Message> result;
+};
+inline void to_json(Json &j, const NodeWork &w) {
+  j = {{"id", w.id},
+       {"run_id", w.run_id},
+       {"group_id", w.group_id},
+       {"node_id", w.node_id},
+       {"join", w.join},
+       {"created_at", w.created_at},
+       {"updated_at", w.updated_at},
+       {"owner_instance_id", w.owner_instance_id},
+       {"lease_expires_at", w.lease_expires_at},
+       {"claimed_at", w.claimed_at},
+       {"last_renewed_at", w.last_renewed_at},
+       {"error", w.error},
+       {"index", w.index},
+       {"attempt", w.attempt},
+       {"steps", w.steps},
+       {"fencing_token", w.fencing_token},
+       {"state", w.state},
+       {"token", w.token}};
+  if (w.result)
+    j["result"] = *w.result;
+}
+inline void from_json(const Json &j, NodeWork &w) {
+  w.id = j.value("id", uuid());
+  w.run_id = j.value("run_id", std::string{});
+  w.group_id = j.value("group_id", std::string{});
+  w.node_id = j.value("node_id", std::string{});
+  w.join = j.value("join", std::string{});
+  w.created_at = j.value("created_at", timestamp());
+  w.updated_at = j.value("updated_at", timestamp());
+  w.owner_instance_id = j.value("owner_instance_id", std::string{});
+  w.lease_expires_at = j.value("lease_expires_at", std::string{});
+  w.claimed_at = j.value("claimed_at", std::string{});
+  w.last_renewed_at = j.value("last_renewed_at", std::string{});
+  w.error = j.value("error", std::string{});
+  w.index = j.value("index", 0U);
+  w.attempt = j.value("attempt", 0U);
+  w.steps = j.value("steps", 0U);
+  w.fencing_token = j.value("fencing_token", 0ULL);
+  w.state = j.value("state", NodeWorkState::Queued);
+  j.at("token").get_to(w.token);
+  if (j.contains("result") && !j.at("result").is_null())
+    w.result = j.at("result").get<Message>();
+  else
+    w.result.reset();
 }
 struct Approval {
   std::string id = uuid(), run_id, node_id, reason, action, created_at = timestamp(),

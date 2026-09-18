@@ -56,17 +56,30 @@ private:
     std::optional<LeaseRecord> lease;
     bool ownership_lost = false;
   };
+  struct ActiveNode {
+    std::stop_source stop;
+    LeaseRecord work_lease;
+    std::optional<LeaseRecord> global_slot;
+    std::optional<LeaseRecord> run_slot;
+    bool ownership_lost = false;
+  };
   std::map<std::string, ActiveRun> active_;
+  std::map<std::string, ActiveNode> active_nodes_;
   bool stopping_ = false;
   bool distributed_started_ = false;
   std::shared_ptr<asio::steady_timer> claim_timer_, lease_timer_;
   Task<void> claim_loop();
   Task<void> lease_loop();
+  Task<void> execute_distributed_work(NodeWork work, LeaseRecord work_lease,
+                                      std::optional<LeaseRecord> global_slot,
+                                      std::optional<LeaseRecord> run_slot,
+                                      std::stop_token stop);
   Task<void> execute(Run run, std::stop_token stop);
   Task<void> execute_branch(const PipelineDefinition &, ExecutionToken,
                             std::shared_ptr<ParallelState>, std::shared_ptr<AsyncLimiter>,
-                            std::chrono::steady_clock::time_point, unsigned);
-  Task<void> execute_parallel(Run &, const PipelineDefinition &, std::shared_ptr<AsyncLimiter>,
+                            std::chrono::steady_clock::time_point, unsigned,
+                            std::optional<LeaseRecord> = std::nullopt, std::string = {});
+  Task<bool> execute_parallel(Run &, const PipelineDefinition &, std::shared_ptr<AsyncLimiter>,
                               std::stop_token, std::chrono::steady_clock::time_point, unsigned);
   void schedule(Run run, std::optional<LeaseRecord> lease = std::nullopt);
   void cancel_locked(const std::string &, std::set<std::string> &, std::vector<std::string> &);
@@ -76,6 +89,9 @@ private:
   PolicyResult permission(const NodeDefinition &, const Run &) const;
   bool approved(const Run &) const;
   void wait_approval(Run &, const NodeDefinition &, const std::string &reason);
+  void reconcile_distributed_parallel(Run &, const PipelineDefinition &);
+  bool distributed_parallel_ready(const Run &) const;
+  void commit_node_owned(const std::vector<Record> &, const NodeWork &, const LeaseRecord &);
   bool advance(Run &, const PipelineDefinition &, const NodeDefinition &,
                const std::string &condition);
   bool prepare_join(Run &, const NodeDefinition &);

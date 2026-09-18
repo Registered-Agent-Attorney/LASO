@@ -21,7 +21,8 @@ enum class RecordKind {
   EventSource,
   ExternalEventClaim,
   WorkerJob,
-  WorkerInteraction
+  WorkerInteraction,
+  NodeWork
 };
 struct Record {
   RecordKind kind;

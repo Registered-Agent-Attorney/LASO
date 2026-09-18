@@ -95,6 +95,57 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
   deps_.events.publish(event);
   log_event(event);
 }
+void Runtime::commit_node_owned(const std::vector<Record> &records, const NodeWork &work,
+                                const LeaseRecord &lease) {
+  deps_.storage.commit_owned(records, "node:" + work.id, lease.owner_instance,
+                             lease.fencing_token);
+}
+bool Runtime::distributed_parallel_ready(const Run &r) const {
+  if (r.pending_parallel_group.empty())
+    return false;
+  const auto works = deps_.storage.list(RecordKind::NodeWork, r.id, 10000, 0);
+  bool found = false;
+  for (const auto &value : works) {
+    const auto work = value.get<NodeWork>();
+    if (work.group_id != r.pending_parallel_group)
+      continue;
+    found = true;
+    if (work.state == NodeWorkState::Queued || work.state == NodeWorkState::Running)
+      return false;
+  }
+  return found;
+}
+void Runtime::reconcile_distributed_parallel(Run &r, const PipelineDefinition &) {
+  if (r.pending_parallel_group.empty())
+    return;
+  std::vector<NodeWork> works;
+  for (const auto &value : deps_.storage.list(RecordKind::NodeWork, r.id, 10000, 0)) {
+    auto work = value.get<NodeWork>();
+    if (work.group_id == r.pending_parallel_group)
+      works.push_back(std::move(work));
+  }
+  if (works.empty())
+    throw Error(ErrorCode::Execution, "Distributed parallel work is missing");
+  std::sort(works.begin(), works.end(),
+            [](const NodeWork &left, const NodeWork &right) { return left.index < right.index; });
+  for (const auto &work : works)
+    if (work.state != NodeWorkState::Completed || !work.result)
+      throw Error(ErrorCode::Execution,
+                  work.error.empty() ? "Distributed parallel branch failed" : work.error);
+  r.message.payload = Json::array();
+  r.steps = 0;
+  for (const auto &work : works) {
+    r.message.payload.push_back(work.result->payload);
+    r.message.provenance.insert(r.message.provenance.end(), work.result->provenance.begin(),
+                                work.result->provenance.end());
+    r.steps = std::max(r.steps, work.steps);
+  }
+  r.frames.clear();
+  r.active_node = r.pending_parallel_join;
+  r.prepared_join = r.active_node;
+  r.pending_parallel_group.clear();
+  r.pending_parallel_join.clear();
+}
 void Runtime::transition(Run &r, RunState state, const std::string &event,
                          std::vector<Record> records) {
   if (!valid_transition(r.state, state))
@@ -237,7 +288,14 @@ Task<void> Runtime::claim_loop() {
       }
       if (terminal(run.state) || run.state == RunState::WaitingApproval)
         continue;
-      if (run.state == RunState::Paused && !run.child_id.empty()) {
+      if (run.state == RunState::Paused && !run.pending_parallel_group.empty()) {
+        try {
+          if (!distributed_parallel_ready(run))
+            continue;
+        } catch (const Error &) {
+          continue;
+        }
+      } else if (run.state == RunState::Paused && !run.child_id.empty()) {
         try {
           const auto child = deps_.storage.get(RecordKind::Run, run.child_id).get<Run>();
           if (!terminal(child.state))
@@ -292,7 +350,221 @@ Task<void> Runtime::claim_loop() {
         }
       }
     }
+    std::vector<Json> node_candidates;
+    try {
+      node_candidates = deps_.storage.list(RecordKind::NodeWork, "", config_.claim_batch_size, 0);
+    } catch (const Error &) {
+      continue;
+    }
+    for (const auto &value : node_candidates) {
+      NodeWork work;
+      try {
+        work = value.get<NodeWork>();
+        const auto run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
+        if (terminal(run.state) || run.cancellation_requested ||
+            run.pending_parallel_group != work.group_id)
+          continue;
+      } catch (const Error &) {
+        continue;
+      }
+      {
+        std::lock_guard lock(mutex_);
+        if (stopping_ || active_nodes_.size() >= config_.max_nodes ||
+            active_nodes_.contains(work.id))
+          break;
+      }
+      std::optional<LeaseRecord> work_lease;
+      std::optional<LeaseRecord> global_slot;
+      std::optional<LeaseRecord> run_slot;
+      try {
+        work_lease = deps_.coordination->acquire("node:" + work.id,
+                                                config_.coordination_lease_ttl_ms);
+        if (!work_lease)
+          continue;
+        for (unsigned slot = 0; slot < config_.max_nodes && !global_slot; ++slot)
+          global_slot = deps_.coordination->acquire(
+              "node-slot:" + std::to_string(slot), config_.coordination_lease_ttl_ms);
+        if (!global_slot) {
+          deps_.coordination->release(*work_lease);
+          continue;
+        }
+        for (unsigned slot = 0; slot < config_.max_nodes_per_run && !run_slot; ++slot)
+          run_slot = deps_.coordination->acquire(
+              "run-node-slot:" + work.run_id + ":" + std::to_string(slot),
+              config_.coordination_lease_ttl_ms);
+        if (!run_slot) {
+          deps_.coordination->release(*global_slot);
+          deps_.coordination->release(*work_lease);
+          continue;
+        }
+        work = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+        if (work.state == NodeWorkState::Completed || work.state == NodeWorkState::Failed ||
+            work.state == NodeWorkState::Cancelled) {
+          deps_.coordination->release(*run_slot);
+          deps_.coordination->release(*global_slot);
+          deps_.coordination->release(*work_lease);
+          continue;
+        }
+        work.state = NodeWorkState::Running;
+        ++work.attempt;
+        work.owner_instance_id = work_lease->owner_instance;
+        work.fencing_token = work_lease->fencing_token;
+        work.claimed_at = work_lease->acquired_at;
+        work.last_renewed_at = work_lease->heartbeat_at;
+        work.lease_expires_at = work_lease->expires_at;
+        work.updated_at = timestamp();
+        commit_node_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}}, work,
+                          *work_lease);
+        std::lock_guard lock(mutex_);
+        if (stopping_ || active_nodes_.size() >= config_.max_nodes) {
+          deps_.coordination->release(*run_slot);
+          deps_.coordination->release(*global_slot);
+          deps_.coordination->release(*work_lease);
+          continue;
+        }
+        ActiveNode active;
+        active.work_lease = *work_lease;
+        active.global_slot = *global_slot;
+        active.run_slot = *run_slot;
+        auto [it, inserted] = active_nodes_.emplace(work.id, std::move(active));
+        if (!inserted)
+          throw Error(ErrorCode::Conflict, "Node work is already executing");
+        auto stop = it->second.stop.get_token();
+        const auto id = work.id;
+        asio::co_spawn(
+            io_, execute_distributed_work(std::move(work), *work_lease, *global_slot, *run_slot,
+                                          stop),
+            [this, id](const std::exception_ptr &error) {
+              std::lock_guard lock(mutex_);
+              std::optional<LeaseRecord> work_lease;
+              std::optional<LeaseRecord> global_slot;
+              std::optional<LeaseRecord> run_slot;
+              if (const auto active = active_nodes_.find(id); active != active_nodes_.end()) {
+                work_lease = active->second.work_lease;
+                global_slot = active->second.global_slot;
+                run_slot = active->second.run_slot;
+                active_nodes_.erase(active);
+              }
+              if (error)
+                log_diagnostic("runtime.distributed_node_failure", {{"node_work_id", id}});
+              if (run_slot)
+                try {
+                  deps_.coordination->release(*run_slot);
+                } catch (const Error &) {
+                }
+              if (global_slot)
+                try {
+                  deps_.coordination->release(*global_slot);
+                } catch (const Error &) {
+                }
+              if (work_lease)
+                try {
+                  deps_.coordination->release(*work_lease);
+                } catch (const Error &) {
+                }
+            });
+      } catch (const Error &) {
+        if (run_slot)
+          try {
+            deps_.coordination->release(*run_slot);
+          } catch (const Error &) {
+          }
+        if (global_slot)
+          try {
+            deps_.coordination->release(*global_slot);
+          } catch (const Error &) {
+          }
+        if (work_lease)
+          try {
+            deps_.coordination->release(*work_lease);
+          } catch (const Error &) {
+          }
+      }
+    }
   }
+}
+Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lease,
+                                              std::optional<LeaseRecord> global_slot,
+                                              std::optional<LeaseRecord> run_slot,
+                                              std::stop_token stop) {
+  (void)global_slot;
+  (void)run_slot;
+  try {
+    const auto run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
+    if (run.cancellation_requested || terminal(run.state)) {
+      auto cancelled = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+      cancelled.state = NodeWorkState::Cancelled;
+      cancelled.error = "Parent run cancellation requested";
+      cancelled.updated_at = timestamp();
+      commit_node_owned({{RecordKind::NodeWork, cancelled.id, cancelled.run_id, Json(cancelled)}},
+                        cancelled, work_lease);
+      co_return;
+    }
+    auto extensions = deps_.nodes.names();
+    auto pipeline = parse_pipeline(run.definition, {extensions.begin(), extensions.end()});
+    pipeline.resolved_subpipelines = run.resolved_subpipelines;
+    auto branch_state = std::make_shared<ParallelState>(1, work.steps);
+    auto run_nodes = std::make_shared<AsyncLimiter>(config_.max_nodes_per_run);
+    std::stop_callback parent_stop(stop, [branch_state] { branch_state->stop.request_stop(); });
+    co_await execute_branch(pipeline, std::move(work.token), branch_state, run_nodes,
+                            std::chrono::steady_clock::now() + pipeline.timeout.timeout,
+                            run.subpipeline_depth, work_lease, work.id);
+    NodeWork completed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+    const auto current_run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
+    if (current_run.cancellation_requested || terminal(current_run.state)) {
+      completed.state = NodeWorkState::Cancelled;
+      completed.error = "Parent run cancellation requested";
+      completed.updated_at = timestamp();
+      commit_node_owned({{RecordKind::NodeWork, completed.id, completed.run_id, Json(completed)}},
+                        completed, work_lease);
+      co_return;
+    }
+    {
+      std::lock_guard lock(branch_state->mutex);
+      if (branch_state->failed)
+        throw Error(branch_state->code, branch_state->error);
+      if (!branch_state->outputs.front())
+        throw Error(ErrorCode::Execution, "Distributed node work produced no output");
+      completed.result = *branch_state->outputs.front();
+      completed.steps = branch_state->steps;
+    }
+    completed.state = NodeWorkState::Completed;
+    completed.owner_instance_id = work_lease.owner_instance;
+    completed.fencing_token = work_lease.fencing_token;
+    completed.updated_at = timestamp();
+    completed.error.clear();
+    commit_node_owned({{RecordKind::NodeWork, completed.id, completed.run_id, Json(completed)}},
+                      completed, work_lease);
+  } catch (const Error &error) {
+    try {
+      auto failed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+      failed.state = error.code == ErrorCode::Cancellation ? NodeWorkState::Cancelled
+                                                            : NodeWorkState::Failed;
+      failed.error = error.what();
+      failed.updated_at = timestamp();
+      failed.owner_instance_id = work_lease.owner_instance;
+      failed.fencing_token = work_lease.fencing_token;
+      commit_node_owned({{RecordKind::NodeWork, failed.id, failed.run_id, Json(failed)}}, failed,
+                        work_lease);
+    } catch (const Error &) {
+      // A lost fencing token is the expected outcome when a worker is taken
+      // over.  The replacement owner will publish the authoritative result.
+    }
+  } catch (...) {
+    try {
+      auto failed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
+      failed.state = NodeWorkState::Failed;
+      failed.error = "Distributed node work failed";
+      failed.updated_at = timestamp();
+      failed.owner_instance_id = work_lease.owner_instance;
+      failed.fencing_token = work_lease.fencing_token;
+      commit_node_owned({{RecordKind::NodeWork, failed.id, failed.run_id, Json(failed)}}, failed,
+                        work_lease);
+    } catch (const Error &) {
+    }
+  }
+  (void)stop;
+  co_return;
 }
 Task<void> Runtime::lease_loop() {
   for (;;) {
@@ -301,7 +573,14 @@ Task<void> Runtime::lease_loop() {
     co_await lease_timer_->async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
     if (wait_error)
       co_return;
+    struct NodeLeases {
+      std::string id;
+      LeaseRecord work;
+      std::optional<LeaseRecord> global;
+      std::optional<LeaseRecord> run;
+    };
     std::vector<std::pair<std::string, LeaseRecord>> leases;
+    std::vector<NodeLeases> node_leases;
     {
       std::lock_guard lock(mutex_);
       if (stopping_)
@@ -309,6 +588,8 @@ Task<void> Runtime::lease_loop() {
       for (const auto &[id, active] : active_)
         if (active.lease)
           leases.emplace_back(id, *active.lease);
+      for (const auto &[id, active] : active_nodes_)
+        node_leases.push_back({id, active.work_lease, active.global_slot, active.run_slot});
     }
     try {
       if (!deps_.coordination->heartbeat_instance("ACTIVE"))
@@ -335,6 +616,36 @@ Task<void> Runtime::lease_loop() {
           active->second.ownership_lost = true;
           active->second.stop.request_stop();
         }
+      }
+    }
+    for (auto &node : node_leases) {
+      bool valid = true;
+      for (auto *lease : {&node.work, node.global ? &*node.global : nullptr,
+                          node.run ? &*node.run : nullptr}) {
+        if (!lease)
+          continue;
+        try {
+          if (!deps_.coordination->renew(*lease, config_.coordination_lease_ttl_ms))
+            valid = false;
+        } catch (const Error &) {
+          valid = false;
+        }
+      }
+      if (!valid) {
+        std::lock_guard lock(mutex_);
+        if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end()) {
+          active->second.ownership_lost = true;
+          active->second.stop.request_stop();
+        }
+        continue;
+      }
+      std::lock_guard lock(mutex_);
+      if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end()) {
+        active->second.work_lease = node.work;
+        if (node.global)
+          active->second.global_slot = node.global;
+        if (node.run)
+          active->second.run_slot = node.run;
       }
     }
   }
@@ -473,6 +784,10 @@ void Runtime::shutdown() {
     }
   }
   for (auto &[id, source] : active_) {
+    (void)id;
+    source.stop.request_stop();
+  }
+  for (auto &[id, source] : active_nodes_) {
     (void)id;
     source.stop.request_stop();
   }

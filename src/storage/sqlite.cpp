@@ -22,7 +22,8 @@ std::string table(RecordKind kind) {
                                        "event_sources",
                                        "external_event_claims",
                                        "worker_jobs",
-                                       "worker_interactions"};
+                                       "worker_interactions",
+                                       "node_work"};
   const auto index = static_cast<std::size_t>(kind);
   if (index >= names.size())
     throw Error(ErrorCode::Validation, "Unknown record kind");
@@ -89,7 +90,7 @@ SQLiteStorage::SQLiteStorage(const std::filesystem::path &path) : impl_(std::mak
   version_stmt.reset();
   exec(raw, "BEGIN IMMEDIATE");
   try {
-    for (std::size_t i = 0; i < 15; ++i) {
+    for (std::size_t i = 0; i < 16; ++i) {
       auto name = table(static_cast<RecordKind>(i));
       exec(raw, "CREATE TABLE IF NOT EXISTS " + name +
                     " (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, body TEXT NOT NULL "
@@ -141,6 +142,19 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
             throw Error(ErrorCode::Conflict, "Invalid worker job state transition");
         }
       }
+      if (r.kind == RecordKind::NodeWork) {
+        auto existing = prepare(db, "SELECT body FROM node_work WHERE id=?");
+        bind(existing.get(), 1, r.id);
+        if (sqlite3_step(existing.get()) == SQLITE_ROW) {
+          const auto *stored = sqlite3_column_text(existing.get(), 0);
+          if (!stored)
+            throw Error(ErrorCode::Storage, "Missing node work state");
+          const auto old_work = Json::parse(reinterpret_cast<const char *>(stored)).get<NodeWork>();
+          const auto new_work = r.value.get<NodeWork>();
+          if (!valid_node_work_transition(old_work.state, new_work.state))
+            throw Error(ErrorCode::Conflict, "Invalid node work state transition");
+        }
+      }
       bind(s.get(), 1, r.id);
       bind(s.get(), 2, r.run_id);
       bind(s.get(), 3, body);
@@ -189,7 +203,8 @@ bool SQLiteStorage::claim(const Record &record, const std::vector<Record> &assoc
   if (record.id.empty())
     throw Error(ErrorCode::Validation, "Record id is empty");
   if (record.kind != RecordKind::ScheduleOccurrence && record.kind != RecordKind::TriggerDelivery &&
-      record.kind != RecordKind::ExternalEventClaim && record.kind != RecordKind::WorkerJob)
+      record.kind != RecordKind::ExternalEventClaim && record.kind != RecordKind::WorkerJob &&
+      record.kind != RecordKind::NodeWork)
     throw Error(ErrorCode::Validation, "Record kind cannot be claimed");
   const auto name = table(record.kind);
   const auto body = serialize(record.value);

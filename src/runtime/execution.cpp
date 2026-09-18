@@ -54,7 +54,19 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
                                    std::shared_ptr<ParallelState> state,
                                    std::shared_ptr<AsyncLimiter> run_nodes,
                                    std::chrono::steady_clock::time_point pipeline_deadline,
-                                   unsigned subpipeline_depth) {
+                                   unsigned subpipeline_depth,
+                                   std::optional<LeaseRecord> work_lease,
+                                   std::string work_id) {
+  auto persist = [&](const std::vector<Record> &records) {
+    if (work_lease) {
+      NodeWork work;
+      work.id = work_id;
+      deps_.storage.commit_owned(records, "node:" + work_id, work_lease->owner_instance,
+                                 work_lease->fencing_token);
+    } else {
+      deps_.storage.commit(records);
+    }
+  };
   try {
     Run branch;
     branch.id = token.message.run_id;
@@ -117,7 +129,7 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
         attempt.run_id = branch.id;
         attempt.node_id = definition.id;
         attempt.attempt = attempt_number;
-        deps_.storage.commit({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
+        persist({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
         try {
           NodeResult result;
           if (definition.type == "subpipeline") {
@@ -176,7 +188,7 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           branch.message.time = timestamp();
           branch.message.provenance.push_back(
               {definition.id, "", "", "", "", parent, "", timestamp(), ""});
-          deps_.storage.commit(
+          persist(
               {{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)},
                {RecordKind::Message, branch.message.id, branch.id, Json(branch.message)}});
           std::vector<const EdgeDefinition *> edges;
@@ -206,7 +218,7 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           attempt.duration_ms =
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                   .count();
-          deps_.storage.commit({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
+          persist({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
           if (attempt.state == NodeState::Cancelled || attempt.state == NodeState::TimedOut ||
               attempt_number == definition.retry.max_attempts)
             throw;
@@ -238,13 +250,36 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
   }
 }
 
-Task<void> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipeline,
+Task<bool> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipeline,
                                      std::shared_ptr<AsyncLimiter> run_nodes,
                                      std::stop_token parent,
                                      std::chrono::steady_clock::time_point pipeline_deadline,
                                      unsigned subpipeline_depth) {
   std::vector<ExecutionToken> tokens;
   tokens.swap(run.ready);
+  if (deps_.coordination) {
+    const auto group = uuid();
+    const auto join = pipeline.nodes.at(run.active_node).join;
+    std::vector<Record> records;
+    records.reserve(tokens.size());
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+      NodeWork work;
+      work.id = group + ":" + std::to_string(index);
+      work.run_id = run.id;
+      work.group_id = group;
+      work.node_id = tokens[index].node_id;
+      work.join = join;
+      work.index = static_cast<unsigned>(index);
+      work.token = std::move(tokens[index]);
+      work.steps = run.steps;
+      records.push_back({RecordKind::NodeWork, work.id, run.id, Json(work)});
+    }
+    run.pending_parallel_group = group;
+    run.pending_parallel_join = join;
+    run.state = RunState::Paused;
+    checkpoint(run, "parallel.waiting", std::move(records));
+    co_return true;
+  }
   auto state = std::make_shared<ParallelState>(tokens.size(), run.steps);
   std::stop_callback parent_stop(parent, [state] { state->stop.request_stop(); });
   for (auto &token : tokens)
@@ -276,7 +311,7 @@ Task<void> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipelin
   run.frames.clear();
   run.active_node = pipeline.nodes.at(run.active_node).join;
   run.prepared_join = run.active_node;
-  co_return;
+  co_return false;
 }
 
 Task<void> Runtime::execute(Run r, std::stop_token stop) {
@@ -291,6 +326,7 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
       std::lock_guard lock(mutex_);
       transition(r, RunState::Starting, "run.starting");
       transition(r, RunState::Running, "run.started");
+      reconcile_distributed_parallel(r, pipeline);
     }
     while (true) {
       attempt_recorded = false;
@@ -548,8 +584,9 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
               // Approval branches need the existing durable pause/resume protocol.
               continuing = next_ready(r);
             } else {
-              co_await execute_parallel(r, pipeline, run_nodes, stop, deadline,
-                                        r.subpipeline_depth);
+              if (co_await execute_parallel(r, pipeline, run_nodes, stop, deadline,
+                                             r.subpipeline_depth))
+                co_return;
               result.message = r.message;
               for (auto &record : records)
                 if (record.kind == RecordKind::Message && record.id == r.message.id) {
