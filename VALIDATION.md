@@ -125,8 +125,8 @@ and sanitizer runtime; global ASLR settings were not weakened to work around it.
 
 Snapshot validated: 2026-09-18. The default SQLite Debug build scheduled **180
 CTest entries: 178 passed and 2 PostgreSQL cases skipped** because no PostgreSQL
-DSN was supplied. The PostgreSQL-enabled Debug build scheduled **186 CTest entries
-and passed 186/186** against an isolated PostgreSQL 16 service. This includes the
+DSN was supplied. The PostgreSQL-enabled Debug build scheduled **187 CTest entries
+and passed 187/187** against an isolated PostgreSQL 16 service. This includes the
 bounded pool, unique service-instance, lease contention, renewal, expiry takeover,
 fencing rejection, process-exit takeover, and concurrent takeover tests. The
 existing PostgreSQL owner-lock, storage conformance, scheduler, worker, and
