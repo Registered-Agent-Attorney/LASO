@@ -158,3 +158,25 @@ durable schedules/triggers, occurrence/delivery deduplication, and restart/reope
 recovery. Scheduler tests cover UTC one-time/interval/cron behavior, misfire and
 overlap policies, bounded capacity retry, event matching/depth/deduplication,
 API/CLI surfaces, and normal-runtime launch provenance.
+
+## Current optional Codex-adapter validation
+
+This branch adds seven deterministic and one separately gated Codex adapter test
+to the existing suite. The default build remains Codex-free with 180 CTest
+entries. With `-DLASO_BUILD_CODEX_ADAPTER=ON`, the fixture-only suite contains
+187 entries and the full optional registration contains 188 entries including
+the gated real-installation test. The seven deterministic tests use a local
+app-server-shaped fixture and cover structured startup, session follow-up,
+adapter restart/resume, project-root rejection, LASO permission forwarding and
+denial, question forwarding, and malformed-protocol failure. They do not require
+an account or network access.
+
+The real installation test is separately gated with
+`LASO_RUN_REAL_CODEX=1`, uses a temporary fixture project, and is not counted as
+passing unless it is explicitly run. It exercises the installed Codex
+app-server, session capture, a bounded file edit, follow-up, and adapter
+restart/resume. Its result must be recorded from the actual run; a skipped
+gated test is not a pass. The adapter targets the structured app-server
+interface observed in Codex CLI 0.154.0. The explicit real test passed in
+19.08 seconds, including a temporary fixture edit, follow-up, and
+adapter restart/resume. It is not part of the default or fixture-only totals.

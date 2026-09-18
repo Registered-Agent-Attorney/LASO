@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added the optional `laso-codex-worker` adapter. It uses the installed Codex
+  app-server's structured JSON-RPC interface behind the supervised process
+  transport, supports persistent thread start/resume, normalized results and
+  token usage, bounded project roots, cancellation, and LASO-controlled
+  command/file/permission approvals. It is disabled by default and does not
+  add Codex-specific behavior to Core.
+
 - Added durable, policy-controlled worker `approval`, `permission`, and
   `question` requests to the versioned process protocol. Added an opt-in
   supervised OpenCode 1.18.x adapter with session continuation, bounded

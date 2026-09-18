@@ -63,6 +63,11 @@ The OpenCode worker adapter is optional and disabled by default. Build it only
 when needed with `-DLASO_BUILD_OPENCODE_ADAPTER=ON`; native and generic
 process-worker support remain available in the default build.
 
+The Codex worker adapter is also optional and disabled by default. Build it with
+`-DLASO_BUILD_CODEX_ADAPTER=ON`; it uses the installed Codex app-server through
+the same supervised process boundary. No Codex installation or account is
+required for the default build or tests. See [Codex worker](docs/codex-worker.md).
+
 The default build has no PostgreSQL development-library requirement. Produced
 binaries are `build/bin/laso`, `build/bin/laso-server`, and
 `build/laso_tests`. Example C plugins are
@@ -187,6 +192,7 @@ process.** Metadata validation does not isolate native code. See the
 | `worker-adapter` | Offline worker plugin → durable worker job → status event → validated output |
 | `process-worker` | Supervised local process transport → deterministic reference worker host |
 | `opencode-worker` | Optional supervised OpenCode session adapter (requires a local OpenCode installation) |
+| `codex-worker` | Optional supervised Codex session adapter (requires a local Codex installation) |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 
 For an optional loopback-only OpenAI-compatible local model service, see

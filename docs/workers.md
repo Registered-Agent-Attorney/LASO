@@ -153,9 +153,12 @@ process_workers:
 
 The deterministic `laso-example-worker-host` is a reference/test adapter, not
 an AI assistant. The OpenCode adapter is opt-in and does not add an OpenCode
-dependency to the default build or configuration. Remote worker networking,
-mandatory process isolation, distributed leasing, and Codex/Claude adapters
-remain future work.
+dependency to the default build or configuration. The optional
+`laso-codex-worker` similarly targets the installed Codex app-server through
+structured JSON-RPC, supports durable thread IDs and LASO-controlled approval
+requests, and is built only with `-DLASO_BUILD_CODEX_ADAPTER=ON`; see
+[Codex worker](codex-worker.md). Remote worker networking, mandatory process
+isolation, distributed leasing, and Claude adapters remain future work.
 
 ## Policy, secrets, and trust
 
