@@ -169,7 +169,7 @@ available in the validation environment.
 | Configuration | Result |
 |---|---|
 | Default SQLite Debug | **PASS: 180/180; 178 passed and 2 PostgreSQL cases skipped** |
-| Claude-enabled Debug | **PASS: 189 scheduled; 188 passed and 1 real-Claude case skipped** |
+| Claude-enabled Debug | **PASS: 189 scheduled; 186 passed and 3 expected cases skipped (2 PostgreSQL, 1 real Claude)** |
 | PostgreSQL + Claude Debug | **PASS: 189 scheduled; 188 passed and 1 real-Claude case skipped; PostgreSQL cases executed** |
 | Claude-enabled ASan/UBSan | **PASS: 189 scheduled; 186 passed and 3 expected cases skipped (2 PostgreSQL, 1 real Claude)** |
 | Claude deterministic adapter tests | **PASS: 8/8 executed; session resume, project/symlink boundaries, interactions, failures, cancellation truthfulness, and bounded process cleanup** |
