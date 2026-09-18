@@ -1,6 +1,9 @@
 #include "../support.hpp"
 #include <chrono>
+#include <csignal>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 using namespace laso;
 using namespace laso::test;
@@ -249,6 +252,116 @@ edges:
   EXPECT_EQ(work[1].get<NodeWork>().state, NodeWorkState::Completed);
   EXPECT_EQ(result.message.payload, Json::array({Json{{"value", "shared"}},
                                                  Json{{"value", "shared"}}}));
+}
+
+TEST(DistributedExecution, ProcessCrashAllowsNodeWorkTakeoverAndRunRecovery) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+#if !defined(LASO_DISTRIBUTED_PROCESS)
+  GTEST_SKIP() << "distributed process fixture is not built";
+#else
+  TemporaryDirectory directory;
+  Config configuration = config(directory.path);
+  configuration.storage_backend = "postgres";
+  configuration.postgres_dsn = database.dsn;
+  configuration.postgres_schema = database.schema;
+  configuration.execution_mode = "multi_instance";
+  configuration.max_runs = 1;
+  configuration.max_nodes = 1;
+  configuration.max_nodes_per_run = 1;
+  configuration.coordination_lease_ttl_ms = 1000;
+  configuration.coordination_heartbeat_interval_ms = 100;
+  configuration.validate();
+
+  asio::io_context io;
+  Service seed(io, configuration);
+  const auto pipeline = R"yaml(
+laso: '1'
+name: process-recovery
+version: 1
+nodes:
+  input: {type: input}
+  fork: {type: parallel, join: join}
+  left: {type: function, function: distributed_hold}
+  right: {type: function, function: identity}
+  join: {type: join}
+  output: {type: output}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: left}
+  - {from: fork, to: right}
+  - {from: left, to: join}
+  - {from: right, to: join}
+  - {from: join, to: output}
+)yaml";
+  seed.register_pipeline(pipeline);
+  const auto run_id = seed.start("process-recovery@1", Json{{"value", "crash-safe"}});
+  seed.shutdown();
+
+  const auto start_process = [&] {
+    const auto child = fork();
+    if (child == -1) {
+      ADD_FAILURE() << "fork failed";
+      return pid_t{-1};
+    }
+    if (child == 0) {
+      setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
+      setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
+      setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
+      execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
+      _exit(127);
+    }
+    return child;
+  };
+  const auto owner = start_process();
+  ASSERT_NE(owner, -1);
+  std::string old_owner;
+  std::uint64_t old_token = 0;
+  std::string work_id;
+  for (unsigned i = 0; i < 300; ++i) {
+    for (const auto &value : seed.list(RecordKind::NodeWork, run_id)) {
+      const auto work = value.get<NodeWork>();
+      if (work.state == NodeWorkState::Running) {
+        work_id = work.id;
+        old_owner = work.owner_instance_id;
+        old_token = work.fencing_token;
+      }
+    }
+    if (!work_id.empty())
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  ASSERT_FALSE(work_id.empty());
+  ASSERT_EQ(kill(owner, SIGKILL), 0);
+  int owner_status = 0;
+  ASSERT_EQ(waitpid(owner, &owner_status, 0), owner);
+  ASSERT_TRUE(WIFSIGNALED(owner_status));
+  const auto recovery = start_process();
+  laso::Run result;
+  for (unsigned i = 0; i < 600; ++i) {
+    result = seed.get(RecordKind::Run, run_id).get<laso::Run>();
+    if (terminal(result.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  int recovery_status = 0;
+  ASSERT_EQ(waitpid(recovery, &recovery_status, 0), recovery);
+  EXPECT_TRUE(WIFEXITED(recovery_status));
+  ASSERT_EQ(result.state, RunState::Completed) << result.error;
+  const auto works = seed.list(RecordKind::NodeWork, run_id);
+  ASSERT_EQ(works.size(), 2U);
+  bool retaken = false;
+  for (const auto &value : works) {
+    const auto work = value.get<NodeWork>();
+    EXPECT_EQ(work.state, NodeWorkState::Completed);
+    if (work.id == work_id) {
+      retaken = work.attempt >= 2 && work.fencing_token > old_token &&
+                work.owner_instance_id != old_owner;
+    }
+  }
+  EXPECT_TRUE(retaken);
+#endif
 }
 
 TEST(DistributedExecution, MultiInstanceRejectsSQLite) {
