@@ -72,8 +72,7 @@ private:
   Task<void> lease_loop();
   Task<void> execute_distributed_work(NodeWork work, LeaseRecord work_lease,
                                       std::optional<LeaseRecord> global_slot,
-                                      std::optional<LeaseRecord> run_slot,
-                                      std::stop_token stop);
+                                      std::optional<LeaseRecord> run_slot, std::stop_token stop);
   Task<void> execute(Run run, std::stop_token stop);
   Task<void> execute_branch(const PipelineDefinition &, ExecutionToken,
                             std::shared_ptr<ParallelState>, std::shared_ptr<AsyncLimiter>,

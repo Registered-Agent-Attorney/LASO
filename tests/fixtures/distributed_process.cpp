@@ -36,13 +36,12 @@ int main() {
     config.validate();
     Executor executor(config.workers);
     Service service(executor.context(), config);
-    service.functions().add(
-        "distributed_hold",
-        std::make_shared<Function>([delay](ExecutionContext &context,
-                                           const Json &input) -> Task<Json> {
-          co_await context.delay(delay);
-          co_return input;
-        }));
+    service.functions().add("distributed_hold",
+                            std::make_shared<Function>([delay](ExecutionContext &context,
+                                                               const Json &input) -> Task<Json> {
+                              co_await context.delay(delay);
+                              co_return input;
+                            }));
     executor.start();
     for (unsigned i = 0; i < 1200; ++i) {
       const auto run = service.get(RecordKind::Run, run_id).get<Run>();

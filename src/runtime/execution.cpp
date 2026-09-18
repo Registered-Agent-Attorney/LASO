@@ -55,8 +55,7 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
                                    std::shared_ptr<AsyncLimiter> run_nodes,
                                    std::chrono::steady_clock::time_point pipeline_deadline,
                                    unsigned subpipeline_depth,
-                                   std::optional<LeaseRecord> work_lease,
-                                   std::string work_id,
+                                   std::optional<LeaseRecord> work_lease, std::string work_id,
                                    std::string work_attempt_id) {
   auto persist = [&](const std::vector<Record> &records) {
     if (work_lease) {
@@ -81,9 +80,8 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
     for (;;) {
       const auto &definition = pipeline.nodes.at(branch.active_node);
       if (definition.type == "join") {
-        const auto index = work_id.empty() && !branch.frames.empty()
-                               ? branch.frames.back().index
-                               : 0U;
+        const auto index =
+            work_id.empty() && !branch.frames.empty() ? branch.frames.back().index : 0U;
         std::lock_guard lock(state->mutex);
         if (index >= state->outputs.size() || state->outputs[index].has_value())
           throw Error(ErrorCode::Execution, "Parallel branch arrived twice");
@@ -193,9 +191,8 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           branch.message.time = timestamp();
           branch.message.provenance.push_back(
               {definition.id, "", "", "", "", parent, "", timestamp(), ""});
-          persist(
-              {{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)},
-               {RecordKind::Message, branch.message.id, branch.id, Json(branch.message)}});
+          persist({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)},
+                   {RecordKind::Message, branch.message.id, branch.id, Json(branch.message)}});
           std::vector<const EdgeDefinition *> edges;
           for (const auto &edge : pipeline.edges)
             if (edge.from == definition.id &&
@@ -256,9 +253,9 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
 }
 
 Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lease,
-                                              std::optional<LeaseRecord> global_slot,
-                                              std::optional<LeaseRecord> run_slot,
-                                              std::stop_token stop) {
+                                             std::optional<LeaseRecord> global_slot,
+                                             std::optional<LeaseRecord> run_slot,
+                                             std::stop_token stop) {
   (void)global_slot;
   (void)run_slot;
   try {
@@ -310,8 +307,8 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
   } catch (const Error &error) {
     try {
       auto failed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
-      failed.state = error.code == ErrorCode::Cancellation ? NodeWorkState::Cancelled
-                                                            : NodeWorkState::Failed;
+      failed.state =
+          error.code == ErrorCode::Cancellation ? NodeWorkState::Cancelled : NodeWorkState::Failed;
       failed.error = error.what();
       failed.updated_at = timestamp();
       failed.owner_instance_id = work_lease.owner_instance;
@@ -691,7 +688,7 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
               continuing = next_ready(r);
             } else {
               if (co_await execute_parallel(r, pipeline, run_nodes, stop, deadline,
-                                             r.subpipeline_depth)) {
+                                            r.subpipeline_depth)) {
                 checkpoint(r, "node.completed", std::move(records));
                 co_return;
               }

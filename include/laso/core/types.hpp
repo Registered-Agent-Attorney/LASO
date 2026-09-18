@@ -340,8 +340,9 @@ inline bool valid_node_work_transition(NodeWorkState from, NodeWorkState to) {
   return false;
 }
 struct NodeWork {
-  std::string id = uuid(), run_id, group_id, node_id, join, created_at = timestamp(), updated_at = created_at,
-              owner_instance_id, lease_expires_at, claimed_at, last_renewed_at, attempt_id, error;
+  std::string id = uuid(), run_id, group_id, node_id, join, created_at = timestamp(),
+              updated_at = created_at, owner_instance_id, lease_expires_at, claimed_at,
+              last_renewed_at, attempt_id, error;
   unsigned index = 0, attempt = 0, steps = 0;
   std::uint64_t fencing_token = 0;
   NodeWorkState state = NodeWorkState::Queued;

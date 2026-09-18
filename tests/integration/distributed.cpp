@@ -310,9 +310,8 @@ edges:
   std::string work_error;
   for (const auto &item : work)
     work_error += item.dump() + "\n";
-  ASSERT_EQ(result.state, RunState::Completed) << result.error << " pending="
-                                                << result.pending_parallel_group << " work="
-                                                << work_error;
+  ASSERT_EQ(result.state, RunState::Completed)
+      << result.error << " pending=" << result.pending_parallel_group << " work=" << work_error;
   ASSERT_EQ(work.size(), 2U);
   EXPECT_EQ(work[0].get<NodeWork>().state, NodeWorkState::Completed);
   EXPECT_EQ(work[1].get<NodeWork>().state, NodeWorkState::Completed);
@@ -322,8 +321,8 @@ edges:
         value.get<NodeExecution>().state == NodeState::Completed)
       fork_completed = true;
   EXPECT_TRUE(fork_completed);
-  EXPECT_EQ(result.message.payload, Json::array({Json{{"value", "shared"}},
-                                                 Json{{"value", "shared"}}}));
+  EXPECT_EQ(result.message.payload,
+            Json::array({Json{{"value", "shared"}}, Json{{"value", "shared"}}}));
 }
 
 TEST(DistributedExecution, DistributedBranchRetriesKeepDistinctAttempts) {
@@ -350,12 +349,12 @@ TEST(DistributedExecution, DistributedBranchRetriesKeepDistinctAttempts) {
   Executor first_executor(first.workers), second_executor(second.workers);
   Service first_service(first_executor.context(), first);
   Service second_service(second_executor.context(), second);
-  auto flaky = std::make_shared<Function>([](ExecutionContext &context,
-                                               const Json &input) -> Task<Json> {
-    if (context.attempt == 1)
-      throw Error(ErrorCode::Execution, "synthetic retry");
-    co_return input;
-  });
+  auto flaky =
+      std::make_shared<Function>([](ExecutionContext &context, const Json &input) -> Task<Json> {
+        if (context.attempt == 1)
+          throw Error(ErrorCode::Execution, "synthetic retry");
+        co_return input;
+      });
   first_service.functions().add("distributed_flaky", flaky);
   second_service.functions().add("distributed_flaky", flaky);
   const auto pipeline = R"yaml(
@@ -567,12 +566,10 @@ TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
   work.state = NodeWorkState::Completed;
   work.result = Message{};
   EXPECT_THROW(storage->commit_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}},
-                                     "node:" + work.id, old->owner_instance,
-                                     old->fencing_token),
+                                     "node:" + work.id, old->owner_instance, old->fencing_token),
                Error);
   storage->commit_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}},
-                        "node:" + work.id, current->owner_instance,
-                        current->fencing_token);
+                        "node:" + work.id, current->owner_instance, current->fencing_token);
   EXPECT_EQ(storage->get(RecordKind::NodeWork, work.id).get<NodeWork>().state,
             NodeWorkState::Completed);
 #else

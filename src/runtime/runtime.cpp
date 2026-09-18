@@ -97,8 +97,7 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
 }
 void Runtime::commit_node_owned(const std::vector<Record> &records, const NodeWork &work,
                                 const LeaseRecord &lease) {
-  deps_.storage.commit_owned(records, "node:" + work.id, lease.owner_instance,
-                             lease.fencing_token);
+  deps_.storage.commit_owned(records, "node:" + work.id, lease.owner_instance, lease.fencing_token);
 }
 bool Runtime::distributed_parallel_ready(const Run &r) const {
   if (r.pending_parallel_group.empty())
@@ -377,21 +376,21 @@ Task<void> Runtime::claim_loop() {
       std::optional<LeaseRecord> global_slot;
       std::optional<LeaseRecord> run_slot;
       try {
-        work_lease = deps_.coordination->acquire("node:" + work.id,
-                                                config_.coordination_lease_ttl_ms);
+        work_lease =
+            deps_.coordination->acquire("node:" + work.id, config_.coordination_lease_ttl_ms);
         if (!work_lease)
           continue;
         for (unsigned slot = 0; slot < config_.max_nodes && !global_slot; ++slot)
-          global_slot = deps_.coordination->acquire(
-              "node-slot:" + std::to_string(slot), config_.coordination_lease_ttl_ms);
+          global_slot = deps_.coordination->acquire("node-slot:" + std::to_string(slot),
+                                                    config_.coordination_lease_ttl_ms);
         if (!global_slot) {
           deps_.coordination->release(*work_lease);
           continue;
         }
         for (unsigned slot = 0; slot < config_.max_nodes_per_run && !run_slot; ++slot)
-          run_slot = deps_.coordination->acquire(
-              "run-node-slot:" + work.run_id + ":" + std::to_string(slot),
-              config_.coordination_lease_ttl_ms);
+          run_slot = deps_.coordination->acquire("run-node-slot:" + work.run_id + ":" +
+                                                     std::to_string(slot),
+                                                 config_.coordination_lease_ttl_ms);
         if (!run_slot) {
           deps_.coordination->release(*global_slot);
           deps_.coordination->release(*work_lease);
@@ -433,8 +432,8 @@ Task<void> Runtime::claim_loop() {
         auto stop = it->second.stop.get_token();
         const auto id = work.id;
         asio::co_spawn(
-            io_, execute_distributed_work(std::move(work), *work_lease, *global_slot, *run_slot,
-                                          stop),
+            io_,
+            execute_distributed_work(std::move(work), *work_lease, *global_slot, *run_slot, stop),
             [this, id](const std::exception_ptr &error) {
               std::lock_guard lock(mutex_);
               std::optional<LeaseRecord> work_lease;
@@ -538,11 +537,11 @@ Task<void> Runtime::lease_loop() {
     }
     for (auto &node : node_leases) {
       try {
-        const auto run = deps_.storage.get(RecordKind::Run,
-                                           deps_.storage.get(RecordKind::NodeWork, node.id)
-                                               .get<NodeWork>()
-                                               .run_id)
-                              .get<Run>();
+        const auto run =
+            deps_.storage
+                .get(RecordKind::Run,
+                     deps_.storage.get(RecordKind::NodeWork, node.id).get<NodeWork>().run_id)
+                .get<Run>();
         if (run.cancellation_requested || terminal(run.state)) {
           std::lock_guard lock(mutex_);
           if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end())
@@ -556,8 +555,8 @@ Task<void> Runtime::lease_loop() {
         }
       }
       bool valid = true;
-      for (auto *lease : {&node.work, node.global ? &*node.global : nullptr,
-                          node.run ? &*node.run : nullptr}) {
+      for (auto *lease :
+           {&node.work, node.global ? &*node.global : nullptr, node.run ? &*node.run : nullptr}) {
         if (!lease)
           continue;
         try {
