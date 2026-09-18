@@ -80,7 +80,9 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
     for (;;) {
       const auto &definition = pipeline.nodes.at(branch.active_node);
       if (definition.type == "join") {
-        const auto index = branch.frames.empty() ? 0U : branch.frames.back().index;
+        const auto index = work_id.empty() && !branch.frames.empty()
+                               ? branch.frames.back().index
+                               : 0U;
         std::lock_guard lock(state->mutex);
         if (index >= state->outputs.size() || state->outputs[index].has_value())
           throw Error(ErrorCode::Execution, "Parallel branch arrived twice");
