@@ -669,8 +669,10 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
               continuing = next_ready(r);
             } else {
               if (co_await execute_parallel(r, pipeline, run_nodes, stop, deadline,
-                                             r.subpipeline_depth))
+                                             r.subpipeline_depth)) {
+                checkpoint(r, "node.completed", std::move(records));
                 co_return;
+              }
               result.message = r.message;
               for (auto &record : records)
                 if (record.kind == RecordKind::Message && record.id == r.message.id) {

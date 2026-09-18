@@ -237,6 +237,7 @@ edges:
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   const auto work = first_service.list(RecordKind::NodeWork, run_id);
+  const auto attempts = first_service.list(RecordKind::Attempt, run_id);
   first_service.shutdown();
   second_service.shutdown();
   first_executor.join();
@@ -250,6 +251,12 @@ edges:
   ASSERT_EQ(work.size(), 2U);
   EXPECT_EQ(work[0].get<NodeWork>().state, NodeWorkState::Completed);
   EXPECT_EQ(work[1].get<NodeWork>().state, NodeWorkState::Completed);
+  bool fork_completed = false;
+  for (const auto &value : attempts)
+    if (value.get<NodeExecution>().node_id == "fork" &&
+        value.get<NodeExecution>().state == NodeState::Completed)
+      fork_completed = true;
+  EXPECT_TRUE(fork_completed);
   EXPECT_EQ(result.message.payload, Json::array({Json{{"value", "shared"}},
                                                  Json{{"value", "shared"}}}));
 }
