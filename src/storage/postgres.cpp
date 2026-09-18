@@ -114,7 +114,7 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
     const auto version = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations")
                              .front()[0]
                              .as<int>();
-    if (version > 5)
+    if (version > 6)
       throw Error(ErrorCode::Storage, "Unsupported PostgreSQL database schema version");
     if (version == 0) {
       for (const auto name : table_names) {
@@ -172,6 +172,15 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
       tx.exec("CREATE INDEX IF NOT EXISTS " + std::string(name) + "_run ON " + name +
               " (run_id, sequence)");
       tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (5)");
+    }
+    if (version < 6) {
+      tx.exec("CREATE TABLE IF NOT EXISTS laso_coordination_leases ("
+              "resource_key TEXT PRIMARY KEY, owner_instance TEXT NOT NULL, "
+              "fencing_token BIGINT NOT NULL, acquired_at TIMESTAMPTZ NOT NULL, "
+              "heartbeat_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL)");
+      tx.exec("CREATE INDEX IF NOT EXISTS laso_coordination_leases_expiry "
+              "ON laso_coordination_leases (expires_at)");
+      tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (6)");
     }
     tx.commit();
     candidate->pool = std::make_unique<PostgresConnectionPool>(dsn, schema, pool_options);
