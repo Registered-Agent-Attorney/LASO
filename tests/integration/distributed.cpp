@@ -173,6 +173,69 @@ edges:
   EXPECT_EQ(result.message.payload, Json({{"value", "nested"}}));
 }
 
+TEST(DistributedExecution, ApprovalReleasesRunForAnyInstanceToResume) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  TemporaryDirectory first_data;
+  TemporaryDirectory second_data;
+  Config first = config(first_data.path);
+  first.storage_backend = "postgres";
+  first.postgres_dsn = database.dsn;
+  first.postgres_schema = database.schema;
+  first.execution_mode = "multi_instance";
+  first.max_runs = 1;
+  first.validate();
+  auto second = first;
+  second.data_dir = second_data.path;
+  second.db_path.clear();
+
+  Executor first_executor(first.workers), second_executor(second.workers);
+  Service first_service(first_executor.context(), first);
+  Service second_service(second_executor.context(), second);
+  const auto pipeline = R"yaml(
+laso: '1'
+name: distributed-approval
+version: 1
+nodes:
+  input: {type: input}
+  gate: {type: approval, reason: distributed review}
+  action: {type: function, function: identity}
+  output: {type: output}
+edges:
+  - {from: input, to: gate}
+  - {from: gate, to: action}
+  - {from: action, to: output}
+)yaml";
+  first_service.register_pipeline(pipeline);
+  first_executor.start();
+  second_executor.start();
+  const auto run_id = first_service.start("distributed-approval@1", Json{{"value", "review"}});
+  laso::Run result;
+  for (unsigned attempt = 0; attempt < 300; ++attempt) {
+    result = first_service.get(RecordKind::Run, run_id).get<laso::Run>();
+    if (result.state == RunState::WaitingApproval)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(result.state, RunState::WaitingApproval);
+  const auto approvals = first_service.list(RecordKind::Approval, run_id);
+  ASSERT_EQ(approvals.size(), 1U);
+  first_service.runtime().decide(approvals.front().get<Approval>().id, true, "tester", "");
+  for (unsigned attempt = 0; attempt < 400; ++attempt) {
+    result = first_service.get(RecordKind::Run, run_id).get<laso::Run>();
+    if (terminal(result.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  first_service.shutdown();
+  second_service.shutdown();
+  first_executor.join();
+  second_executor.join();
+  ASSERT_EQ(result.state, RunState::Completed) << result.error;
+  EXPECT_EQ(result.message.payload, Json({{"value", "review"}}));
+}
+
 TEST(DistributedExecution, ParallelBranchesUseDurableNodeWork) {
   IsolatedSchema database;
   if (database.dsn.empty())
