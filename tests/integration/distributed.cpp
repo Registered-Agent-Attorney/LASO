@@ -165,8 +165,7 @@ edges:
   second_executor.join();
   ASSERT_EQ(result.state, RunState::Completed);
   ASSERT_EQ(result.child_runs.size(), 1U);
-  const auto child =
-      first_service.get(RecordKind::Run, result.child_runs.front()).get<laso::Run>();
+  const auto child = first_service.get(RecordKind::Run, result.child_runs.front()).get<laso::Run>();
   EXPECT_EQ(child.state, RunState::Completed);
   EXPECT_EQ(result.message.payload, Json({{"value", "nested"}}));
 }
