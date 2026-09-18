@@ -238,7 +238,8 @@ edges:
   second_service.shutdown();
   first_executor.join();
   second_executor.join();
-  ASSERT_EQ(result.state, RunState::Completed);
+  ASSERT_EQ(result.state, RunState::Completed) << result.error << " pending="
+                                                << result.pending_parallel_group;
   ASSERT_EQ(work.size(), 2U);
   EXPECT_EQ(work[0].get<NodeWork>().state, NodeWorkState::Completed);
   EXPECT_EQ(work[1].get<NodeWork>().state, NodeWorkState::Completed);
