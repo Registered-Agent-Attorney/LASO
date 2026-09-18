@@ -13,7 +13,7 @@
 
 namespace laso {
 namespace {
-constexpr std::array<const char *, 15> table_names = {"pipelines",
+constexpr std::array<const char *, 16> table_names = {"pipelines",
                                                       "runs",
                                                       "attempts",
                                                       "messages",
