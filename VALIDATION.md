@@ -1,5 +1,23 @@
 # Validation record
 
+## Current canonical validation snapshot
+
+Validated: 2026-09-18. The current default SQLite Debug build scheduled **180
+CTest entries: 178 passed and 2 PostgreSQL-only cases skipped**. The current
+PostgreSQL-enabled Debug build scheduled **187/187 passed** against an isolated
+PostgreSQL 16 service. The current ASan/UBSan SQLite build scheduled **180
+CTest entries: 178 passed and 2 PostgreSQL-only cases skipped**. Coordination
+tests covered bounded pool acquisition and replacement, opaque instance IDs,
+renewal, owner binding, expiry takeover, fencing rejection, concurrent takeover,
+and process-exit recovery. Server health/version, Hello registration/run, and
+the existing worker/process-worker regression tests passed. No distributed
+scheduler or multi-instance LASO mode was enabled.
+
+The optional formatting and static-analysis tools were not installed in this
+environment, so no result is claimed for clang-format or clang-tidy here.
+
+## Historical upstream validation snapshot
+
 Snapshot validated: 2026-09-16. Source review and packaging were performed in a
 development environment. Native validation used an isolated Ubuntu 24.04.5 LTS
 (x86-64) environment.
@@ -121,7 +139,7 @@ and sanitizer runtime; global ASLR settings were not weakened to work around it.
 
 ## Worker-hardening branch validation
 
-## Distributed-coordination foundation validation
+## Coordination validation detail
 
 Snapshot validated: 2026-09-18. The default SQLite Debug build scheduled **180
 CTest entries: 178 passed and 2 PostgreSQL cases skipped** because no PostgreSQL
