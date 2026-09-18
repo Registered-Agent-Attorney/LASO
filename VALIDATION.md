@@ -121,6 +121,19 @@ and sanitizer runtime; global ASLR settings were not weakened to work around it.
 
 ## Worker-hardening branch validation
 
+## Distributed-coordination foundation validation
+
+Snapshot validated: 2026-09-18. The default SQLite Debug build scheduled **180
+CTest entries: 178 passed and 2 PostgreSQL cases skipped** because no PostgreSQL
+DSN was supplied. The PostgreSQL-enabled Debug build scheduled **186 CTest entries
+and passed 186/186** against an isolated PostgreSQL 16 service. This includes the
+bounded pool, unique service-instance, lease contention, renewal, expiry takeover,
+fencing rejection, process-exit takeover, and concurrent takeover tests. The
+existing PostgreSQL owner-lock, storage conformance, scheduler, worker, and
+process-worker tests also passed. The service remains in single-owner mode; these
+tests validate coordination primitives only and do not claim distributed
+scheduler execution.
+
 This branch was validated in an isolated Linux x86-64 environment from upstream
 commit `c9887eabd585a414789d6c43514e1ee3a221ca8b` using GCC Debug, an isolated
 local PostgreSQL 16 cluster, and serial Ninja builds. SQLite CTest ran **179

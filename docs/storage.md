@@ -38,15 +38,24 @@ format. `Service` acquires a filesystem process lease before opening the databas
 
 ## PostgreSQL
 
-PostgreSQL uses one bounded connection per `PostgresStorage`, protected by a mutex;
-transactions are scoped to individual operations and checkpoint batches. Startup
-creates the configured validated schema and applies idempotent version-1 through
-version-4 migrations in a transaction. Version 3 adds event-source state and
-external-event claim records; version 4 adds durable worker jobs. A session-held advisory lock prevents two LASO services from
-owning the same database at once. Schema identifiers are validated before being
+PostgreSQL uses a bounded RAII connection pool per `PostgresStorage`; each
+transaction remains bound to one acquired connection. Pool size and acquisition
+timeout are configurable and pool diagnostics are bounded. Startup creates the
+configured validated schema and applies immutable version-1 through version-6
+migrations in a transaction. Version 3 adds event-source state and external-event
+claim records; version 4 adds durable worker jobs; version 6 adds coordination
+lease state. A session-held advisory lock still prevents two LASO services from
+owning the same database by default. Schema identifiers are validated before being
 quoted; table names come only from the internal `RecordKind` mapping and values use
 parameterized queries. DSNs and raw driver diagnostics are not returned to API
 callers or written to LASO logs.
+
+The PostgreSQL-only `Coordination` abstraction provides atomic resource leases,
+database-time heartbeats, expiry takeover, monotonically increasing fencing
+tokens, release, inspection, and stale-token rejection. Each service gets a fresh
+opaque UUID identity that is not derived from host or user information. These are
+coordination primitives for future distributed execution; they do not enable
+distributed scheduling, worker leasing, or multi-owner LASO operation yet.
 
 The public CI workflow starts an isolated PostgreSQL 16 service with disposable
 test credentials. The same storage conformance tests run against SQLite and
@@ -56,6 +65,8 @@ also verifies normal pipeline and child-run persistence on PostgreSQL.
 The backend choice does not change pipeline revision immutability, checkpoint
 atomicity, event ordering, approvals, recovery, artifacts, cancellation, or
 parent/child persistence, schedule occurrence claims, or trigger delivery deduplication.
-PostgreSQL is not a distributed worker or registry service; it is an optional
+PostgreSQL is not yet a distributed worker or registry service; it is an optional
 storage adapter for one LASO service owner. Scheduler processes use the same
-service ownership coordination as the rest of LASO.
+service ownership coordination as the rest of LASO. The explicit
+`coordination.mode: experimental_multi_instance` setting is rejected until the
+full scheduler and recovery model is implemented.

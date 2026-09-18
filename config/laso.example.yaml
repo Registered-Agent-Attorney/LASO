@@ -3,6 +3,17 @@ data_dir: .laso
 # storage_backend: postgres
 # postgres_dsn: "host=127.0.0.1 port=5432 dbname=laso user=laso"
 # postgres_schema: public
+# PostgreSQL connection-pool limits (used only by the PostgreSQL backend).
+postgres_pool_min_connections: 1
+postgres_pool_max_connections: 4
+postgres_pool_acquisition_timeout_ms: 1000
+# Single-owner mode remains the default and only enabled service mode. The
+# experimental_multi_instance value is reserved for future complete scheduling
+# coordination and is rejected by this release.
+coordination:
+  mode: single_owner
+  lease_ttl_ms: 30000
+  heartbeat_interval_ms: 10000
 storage_backend: sqlite
 api_host: 127.0.0.1
 api_port: 8080

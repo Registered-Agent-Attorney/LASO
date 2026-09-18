@@ -57,7 +57,11 @@ PostgreSQL is an optional build and runtime backend. Install `libpqxx-dev` and
 `storage_backend: postgres` and a `postgres_dsn` connection string (or the
 `LASO_STORAGE_BACKEND`, `LASO_POSTGRES_DSN`, and `LASO_POSTGRES_SCHEMA`
 environment variables). SQLite remains the default. DSNs are never included
-in LASO error messages or logs.
+in LASO error messages or logs. PostgreSQL uses a bounded connection pool;
+`postgres_pool_min_connections`, `postgres_pool_max_connections`, and
+`postgres_pool_acquisition_timeout_ms` tune it. Coordination primitives are
+available to PostgreSQL builds, but single-owner mode remains the only enabled
+service mode.
 
 The OpenCode worker adapter is optional and disabled by default. Build it only
 when needed with `-DLASO_BUILD_OPENCODE_ADAPTER=ON`; native and generic
@@ -219,8 +223,9 @@ daemon in the foreground as an unprivileged service account.
   executed. Full systemd installation and shutdown behavior remain unvalidated.
 - One process owns each selected storage database: SQLite uses a lock file and
   PostgreSQL uses a session-held advisory lock. There is no distributed scheduling
-  or horizontal scaling. Storage calls are short synchronous transactions; the
-  PostgreSQL adapter uses one bounded connection protected by a mutex.
+  or horizontal scaling. PostgreSQL operations use bounded pooled connections.
+  Experimental lease, heartbeat, and fencing primitives are present for future
+  coordination work, but do not change this default ownership model.
 - Fork branches execute concurrently through the bounded executor when capacity is
   available, while join results retain pipeline branch order. Global, per-run,
   model-call, and tool-call limits bound work; cancellation is cooperative. Approval

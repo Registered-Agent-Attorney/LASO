@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added a bounded PostgreSQL connection pool and opaque service-instance identity.
+  Added PostgreSQL lease, heartbeat, expiry, takeover, and fencing primitives with
+  migration version 6 and contention/crash coverage. SQLite and default
+  single-owner service behavior remain unchanged; distributed scheduling is not
+  enabled.
+
 - Added durable, policy-controlled worker `approval`, `permission`, and
   `question` requests to the versioned process protocol. Added an opt-in
   supervised OpenCode 1.18.x adapter with session continuation, bounded
