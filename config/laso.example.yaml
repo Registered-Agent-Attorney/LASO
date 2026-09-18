@@ -31,6 +31,12 @@ max_worker_cost_units_per_run: 0
 #     startup_timeout_ms: 120000
 #     request_timeout_ms: 120000
 #     interaction_timeout_ms: 300000
+#   claude:
+#     executable: /absolute/path/to/laso-claude-worker
+#     args: [--claude, /usr/local/bin/claude, --allowed-root, /projects/example]
+#     startup_timeout_ms: 5000
+#     request_timeout_ms: 120000
+#     interaction_timeout_ms: 300000
 log_level: info
 json_logs: false
 allow_network: false

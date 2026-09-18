@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added an optional supervised Claude Code adapter using the documented
+  structured `stream-json` CLI interface. Session identifiers, resume/follow-up,
+  normalized results and usage, project-root checks, bounded process handling,
+  and LASO-controlled permission/question requests are kept outside Core.
+  The adapter is disabled by default; real provider validation remains gated on
+  an installed authenticated Claude Code executable.
+
 - Added durable, policy-controlled worker `approval`, `permission`, and
   `question` requests to the versioned process protocol. Added an opt-in
   supervised OpenCode 1.18.x adapter with session continuation, bounded

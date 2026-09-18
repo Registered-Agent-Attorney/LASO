@@ -129,5 +129,6 @@ sandbox. Remote transports and distributed worker leasing remain deferred. See
 
 Workers may also send a bounded, durable approval/permission/question request
 through that protocol. Policy remains in LASO and the request channel is not
-general RPC. The optional OpenCode adapter uses this seam without placing
-OpenCode-specific parsing in Core.
+general RPC. The optional OpenCode and Claude Code adapters use this seam
+without placing vendor-specific parsing in Core. Both remain opt-in
+executables; the default build has no vendor CLI dependency.

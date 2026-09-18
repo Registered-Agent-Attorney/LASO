@@ -164,6 +164,11 @@ see [OpenCode worker](docs/opencode-worker.md) for explicit project-root and
 environment configuration. Worker-originated approvals, permissions, and
 questions remain under LASO policy and durable operator control.
 
+The optional `laso-claude-worker` adapter uses Claude Code's documented
+headless `stream-json` CLI interface, including session resume where supported.
+It is disabled by default and requires an explicitly configured Claude Code
+executable and allowed project root; see [Claude Code worker](docs/claude-worker.md).
+
 **Loading a native LASO plugin grants that plugin code execution inside the LASO
 process.** Metadata validation does not isolate native code. See the
 [SDK](plugin_sdk/README.md) and [ABI contract](docs/plugin-abi.md).
@@ -187,6 +192,7 @@ process.** Metadata validation does not isolate native code. See the
 | `worker-adapter` | Offline worker plugin → durable worker job → status event → validated output |
 | `process-worker` | Supervised local process transport → deterministic reference worker host |
 | `opencode-worker` | Optional supervised OpenCode session adapter (requires a local OpenCode installation) |
+| `claude-worker` | Optional supervised Claude Code session adapter (requires a local Claude Code installation) |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 
 For an optional loopback-only OpenAI-compatible local model service, see
@@ -247,8 +253,8 @@ daemon in the foreground as an unprivileged service account.
 - Schedules and event triggers are durable local framework records. One-time,
   interval, UTC five-field cron, and internal-event triggers launch normal runs;
   misfire, overlap, delivery-depth, and pending-work bounds are explicit. There
-  are no vendor-specific external adapters, distributed workers, or exactly-once
-  claims. Generic configured event-source and worker plugins can ingress validated
+  vendor-specific adapters are optional and remain outside Core; there are no
+  distributed workers or exactly-once claims. Generic configured event-source and worker plugins can ingress validated
   events or submit durable external jobs; supplied external IDs deduplicate within
   the selected storage database. See [worker adapters](docs/workers.md).
 

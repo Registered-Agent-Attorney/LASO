@@ -139,6 +139,21 @@ when it cannot safely reconcile local turn state; it never silently resubmits.
 OpenCode permission/question events are mapped to the interaction channel when
 the installed server exposes them.
 
+`laso-claude-worker` is an optional adapter outside Core. It starts the
+configured Claude Code executable directly in headless `stream-json` mode and
+maps its typed system, assistant, result, and supported control messages into
+the process-worker protocol. Session IDs are returned as external job IDs and
+can be supplied on a later request for `--resume`. See [Claude Code worker](claude-worker.md).
+
+The adapter accepts Claude's `can_use_tool` control request as a LASO
+permission request and accepts compatible question control messages when the
+installed CLI emits them. Unsupported control requests are rejected rather
+than approved. The documented CLI does not guarantee that every permission or
+question interaction is exposed in headless mode, so vendor-specific
+interaction coverage is version-dependent. The adapter reports unsupported
+cancellation truthfully; LASO still applies bounded request timeouts and
+process-group cleanup without resubmitting an ambiguous turn.
+
 ```yaml
 process_workers:
   reference:
@@ -152,10 +167,10 @@ process_workers:
 ```
 
 The deterministic `laso-example-worker-host` is a reference/test adapter, not
-an AI assistant. The OpenCode adapter is opt-in and does not add an OpenCode
-dependency to the default build or configuration. Remote worker networking,
-mandatory process isolation, distributed leasing, and Codex/Claude adapters
-remain future work.
+an AI assistant. The OpenCode and Claude Code adapters are opt-in and do not
+add vendor CLI dependencies to the default build or configuration. Remote
+worker networking, mandatory process isolation, distributed leasing, and
+additional vendor adapters remain future work.
 
 ## Policy, secrets, and trust
 
