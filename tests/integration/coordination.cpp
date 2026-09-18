@@ -76,6 +76,26 @@ TEST(Coordination, InstanceIdentityIsOpaqueAndUnique) {
   EXPECT_EQ(first.size(), 36U);
 }
 
+TEST(Coordination, InstanceRegistryHeartbeatsAndStaleInspection) {
+  IsolatedPostgres database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto instance = create_coordination(database.options(), "instance-registry");
+  instance->register_instance("test", "run-claims");
+  auto records = instance->list_instances(90000);
+  ASSERT_EQ(records.size(), 1U);
+  EXPECT_EQ(records.front().state, "ACTIVE");
+  EXPECT_TRUE(instance->heartbeat_instance("ACTIVE"));
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  records = instance->list_instances(1);
+  ASSERT_EQ(records.size(), 1U);
+  EXPECT_EQ(records.front().state, "STALE");
+  instance->set_instance_state("DRAINING");
+  records = instance->list_instances(90000);
+  ASSERT_EQ(records.size(), 1U);
+  EXPECT_EQ(records.front().state, "DRAINING");
+}
+
 TEST(Coordination, SingleWinnerRenewReleaseAndInspection) {
   IsolatedPostgres database;
   if (database.dsn.empty())

@@ -1,8 +1,12 @@
-# ADR 0003: One LASO owner per database
+# ADR 0003: One LASO owner per database by default
+
+The PostgreSQL-only opt-in `execution_mode: multi_instance` described in
+`docs/distributed-execution.md` supersedes the former single-owner-only scope.
+SQLite and the default PostgreSQL mode still follow this ADR.
 
 ## Context
 
-Current scheduler and recovery semantics are local-service semantics, not a
+Default scheduler and recovery semantics are local-service semantics, not a
 distributed execution protocol.
 
 ## Decision
@@ -13,10 +17,11 @@ startup.
 
 ## Consequences
 
-Claims and transactions are safe within the selected ownership model, while
-distributed scheduling, worker leasing, fencing, and HA remain explicitly out
-of scope.
+Claims and transactions are safe within the selected ownership model. Distributed
+worker leasing and HA remain explicitly out of scope; opt-in PostgreSQL
+multi-instance mode adds whole-run leases and fenced checkpoints only.
 
 ## Supersedes
 
-None; this records the current architecture.
+Superseded for PostgreSQL multi-instance mode by the distributed execution
+milestone; retained as the default ownership decision.

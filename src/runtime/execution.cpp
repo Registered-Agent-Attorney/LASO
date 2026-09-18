@@ -417,6 +417,14 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
                          {{RecordKind::Attempt, attempt.id, r.id, Json(attempt)}});
             }
             if (!child_result) {
+              if (deps_.coordination) {
+                attempt.state = NodeState::WaitingApproval;
+                checkpoint(r, "subpipeline.waiting",
+                           {{RecordKind::Attempt, attempt.id, r.id, Json(attempt)}});
+                std::lock_guard lock(mutex_);
+                transition(r, RunState::Paused, "subpipeline.waiting");
+                co_return;
+              }
               for (;;) {
                 context.check();
                 const auto child = deps_.storage.get(RecordKind::Run, r.child_id).get<Run>();

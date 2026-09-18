@@ -23,8 +23,18 @@ std::vector<Json> list_all(const Storage &storage, RecordKind kind, const std::s
 } // namespace
 Runtime::Runtime(asio::io_context &io, Config config, RuntimeDependencies dependencies)
     : io_(io), config_(std::move(config)), deps_(dependencies), nodes_(config_.max_nodes),
-      models_(config_.max_models), tools_(config_.max_tools) {}
+      models_(config_.max_models), tools_(config_.max_tools),
+      claim_timer_(std::make_shared<asio::steady_timer>(io)),
+      lease_timer_(std::make_shared<asio::steady_timer>(io)) {}
 Runtime::~Runtime() = default; // Owner must drain the executor before destruction.
+void Runtime::start_distributed() {
+  if (!deps_.coordination || distributed_started_)
+    return;
+  deps_.coordination->register_instance(version, "runtime,run-claims,fencing");
+  distributed_started_ = true;
+  asio::co_spawn(io_, claim_loop(), asio::detached);
+  asio::co_spawn(io_, lease_loop(), asio::detached);
+}
 void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> records) {
   std::lock_guard lock(mutex_);
   try {
@@ -67,7 +77,21 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
       event.node_id = record.value.at("node_id").get<std::string>();
   records.push_back({RecordKind::Run, r.id, r.id, Json(r)});
   records.push_back({RecordKind::Event, event.id, r.id, Json(event)});
-  deps_.storage.commit(records);
+  try {
+    if (deps_.coordination && !r.owner_instance_id.empty())
+      deps_.storage.commit_owned(records, "run:" + r.id, r.owner_instance_id, r.fencing_token);
+    else
+      deps_.storage.commit(records);
+  } catch (const Error &error) {
+    if (deps_.coordination && error.code == ErrorCode::Conflict) {
+      auto active = active_.find(r.id);
+      if (active != active_.end()) {
+        active->second.ownership_lost = true;
+        active->second.stop.request_stop();
+      }
+    }
+    throw;
+  }
   deps_.events.publish(event);
   log_event(event);
 }
@@ -83,8 +107,22 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
                          unsigned subpipeline_depth, std::string parent_message_id, Json origin,
                          Json message_metadata) {
   std::lock_guard lock(mutex_);
-  if (stopping_ || active_.size() >= config_.max_runs)
+  if (stopping_ || (!deps_.coordination && active_.size() >= config_.max_runs))
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
+  if (deps_.coordination) {
+    std::size_t pending = 0;
+    for (std::size_t offset = 0;;) {
+      const auto page = deps_.storage.list(RecordKind::Run, "", 1000, offset);
+      for (const auto &record : page)
+        if (record.get<Run>().state == RunState::Queued && ++pending >= config_.max_pending_runs)
+          throw Error(ErrorCode::Capacity, "Distributed run queue is full");
+      if (page.size() < 1000)
+        break;
+      if (offset > std::numeric_limits<std::size_t>::max() - 1000)
+        throw Error(ErrorCode::Storage, "Distributed run queue is too large to inspect");
+      offset += 1000;
+    }
+  }
   if (input.dump().size() > max_document_bytes)
     throw Error(ErrorCode::Validation, "Run input exceeds 1 MiB");
   if (!message_metadata.is_object() || message_metadata.dump().size() > max_message_metadata_bytes)
@@ -124,25 +162,36 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
         {r.parent_node_id, "", "", "", "", r.parent_message_id, "", timestamp(), ""});
   checkpoint(r, "run.created");
   auto id = r.id;
-  schedule(std::move(r));
+  if (!deps_.coordination)
+    schedule(std::move(r));
   return id;
 }
-void Runtime::schedule(Run r) {
+void Runtime::schedule(Run r, std::optional<LeaseRecord> lease) {
   if (active_.contains(r.id))
     throw Error(ErrorCode::Conflict, "Run already executing");
   if (stopping_ || active_.size() >= config_.max_runs)
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
+  if (deps_.coordination && !lease)
+    throw Error(ErrorCode::Conflict, "Distributed run is missing an ownership lease");
   auto id = r.id;
-  auto [it, inserted] = active_.emplace(id, std::stop_source{});
+  ActiveRun active;
+  active.lease = std::move(lease);
+  auto [it, inserted] = active_.emplace(id, std::move(active));
   (void)inserted;
-  auto stop = it->second.get_token();
+  auto stop = it->second.stop.get_token();
   asio::co_spawn(io_, execute(std::move(r), stop), [this, id](const std::exception_ptr &error) {
     std::lock_guard lock(mutex_);
+    bool ownership_lost = false;
+    std::optional<LeaseRecord> lease;
+    if (const auto active = active_.find(id); active != active_.end()) {
+      ownership_lost = active->second.ownership_lost;
+      lease = active->second.lease;
+    }
     active_.erase(id);
     try {
       auto ended = deps_.storage.get(RecordKind::Run, id).get<Run>();
-      if (error && !terminal(ended.state) && ended.state != RunState::WaitingApproval &&
-          ended.state != RunState::Paused) {
+      if (error && !ownership_lost && !terminal(ended.state) &&
+          ended.state != RunState::WaitingApproval && ended.state != RunState::Paused) {
         ended.error = "Unhandled executor failure";
         transition(ended, RunState::Failed, "run.failed");
       }
@@ -152,10 +201,143 @@ void Runtime::schedule(Run r) {
         if (terminal(child.state))
           resume(ended.id);
       }
+      if (lease && deps_.coordination)
+        deps_.coordination->release(*lease);
     } catch (...) {
       log_diagnostic("runtime.persistence_or_resume_failure", {{"run_id", id}});
     }
   });
+}
+Task<void> Runtime::claim_loop() {
+  for (;;) {
+    claim_timer_->expires_after(Milliseconds{100});
+    boost::system::error_code wait_error;
+    co_await claim_timer_->async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
+    if (wait_error)
+      co_return;
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        co_return;
+      if (active_.size() >= config_.max_runs)
+        continue;
+    }
+    std::vector<Json> candidates;
+    try {
+      candidates = deps_.storage.list(RecordKind::Run, "", config_.claim_batch_size, 0);
+    } catch (const Error &) {
+      continue;
+    }
+    for (const auto &value : candidates) {
+      Run run;
+      try {
+        run = value.get<Run>();
+      } catch (const Json::exception &) {
+        continue;
+      }
+      if (terminal(run.state) || run.state == RunState::WaitingApproval)
+        continue;
+      if (run.state == RunState::Paused && !run.child_id.empty()) {
+        try {
+          const auto child = deps_.storage.get(RecordKind::Run, run.child_id).get<Run>();
+          if (!terminal(child.state))
+            continue;
+        } catch (const Error &) {
+          continue;
+        }
+      }
+      {
+        std::lock_guard lock(mutex_);
+        if (stopping_ || active_.size() >= config_.max_runs || active_.contains(run.id))
+          break;
+      }
+      std::optional<LeaseRecord> lease;
+      try {
+        lease = deps_.coordination->acquire("run:" + run.id, config_.coordination_lease_ttl_ms);
+      } catch (const Error &) {
+        continue;
+      }
+      if (!lease)
+        continue;
+      try {
+        run = deps_.storage.get(RecordKind::Run, run.id).get<Run>();
+        if (terminal(run.state) || run.state == RunState::WaitingApproval) {
+          deps_.coordination->release(*lease);
+          continue;
+        }
+        // A takeover replays from the durable node checkpoint.  This avoids
+        // attempting to continue an in-flight coroutine that died with the
+        // previous process.
+        run.state = RunState::Queued;
+        run.owner_instance_id = lease->owner_instance;
+        run.fencing_token = lease->fencing_token;
+        run.claimed_at = lease->acquired_at;
+        run.last_renewed_at = lease->heartbeat_at;
+        run.lease_expires_at = lease->expires_at;
+        deps_.storage.commit_owned({{RecordKind::Run, run.id, run.id, Json(run)}},
+                                   lease->resource_key, lease->owner_instance,
+                                   lease->fencing_token);
+        std::lock_guard lock(mutex_);
+        if (stopping_ || active_.size() >= config_.max_runs) {
+          deps_.coordination->release(*lease);
+          continue;
+        }
+        schedule(std::move(run), std::move(lease));
+      } catch (const Error &) {
+        if (lease) {
+          try {
+            deps_.coordination->release(*lease);
+          } catch (const Error &) {
+          }
+        }
+      }
+    }
+  }
+}
+Task<void> Runtime::lease_loop() {
+  for (;;) {
+    lease_timer_->expires_after(Milliseconds{config_.coordination_heartbeat_interval_ms});
+    boost::system::error_code wait_error;
+    co_await lease_timer_->async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
+    if (wait_error)
+      co_return;
+    std::vector<std::pair<std::string, LeaseRecord>> leases;
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        co_return;
+      for (const auto &[id, active] : active_)
+        if (active.lease)
+          leases.emplace_back(id, *active.lease);
+    }
+    try {
+      if (!deps_.coordination->heartbeat_instance("ACTIVE"))
+        log_diagnostic("runtime.instance_heartbeat_missing", {{"instance_id", deps_.instance_id}});
+    } catch (const Error &) {
+      log_diagnostic("runtime.instance_heartbeat_failed", {{"instance_id", deps_.instance_id}});
+    }
+    for (auto &[id, lease] : leases) {
+      try {
+        if (!deps_.coordination->renew(lease, config_.coordination_lease_ttl_ms)) {
+          std::lock_guard lock(mutex_);
+          if (const auto active = active_.find(id); active != active_.end()) {
+            active->second.ownership_lost = true;
+            active->second.stop.request_stop();
+          }
+          continue;
+        }
+        std::lock_guard lock(mutex_);
+        if (const auto active = active_.find(id); active != active_.end() && active->second.lease)
+          *active->second.lease = lease;
+      } catch (const Error &) {
+        std::lock_guard lock(mutex_);
+        if (const auto active = active_.find(id); active != active_.end()) {
+          active->second.ownership_lost = true;
+          active->second.stop.request_stop();
+        }
+      }
+    }
+  }
 }
 void Runtime::resume(const std::string &id) {
   std::lock_guard lock(mutex_);
@@ -169,11 +351,12 @@ void Runtime::resume(const std::string &id) {
     throw Error(ErrorCode::Policy, "Approval is pending");
   if (r.cancellation_requested)
     throw Error(ErrorCode::Conflict, "Run cancellation has already been requested");
-  if (stopping_ || active_.size() >= config_.max_runs)
+  if (stopping_ || (!deps_.coordination && active_.size() >= config_.max_runs))
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
   if (r.state != RunState::Queued)
     transition(r, RunState::Queued, "run.resumed");
-  schedule(std::move(r));
+  if (!deps_.coordination)
+    schedule(std::move(r));
 }
 void Runtime::cancel(const std::string &id) {
   std::set<std::string> visited;
@@ -203,6 +386,39 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
   auto r = deps_.storage.get(RecordKind::Run, id).get<Run>();
   if (terminal(r.state))
     throw Error(ErrorCode::Conflict, "Run is already terminal");
+  if (deps_.coordination) {
+    deps_.storage.request_cancellation(id);
+    std::set<std::string> children;
+    if (!r.child_id.empty())
+      children.insert(r.child_id);
+    for (const auto &record : list_all(deps_.storage, RecordKind::Run, "")) {
+      const auto child = record.get<Run>();
+      if (child.parent_id == id)
+        children.insert(child.id);
+    }
+    for (const auto &child_id : children) {
+      auto child = deps_.storage.get(RecordKind::Run, child_id).get<Run>();
+      if (!terminal(child.state))
+        cancel_locked(child.id, visited, worker_jobs);
+    }
+    if (deps_.workers) {
+      for (const auto &record : deps_.storage.list(RecordKind::WorkerJob, id, 10000, 0)) {
+        const auto worker_job = record.get<WorkerJob>();
+        if (!worker_job_terminal(worker_job.state))
+          worker_jobs.push_back(worker_job.id);
+      }
+    }
+    if (const auto found = active_.find(id); found != active_.end()) {
+      found->second.stop.request_stop();
+    } else if (r.state == RunState::WaitingApproval || r.state == RunState::Paused ||
+               r.state == RunState::Queued) {
+      r.cancellation_requested = true;
+      r.state = RunState::Cancelled;
+      r.updated_at = timestamp();
+      deps_.storage.commit({{RecordKind::Run, r.id, r.id, Json(r)}});
+    }
+    return;
+  }
   r.cancellation_requested = true;
   std::vector<Record> cancellation_records;
   for (const auto &record : list_all(deps_.storage, RecordKind::Approval, id)) {
@@ -239,7 +455,7 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
   }
   auto found = active_.find(id);
   if (found != active_.end()) {
-    found->second.request_stop();
+    found->second.stop.request_stop();
     if (r.state == RunState::WaitingApproval || r.state == RunState::Paused)
       transition(r, RunState::Cancelled, "run.cancelled");
   } else
@@ -248,9 +464,17 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
 void Runtime::shutdown() {
   std::lock_guard lock(mutex_);
   stopping_ = true;
+  claim_timer_->cancel();
+  lease_timer_->cancel();
+  if (deps_.coordination && distributed_started_) {
+    try {
+      deps_.coordination->set_instance_state("DRAINING");
+    } catch (const Error &) {
+    }
+  }
   for (auto &[id, source] : active_) {
     (void)id;
-    source.request_stop();
+    source.stop.request_stop();
   }
 }
 bool Runtime::idle() const {
@@ -293,7 +517,7 @@ void Runtime::decide(const std::string &id, bool approve, const std::string &act
     throw Error(ErrorCode::Conflict, "Approval is no longer pending");
   if (active_.contains(r.id))
     throw Error(ErrorCode::Conflict, "Approval checkpoint is settling; retry shortly");
-  if (approve && (stopping_ || active_.size() >= config_.max_runs))
+  if (approve && (stopping_ || (!deps_.coordination && active_.size() >= config_.max_runs)))
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
   a.decision = approve ? "approved" : "rejected";
   a.decided_at = timestamp();
@@ -311,7 +535,8 @@ void Runtime::decide(const std::string &id, bool approve, const std::string &act
   if (approve) {
     // Decision and resumable queue checkpoint are one transaction.
     transition(r, RunState::Queued, "approval.approved", std::move(records));
-    schedule(std::move(r));
+    if (!deps_.coordination)
+      schedule(std::move(r));
   } else {
     r.error = "Human approval rejected";
     transition(r, RunState::Failed, "approval.rejected", std::move(records));
@@ -322,7 +547,14 @@ void Runtime::finish_parent(const Run &child) {
   if (child.parent_id.empty() || !terminal(child.state) || stopping_)
     return;
   auto parent = deps_.storage.get(RecordKind::Run, child.parent_id).get<Run>();
-  if (parent.state == RunState::Paused && !active_.contains(parent.id))
-    resume(parent.id);
+  if (parent.state == RunState::Paused && !active_.contains(parent.id)) {
+    if (deps_.coordination) {
+      parent.state = RunState::Queued;
+      parent.updated_at = timestamp();
+      deps_.storage.commit({{RecordKind::Run, parent.id, parent.id, Json(parent)}});
+    } else {
+      resume(parent.id);
+    }
+  }
 }
 } // namespace laso

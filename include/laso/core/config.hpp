@@ -29,6 +29,7 @@ struct Config {
   std::filesystem::path data_dir = ".laso", db_path;
   std::string storage_backend = "sqlite";
   std::string postgres_dsn, postgres_schema = "public";
+  std::string execution_mode = "single";
   std::string coordination_mode = "single_owner";
   std::vector<std::filesystem::path> plugin_dirs;
   std::vector<std::filesystem::path> schema_roots;
@@ -37,11 +38,11 @@ struct Config {
            max_models = 4, max_tools = 8, max_subpipeline_depth = 16,
            max_pending_scheduler_launches = 128, max_event_trigger_depth = 16,
            max_event_trigger_deliveries = 1024, max_worker_jobs = 32,
-           max_worker_jobs_per_worker = 16;
+           max_worker_jobs_per_worker = 16, claim_batch_size = 8, max_pending_runs = 1024;
   // Zero disables a budget. Token and cost budgets accumulate per run.
   std::uint64_t max_worker_wall_time_ms = 0, max_worker_tokens_per_run = 0;
   std::uint64_t postgres_pool_acquisition_timeout_ms = 1000, coordination_lease_ttl_ms = 30000,
-                coordination_heartbeat_interval_ms = 10000;
+                coordination_heartbeat_interval_ms = 10000, instance_stale_after_ms = 90000;
   unsigned postgres_pool_min_connections = 1, postgres_pool_max_connections = 4;
   double max_worker_cost_units_per_run = 0.0;
   bool json_logs = false, allow_network = false, allow_remote_api = false;

@@ -153,6 +153,37 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
     throw;
   }
 }
+void SQLiteStorage::commit_owned(const std::vector<Record> &records, const std::string &,
+                                 const std::string &, std::uint64_t) {
+  commit(records);
+}
+void SQLiteStorage::request_cancellation(const std::string &run_id) {
+  if (run_id.empty())
+    throw Error(ErrorCode::Validation, "Run id is empty");
+  std::lock_guard lock(impl_->mutex);
+  auto *db = impl_->db.get();
+  exec(db, "BEGIN IMMEDIATE");
+  try {
+    auto s = prepare(db, "SELECT body FROM runs WHERE id=?");
+    bind(s.get(), 1, run_id);
+    if (sqlite3_step(s.get()) != SQLITE_ROW)
+      throw Error(ErrorCode::NotFound, "Run not found");
+    auto run = parse(s.get()).get<Run>();
+    if (!terminal(run.state)) {
+      run.cancellation_requested = true;
+      run.updated_at = timestamp();
+      auto update = prepare(db, "UPDATE runs SET body=? WHERE id=?");
+      bind(update.get(), 1, serialize(Json(run)));
+      bind(update.get(), 2, run_id);
+      if (sqlite3_step(update.get()) != SQLITE_DONE)
+        throw Error(ErrorCode::Storage, "SQLite cancellation write failed");
+    }
+    exec(db, "COMMIT");
+  } catch (...) {
+    sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+    throw;
+  }
+}
 bool SQLiteStorage::claim(const Record &record, const std::vector<Record> &associated) {
   std::lock_guard lock(impl_->mutex);
   if (record.id.empty())

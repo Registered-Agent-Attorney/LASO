@@ -98,9 +98,11 @@ schedule occurrence is claimed by an insert-only durable record, using
 within the storage ownership model; LASO does not claim distributed exactly-once
 execution. PostgreSQL retains its existing session ownership lease, while the
 claim operation is transactional and safe under concurrent adapter calls. Optional
-PostgreSQL coordination primitives add opaque service identities, database-time
-leases, heartbeats, expiry takeover, and fencing checks, but do not enable
-distributed scheduler or worker execution. See [distributed coordination](adr/0007-distributed-coordination-primitives.md).
+PostgreSQL coordination provides opaque service identities, database-time leases,
+heartbeats, expiry takeover, and fencing checks. Explicit
+`execution_mode: multi_instance` uses those primitives to claim whole durable
+runs; it does not distribute graph branches or create a distributed worker
+cluster. See [distributed execution](distributed-execution.md).
 
 Event triggers match an event type and optional scalar metadata fields. Delivery
 records keyed by `trigger_id|event_id` provide restart deduplication. Trigger depth

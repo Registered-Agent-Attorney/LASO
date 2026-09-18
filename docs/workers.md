@@ -158,7 +158,7 @@ dependency to the default build or configuration. The optional
 structured JSON-RPC, supports durable thread IDs and LASO-controlled approval
 requests, and is built only with `-DLASO_BUILD_CODEX_ADAPTER=ON`; see
 [Codex worker](codex-worker.md). Remote worker networking, mandatory process
-isolation, and distributed leasing remain future work.
+isolation, and distributed worker leasing remain future work.
 
 `laso-claude-worker` is an optional adapter outside Core. It starts the
 configured Claude Code executable directly in headless `stream-json` mode and

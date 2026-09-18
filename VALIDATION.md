@@ -11,10 +11,10 @@ SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress
 and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
 Linux CI are present.
 
-The current combined-adapter audit inventory contains **201 GoogleTest cases** plus
-**2 CTest entries** for CLI validation and a process smoke/restart scenario, for
-**203 CTest entries**. The default build contains **181 GoogleTest cases** plus the
-same **2 CTest entries**, for **183 CTest entries**. Composition,
+The current default build registers **182 GoogleTest cases** plus **2 CTest entries**
+for CLI validation and a process smoke/restart scenario, for **184 CTest entries**.
+The PostgreSQL-enabled build registers **192 GoogleTest cases** plus the same **2
+CTest entries**, for **194 CTest entries**. Composition,
 storage, event-ingress, and worker-adapter coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
@@ -84,13 +84,12 @@ No non-Linux C++ compilation was attempted because LASO is intentionally Linux-o
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| GCC Debug combined optional-adapter audit suite | **PASS: 203/203 scheduled; 196 passed and 7 expected opt-in/PostgreSQL cases skipped** |
-| GCC Release CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Debug CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Release CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| PostgreSQL-enabled GCC Debug CTest suite | **BUILD PASS; local cluster authentication did not match the CI-only test role, so the PostgreSQL test result is taken from the public service job below** |
+| GCC Debug CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
+| GCC Release CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
+| Clang Debug CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
+| Clang Release CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
+| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 194/194; all PostgreSQL coordination, storage, and distributed execution tests ran against isolated PostgreSQL 16** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container | **PASS: public workflow 35380101673** |
@@ -220,8 +219,11 @@ this validation.
 
 ## PostgreSQL coordination validation snapshot
 
-The PostgreSQL-enabled build scheduled **187/187 CTest entries** against an
+The PostgreSQL-enabled build scheduled **194/194 CTest entries** against an
 isolated PostgreSQL 16 service. Coordination coverage includes bounded pool
 acquisition and replacement, opaque instance IDs, renewal, owner binding,
 expiry takeover, fencing rejection, concurrent takeover, and process-exit
-recovery. No distributed scheduler or multi-instance LASO mode was enabled.
+recovery. The distributed execution integration also exercises two LASO service
+instances sharing PostgreSQL, a durable queued run, a single owner claim, a
+multi-instance subpipeline with `max_runs: 1`, and normal runtime completion.
+Multi-instance mode is not used by SQLite.

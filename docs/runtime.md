@@ -21,18 +21,20 @@ cursor/branch queues and event in one transaction. A pending approval includes i
 request, waiting attempt and run state in one transaction. An approval decision and
 resumable queued state commit together. Storage history survives process restart.
 
-The selected database has a single-service ownership lease: SQLite uses Linux
-`flock`, while PostgreSQL uses a session-held advisory lock. Two independent
-services therefore cannot execute or approve the same run concurrently. This is
-local single-writer service ownership, not a distributed claim protocol. API readers
-share the same adapter.
+SQLite has a single-service ownership lease using Linux `flock`. PostgreSQL
+defaults to the same single-owner behavior using a session-held advisory lock.
+With `execution_mode: multi_instance`, PostgreSQL instead permits multiple
+services and the runtime claims whole runs with database-time leases and fencing
+tokens. API readers share the same adapter; a graph's parallel branches are not
+distributed independently.
 
-On startup, runs left in active states are marked Paused with a recovery-required
-event. Interrupted attempts are marked failed. Completed and approval-waiting runs
-are retained unchanged. `run resume ID` / the resume API can explicitly resume a
-Paused or Queued checkpoint. An in-flight operation may already have produced an
-external effect before crashing; inspect it before resuming. There is no general
-exactly-once guarantee or automatic replay of interrupted side effects.
+On startup, single-owner runs left in active states are marked Paused with a
+recovery-required event. In multi-instance mode, active checkpoints remain
+durable while the previous lease expires; another service then claims the run and
+replays from its last checkpoint. Completed and approval-waiting runs are retained
+unchanged. An in-flight operation may already have produced an external effect
+before a crash or lease loss; inspect it before allowing takeover. There is no
+general exactly-once guarantee or automatic replay of interrupted side effects.
 
 Retries apply to node execution failures up to the declared total attempt count.
 Timeout and cancellation are not retried. Retry delays are asynchronous. A timeout

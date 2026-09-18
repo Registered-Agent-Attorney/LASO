@@ -10,9 +10,8 @@ namespace laso {
 namespace {
 Config checked(Config c) {
   c.validate();
-  if (c.coordination_mode != "single_owner")
-    throw Error(ErrorCode::Configuration,
-                "Experimental multi-instance coordination is not enabled");
+  if (c.execution_mode != "single" && c.execution_mode != "multi_instance")
+    throw Error(ErrorCode::Configuration, "Unsupported LASO execution mode");
   return c;
 }
 std::vector<Json> all_pipeline_records(const Storage &storage) {
@@ -44,6 +43,22 @@ bool same_source(const Json &record, const std::string &yaml) {
   return record.contains("yaml") && record.at("yaml").is_string() &&
          record.at("yaml").get<std::string>() == yaml;
 }
+std::unique_ptr<Coordination> make_coordination(const Config &config,
+                                                const std::string &instance_id) {
+  if (config.execution_mode != "multi_instance")
+    return nullptr;
+#ifdef LASO_HAS_POSTGRES
+  return create_coordination(
+      {"postgres", config.postgres_dsn, config.postgres_schema,
+       config.postgres_pool_min_connections, config.postgres_pool_max_connections,
+       config.postgres_pool_acquisition_timeout_ms, config.instance_stale_after_ms},
+      instance_id);
+#else
+  (void)instance_id;
+  throw Error(ErrorCode::Configuration,
+              "multi_instance execution requires PostgreSQL support at build time");
+#endif
+}
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), instance_id_(generate_service_instance_id()),
@@ -52,7 +67,9 @@ Service::Service(asio::io_context &io, Config config)
       storage_(create_storage({config_.storage_backend, config_.db_path, config_.postgres_dsn,
                                config_.postgres_schema, config_.postgres_pool_min_connections,
                                config_.postgres_pool_max_connections,
-                               config_.postgres_pool_acquisition_timeout_ms})),
+                               config_.postgres_pool_acquisition_timeout_ms,
+                               config_.execution_mode == "multi_instance"})),
+      coordination_(make_coordination(config_, instance_id_)),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
                config_.max_pending_scheduler_launches, 32),
@@ -81,7 +98,8 @@ Service::Service(asio::io_context &io, Config config)
       runtime_(io, config_,
                {*storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
                 worker_manager_,
-                [this](const std::string &reference) { return resolve_pipeline(reference); }}),
+                [this](const std::string &reference) { return resolve_pipeline(reference); },
+                coordination_.get(), instance_id_}),
       artifacts_(config_.data_dir / "artifacts", *storage_),
       scheduler_(
           io, *storage_,
@@ -124,6 +142,7 @@ Service::Service(asio::io_context &io, Config config)
     if (!worker.value("event_schema", std::string{}).empty())
       schemas_.validate_declaration(worker.at("event_schema").get<std::string>());
   recover_history();
+  runtime_.start_distributed();
   events_.subscribe(worker_manager_);
   events_.subscribe(scheduler_.event_subscriber());
   scheduler_.start();
@@ -591,8 +610,24 @@ void Service::shutdown() {
   plugins_.stop_workers();
   for (auto it = process_workers_.rbegin(); it != process_workers_.rend(); ++it)
     (*it)->stop();
+  if (coordination_) {
+    try {
+      coordination_->set_instance_state("STOPPED");
+    } catch (const Error &) {
+    }
+  }
+}
+Json Service::instances() const {
+  if (!coordination_)
+    return Json::array();
+  Json result = Json::array();
+  for (const auto &instance : coordination_->list_instances(config_.instance_stale_after_ms))
+    result.push_back(instance);
+  return result;
 }
 void Service::recover_history() {
+  if (config_.execution_mode == "multi_instance")
+    return;
   for (std::size_t offset = 0;; offset += 1000) {
     auto records = storage_->list(RecordKind::Run, "", 1000, offset);
     for (const auto &record : records) {

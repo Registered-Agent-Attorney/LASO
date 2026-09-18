@@ -1,4 +1,10 @@
-# ADR 0007: Prepare coordination primitives without enabling distributed execution
+# ADR 0007: Prepare coordination primitives for opt-in distributed execution
+
+This ADR records the coordination primitives that preceded the distributed
+execution milestone. The single-owner defaults remain authoritative, while the
+later opt-in `execution_mode: multi_instance` uses these primitives for whole-run
+ownership. It does not provide distributed worker leasing or exactly-once side
+effects.
 
 ## Context
 
@@ -18,9 +24,9 @@ token before expiry; release and inspection are token-aware; protected operation
 can reject stale tokens.
 
 The existing SQLite file lease and PostgreSQL session-held advisory owner lock
-remain in force. `single_owner` remains the default and the only production service
-mode. The experimental multi-instance configuration is rejected; this ADR adds
-primitives and tests, not distributed scheduler, run, worker, or event ownership.
+remain in force. `single_owner` remains the default. PostgreSQL can explicitly
+enable multi-instance whole-run ownership after the version-7 instance registry
+and fenced-checkpoint work; SQLite remains single-instance.
 
 ## Consequences
 
@@ -39,10 +45,12 @@ The following invariants are explicit:
 
 ## Supersedes
 
-None. This extends the single-owner decision in ADR 0003 without changing it.
+The historical statement that multi-instance configuration is rejected is
+superseded by the opt-in distributed execution milestone. ADR 0003's single-owner
+default remains unchanged.
 
 ## Future work
 
-Later work may use these primitives for scheduler claims, pipeline-run ownership,
-WorkerJob ownership, event delivery, and crash takeover. Each adoption must add
-fenced writes and end-to-end recovery tests before enabling multi-instance mode.
+WorkerJob ownership and distributed event delivery remain future work. Pipeline-run
+ownership uses these primitives only in explicit multi-instance mode, with fenced
+writes and end-to-end recovery coverage.

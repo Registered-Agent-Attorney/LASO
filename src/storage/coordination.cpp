@@ -21,6 +21,12 @@ void validate_ttl(std::uint64_t ttl_ms) {
     throw Error(ErrorCode::Validation, "Invalid coordination lease duration");
 }
 
+void validate_instance_state(const std::string &state) {
+  if (state != "STARTING" && state != "ACTIVE" && state != "DRAINING" && state != "STOPPED" &&
+      state != "STALE")
+    throw Error(ErrorCode::Validation, "Invalid LASO instance state");
+}
+
 LeaseRecord read_lease(const pqxx::row &row) {
   LeaseRecord lease;
   lease.resource_key = row[0].c_str();
@@ -62,6 +68,12 @@ public:
               "heartbeat_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL)");
       tx.exec("CREATE INDEX IF NOT EXISTS laso_coordination_leases_expiry "
               "ON laso_coordination_leases (expires_at)");
+      tx.exec("CREATE TABLE IF NOT EXISTS laso_instances ("
+              "instance_id TEXT PRIMARY KEY, started_at TIMESTAMPTZ NOT NULL, "
+              "last_heartbeat_at TIMESTAMPTZ NOT NULL, software_version TEXT NOT NULL, "
+              "capabilities TEXT NOT NULL, state TEXT NOT NULL)");
+      tx.exec("CREATE INDEX IF NOT EXISTS laso_instances_heartbeat "
+              "ON laso_instances (last_heartbeat_at)");
       tx.commit();
     } catch (const pqxx::sql_error &error) {
       translate_sql(error);
@@ -241,6 +253,112 @@ public:
                                    renewal_failures_.load(),
                                    fencing_rejections_.load()};
     return result;
+  }
+
+  void register_instance(const std::string &software_version,
+                         const std::string &capabilities) override {
+    if (software_version.size() > 128 || capabilities.size() > 4096)
+      throw Error(ErrorCode::Validation, "LASO instance metadata exceeds limits");
+    auto lease = pool_.acquire();
+    try {
+      pqxx::work tx(lease.connection());
+      tx.exec_params(
+          "INSERT INTO laso_instances (instance_id, started_at, last_heartbeat_at, "
+          "software_version, capabilities, state) VALUES ($1, clock_timestamp(), "
+          "clock_timestamp(), $2, $3, 'ACTIVE') ON CONFLICT (instance_id) DO UPDATE SET "
+          "started_at = EXCLUDED.started_at, last_heartbeat_at = EXCLUDED.last_heartbeat_at, "
+          "software_version = EXCLUDED.software_version, capabilities = EXCLUDED.capabilities, "
+          "state = 'ACTIVE'",
+          owner_, software_version, capabilities);
+      tx.commit();
+    } catch (const pqxx::sql_error &error) {
+      translate_sql(error);
+    } catch (const pqxx::broken_connection &) {
+      lease.mark_broken();
+      translate_connection();
+    } catch (const Error &) {
+      throw;
+    } catch (const std::exception &) {
+      throw Error(ErrorCode::Storage, "Instance registration failed");
+    }
+  }
+
+  bool heartbeat_instance(const std::string &state) override {
+    validate_instance_state(state);
+    auto lease = pool_.acquire();
+    try {
+      pqxx::work tx(lease.connection());
+      const auto result = tx.exec_params(
+          "UPDATE laso_instances SET last_heartbeat_at = clock_timestamp(), state = $2 "
+          "WHERE instance_id = $1 RETURNING instance_id",
+          owner_, state);
+      tx.commit();
+      return !result.empty();
+    } catch (const pqxx::sql_error &error) {
+      translate_sql(error);
+    } catch (const pqxx::broken_connection &) {
+      lease.mark_broken();
+      translate_connection();
+    } catch (const Error &) {
+      throw;
+    } catch (const std::exception &) {
+      throw Error(ErrorCode::Storage, "Instance heartbeat failed");
+    }
+  }
+
+  void set_instance_state(const std::string &state) override {
+    validate_instance_state(state);
+    auto lease = pool_.acquire();
+    try {
+      pqxx::work tx(lease.connection());
+      const auto result = tx.exec_params(
+          "UPDATE laso_instances SET last_heartbeat_at = clock_timestamp(), state = $2 "
+          "WHERE instance_id = $1 RETURNING instance_id",
+          owner_, state);
+      if (result.empty())
+        throw Error(ErrorCode::NotFound, "LASO instance is not registered");
+      tx.commit();
+    } catch (const pqxx::sql_error &error) {
+      translate_sql(error);
+    } catch (const pqxx::broken_connection &) {
+      lease.mark_broken();
+      translate_connection();
+    } catch (const Error &) {
+      throw;
+    } catch (const std::exception &) {
+      throw Error(ErrorCode::Storage, "Instance state update failed");
+    }
+  }
+
+  std::vector<InstanceRecord> list_instances(std::uint64_t stale_after_ms) const override {
+    if (stale_after_ms > 86400000)
+      throw Error(ErrorCode::Validation, "Invalid instance stale interval");
+    auto lease = pool_.acquire();
+    try {
+      pqxx::work tx(lease.connection());
+      const auto result = tx.exec_params(
+          "SELECT instance_id, started_at, last_heartbeat_at, software_version, capabilities, "
+          "CASE WHEN $1::bigint > 0 AND last_heartbeat_at + ($1::double precision * "
+          "interval '1 millisecond') <= clock_timestamp() THEN 'STALE' ELSE state END "
+          "FROM laso_instances ORDER BY instance_id",
+          stale_after_ms);
+      std::vector<InstanceRecord> instances;
+      instances.reserve(result.size());
+      for (const auto &row : result)
+        instances.push_back({row[0].c_str(), row[1].c_str(), row[2].c_str(), row[3].c_str(),
+                             row[4].c_str(), row[5].c_str()});
+      tx.commit();
+      return instances;
+    } catch (const pqxx::sql_error &error) {
+      translate_sql(error);
+    } catch (const pqxx::broken_connection &) {
+      lease.mark_broken();
+      translate_connection();
+    } catch (const Error &) {
+      throw;
+    } catch (const std::exception &) {
+      throw Error(ErrorCode::Storage, "Instance listing failed");
+    }
   }
 
 private:

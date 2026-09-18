@@ -154,9 +154,11 @@ struct Run {
   std::string id = uuid(), pipeline_id, definition, active_node = "input", created_at = timestamp(),
               updated_at = created_at, actor = "local", error, parent_id, parent_node_id,
               parent_message_id, child_id, child_pipeline_id, initiation_type = "manual",
-              schedule_id, schedule_occurrence_id, due_at, trigger_id, event_id, root_event_id;
+              schedule_id, schedule_occurrence_id, due_at, trigger_id, event_id, root_event_id,
+              owner_instance_id, lease_expires_at, claimed_at, last_renewed_at;
   unsigned pipeline_version = 1, child_pipeline_version = 0, subpipeline_depth = 0;
   unsigned trigger_depth = 0;
+  std::uint64_t fencing_token = 0;
   RunState state = RunState::Queued;
   bool cancellation_requested = false;
   Message message;
@@ -196,6 +198,11 @@ inline void to_json(Json &j, const Run &r) {
        {"trigger_id", r.trigger_id},
        {"event_id", r.event_id},
        {"root_event_id", r.root_event_id},
+       {"owner_instance_id", r.owner_instance_id},
+       {"fencing_token", r.fencing_token},
+       {"lease_expires_at", r.lease_expires_at},
+       {"claimed_at", r.claimed_at},
+       {"last_renewed_at", r.last_renewed_at},
        {"trigger_depth", r.trigger_depth},
        {"child_runs", r.child_runs},
        {"resolved_subpipelines", r.resolved_subpipelines},
@@ -240,6 +247,11 @@ inline void from_json(const Json &j, Run &r) {
   r.trigger_id = j.value("trigger_id", std::string{});
   r.event_id = j.value("event_id", std::string{});
   r.root_event_id = j.value("root_event_id", std::string{});
+  r.owner_instance_id = j.value("owner_instance_id", std::string{});
+  r.fencing_token = j.value("fencing_token", 0ULL);
+  r.lease_expires_at = j.value("lease_expires_at", std::string{});
+  r.claimed_at = j.value("claimed_at", std::string{});
+  r.last_renewed_at = j.value("last_renewed_at", std::string{});
   r.trigger_depth = j.value("trigger_depth", 0U);
   r.child_runs = j.value("child_runs", std::vector<std::string>{});
   r.resolved_subpipelines = j.value("resolved_subpipelines", std::map<std::string, std::string>{});

@@ -84,6 +84,8 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {200, service_.tools()};
   if (method == "GET" && target == "/api/v1/plugins")
     return {200, service_.plugins()};
+  if (method == "GET" && target == "/api/v1/instances")
+    return {200, service_.instances()};
   std::smatch match;
   static const std::regex route_pattern("/api/v1/"
                                         "(pipelines|runs|approvals|worker-requests|schedules|"

@@ -26,6 +26,12 @@ void Config::validate() {
     for (const auto ch : postgres_schema)
       if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
         throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
+  if (execution_mode != "single" && execution_mode != "multi_instance")
+    throw Error(ErrorCode::Configuration, "Invalid execution mode");
+  if (coordination_mode == "experimental_multi_instance")
+    execution_mode = "multi_instance";
+  if (execution_mode == "multi_instance" && storage_backend != "postgres")
+    throw Error(ErrorCode::Configuration, "multi_instance execution requires PostgreSQL storage");
   if (coordination_mode != "single_owner" && coordination_mode != "experimental_multi_instance")
     throw Error(ErrorCode::Configuration, "Invalid coordination mode");
   if (db_path.empty())
@@ -47,7 +53,10 @@ void Config::validate() {
       postgres_pool_max_connections > 64 || postgres_pool_acquisition_timeout_ms == 0 ||
       postgres_pool_acquisition_timeout_ms > 60000 || coordination_lease_ttl_ms < 1000 ||
       coordination_lease_ttl_ms > 86400000 || coordination_heartbeat_interval_ms == 0 ||
-      coordination_heartbeat_interval_ms >= coordination_lease_ttl_ms / 2)
+      coordination_heartbeat_interval_ms >= coordination_lease_ttl_ms / 2 ||
+      instance_stale_after_ms < coordination_lease_ttl_ms || instance_stale_after_ms > 86400000 ||
+      claim_batch_size == 0 || claim_batch_size > 1024 || max_pending_runs == 0 ||
+      max_pending_runs > 100000)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
   if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
@@ -299,6 +308,7 @@ Config load_config(const std::filesystem::path &supplied,
                     "STORAGE_BACKEND",
                     "POSTGRES_DSN",
                     "POSTGRES_SCHEMA",
+                    "EXECUTION_MODE",
                     "COORDINATION_MODE",
                     "POSTGRES_POOL_MIN_CONNECTIONS",
                     "POSTGRES_POOL_MAX_CONNECTIONS",
@@ -321,6 +331,9 @@ Config load_config(const std::filesystem::path &supplied,
                     "MAX_EVENT_TRIGGER_DELIVERIES",
                     "MAX_WORKER_JOBS",
                     "MAX_WORKER_JOBS_PER_WORKER",
+                    "CLAIM_BATCH_SIZE",
+                    "MAX_PENDING_RUNS",
+                    "INSTANCE_STALE_AFTER_MS",
                     "MAX_WORKER_WALL_TIME_MS",
                     "MAX_WORKER_TOKENS_PER_RUN",
                     "MAX_WORKER_COST_UNITS_PER_RUN",
@@ -387,6 +400,8 @@ Config load_config(const std::filesystem::path &supplied,
       c.postgres_dsn = v;
     else if (k == "postgres_schema")
       c.postgres_schema = v;
+    else if (k == "execution_mode")
+      c.execution_mode = v;
     else if (k == "coordination_mode")
       c.coordination_mode = v;
     else if (k == "postgres_pool_min_connections")
@@ -441,6 +456,12 @@ Config load_config(const std::filesystem::path &supplied,
       c.max_worker_jobs = integer(v);
     else if (k == "max_worker_jobs_per_worker")
       c.max_worker_jobs_per_worker = integer(v);
+    else if (k == "claim_batch_size")
+      c.claim_batch_size = integer(v);
+    else if (k == "max_pending_runs")
+      c.max_pending_runs = integer(v);
+    else if (k == "instance_stale_after_ms")
+      c.instance_stale_after_ms = uint64(v);
     else if (k == "max_worker_wall_time_ms")
       c.max_worker_wall_time_ms = uint64(v);
     else if (k == "max_worker_tokens_per_run")

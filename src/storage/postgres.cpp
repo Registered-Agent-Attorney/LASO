@@ -84,6 +84,34 @@ std::string serialize(const Json &value) {
     throw Error(ErrorCode::Validation, "Record contains invalid JSON");
   }
 }
+
+void write_records(pqxx::work &tx, const std::vector<Record> &records) {
+  for (const auto &record : records) {
+    if (record.id.empty())
+      throw Error(ErrorCode::Validation, "Record id is empty");
+    const auto body = serialize(record.value);
+    if (record.kind == RecordKind::Pipeline) {
+      const auto existing = tx.exec_params("SELECT body FROM pipelines WHERE id = $1", record.id);
+      if (!existing.empty() && existing.front()[0].c_str() != body)
+        throw Error(ErrorCode::Conflict, "Pipeline revision is immutable");
+    }
+    if (record.kind == RecordKind::WorkerJob) {
+      const auto existing = tx.exec_params("SELECT body FROM worker_jobs WHERE id = $1", record.id);
+      if (!existing.empty()) {
+        auto old_job = Json::parse(existing.front()[0].c_str()).get<WorkerJob>();
+        auto new_job = record.value.get<WorkerJob>();
+        if (old_job.state != new_job.state &&
+            !valid_worker_job_transition(old_job.state, new_job.state))
+          throw Error(ErrorCode::Conflict, "Invalid worker job state transition");
+      }
+    }
+    tx.exec_params("INSERT INTO " + std::string(table(record.kind)) +
+                       " (id, run_id, body) VALUES ($1, $2, $3) "
+                       "ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, "
+                       "run_id = EXCLUDED.run_id",
+                   record.id, record.run_id, body);
+  }
+}
 } // namespace
 
 struct PostgresStorage::Impl {
@@ -92,7 +120,7 @@ struct PostgresStorage::Impl {
 };
 
 PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &schema,
-                                 PostgresPoolOptions pool_options) {
+                                 PostgresPoolOptions pool_options, bool allow_multiple_processes) {
   if (dsn.empty())
     throw Error(ErrorCode::Configuration, "PostgreSQL DSN is required");
   validate_schema(schema);
@@ -100,11 +128,16 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
     auto candidate = std::make_unique<Impl>();
     candidate->owner = std::make_unique<pqxx::connection>(dsn);
     pqxx::work tx(*candidate->owner);
-    const auto lock =
-        tx.exec_params("SELECT pg_try_advisory_lock(hashtextextended(current_database() || "
-                       "':laso-service-ownership', 0))");
-    if (lock.empty() || !lock.front()[0].as<bool>())
-      throw Error(ErrorCode::Conflict, "PostgreSQL database is owned by another LASO process");
+    if (allow_multiple_processes) {
+      tx.exec("SELECT pg_advisory_xact_lock(hashtextextended(current_database() || "
+              "':laso-schema-migration', 0))");
+    } else {
+      const auto lock =
+          tx.exec_params("SELECT pg_try_advisory_lock(hashtextextended(current_database() || "
+                         "':laso-service-ownership', 0))");
+      if (lock.empty() || !lock.front()[0].as<bool>())
+        throw Error(ErrorCode::Conflict, "PostgreSQL database is owned by another LASO process");
+    }
 
     const auto schema_name = quoted_schema(schema);
     tx.exec("CREATE SCHEMA IF NOT EXISTS " + schema_name);
@@ -114,7 +147,7 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
     const auto version = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations")
                              .front()[0]
                              .as<int>();
-    if (version > 6)
+    if (version > 7)
       throw Error(ErrorCode::Storage, "Unsupported PostgreSQL database schema version");
     if (version == 0) {
       for (const auto name : table_names) {
@@ -182,6 +215,15 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
               "ON laso_coordination_leases (expires_at)");
       tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (6)");
     }
+    if (version < 7) {
+      tx.exec("CREATE TABLE IF NOT EXISTS laso_instances ("
+              "instance_id TEXT PRIMARY KEY, started_at TIMESTAMPTZ NOT NULL, "
+              "last_heartbeat_at TIMESTAMPTZ NOT NULL, software_version TEXT NOT NULL, "
+              "capabilities TEXT NOT NULL, state TEXT NOT NULL)");
+      tx.exec("CREATE INDEX IF NOT EXISTS laso_instances_heartbeat "
+              "ON laso_instances (last_heartbeat_at)");
+      tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (7)");
+    }
     tx.commit();
     candidate->pool = std::make_unique<PostgresConnectionPool>(dsn, schema, pool_options);
     impl_ = std::move(candidate);
@@ -203,32 +245,7 @@ void PostgresStorage::commit(const std::vector<Record> &records) {
   try {
     connection = impl_->pool->acquire();
     pqxx::work tx(connection.connection());
-    for (const auto &record : records) {
-      if (record.id.empty())
-        throw Error(ErrorCode::Validation, "Record id is empty");
-      const auto body = serialize(record.value);
-      if (record.kind == RecordKind::Pipeline) {
-        const auto existing = tx.exec_params("SELECT body FROM pipelines WHERE id = $1", record.id);
-        if (!existing.empty() && existing.front()[0].c_str() != body)
-          throw Error(ErrorCode::Conflict, "Pipeline revision is immutable");
-      }
-      if (record.kind == RecordKind::WorkerJob) {
-        const auto existing =
-            tx.exec_params("SELECT body FROM worker_jobs WHERE id = $1", record.id);
-        if (!existing.empty()) {
-          auto old_job = Json::parse(existing.front()[0].c_str()).get<WorkerJob>();
-          auto new_job = record.value.get<WorkerJob>();
-          if (old_job.state != new_job.state &&
-              !valid_worker_job_transition(old_job.state, new_job.state))
-            throw Error(ErrorCode::Conflict, "Invalid worker job state transition");
-        }
-      }
-      tx.exec_params("INSERT INTO " + std::string(table(record.kind)) +
-                         " (id, run_id, body) VALUES ($1, $2, $3) "
-                         "ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, "
-                         "run_id = EXCLUDED.run_id",
-                     record.id, record.run_id, body);
-    }
+    write_records(tx, records);
     tx.commit();
   } catch (const Error &) {
     throw;
@@ -239,6 +256,65 @@ void PostgresStorage::commit(const std::vector<Record> &records) {
     translate_connection_error();
   } catch (const std::exception &) {
     throw Error(ErrorCode::Storage, "PostgreSQL write failed");
+  }
+}
+
+void PostgresStorage::commit_owned(const std::vector<Record> &records,
+                                   const std::string &resource_key,
+                                   const std::string &owner_instance, std::uint64_t fencing_token) {
+  if (resource_key.empty() || owner_instance.empty() || fencing_token == 0)
+    throw Error(ErrorCode::Validation, "Invalid run ownership proof");
+  PostgresConnectionPool::Lease connection;
+  try {
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
+    const auto lease =
+        tx.exec_params("SELECT 1 FROM laso_coordination_leases WHERE resource_key = $1 "
+                       "AND owner_instance = $2 AND fencing_token = $3 AND expires_at > "
+                       "clock_timestamp() FOR UPDATE",
+                       resource_key, owner_instance, fencing_token);
+    if (lease.empty())
+      throw Error(ErrorCode::Conflict, "Run ownership is no longer valid");
+    write_records(tx, records);
+    tx.commit();
+  } catch (const Error &) {
+    throw;
+  } catch (const pqxx::sql_error &error) {
+    translate_sql_error(error);
+  } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
+    translate_connection_error();
+  } catch (const std::exception &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL owned write failed");
+  }
+}
+
+void PostgresStorage::request_cancellation(const std::string &run_id) {
+  if (run_id.empty())
+    throw Error(ErrorCode::Validation, "Run id is empty");
+  PostgresConnectionPool::Lease connection;
+  try {
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
+    const auto result = tx.exec_params("SELECT body FROM runs WHERE id = $1 FOR UPDATE", run_id);
+    if (result.empty())
+      throw Error(ErrorCode::NotFound, "Run not found");
+    auto run = Json::parse(result.front()[0].c_str()).get<Run>();
+    if (!terminal(run.state)) {
+      run.cancellation_requested = true;
+      run.updated_at = timestamp();
+      tx.exec_params("UPDATE runs SET body = $2 WHERE id = $1", run_id, serialize(Json(run)));
+    }
+    tx.commit();
+  } catch (const Error &) {
+    throw;
+  } catch (const pqxx::sql_error &error) {
+    translate_sql_error(error);
+  } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
+    translate_connection_error();
+  } catch (const std::exception &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL cancellation write failed");
   }
 }
 bool PostgresStorage::claim(const Record &record, const std::vector<Record> &associated) {

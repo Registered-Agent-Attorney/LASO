@@ -102,6 +102,9 @@ int cli_main(int argc, char **argv) {
   worker_job_show->add_option("id", target)->required();
   auto *worker_job_cancel = worker_job->add_subcommand("cancel");
   worker_job_cancel->add_option("id", target)->required();
+  auto *instance = app.add_subcommand("instance");
+  instance->require_subcommand(1);
+  auto *instance_list = instance->add_subcommand("list");
   app.require_subcommand(1);
   try {
     app.parse(argc, argv);
@@ -232,7 +235,8 @@ int cli_main(int argc, char **argv) {
     else if (*worker_job_cancel) {
       service.cancel_worker_job(target);
       result = service.worker_job(target);
-    }
+    } else if (*instance_list)
+      result = service.instances();
     if (run_executor) {
       executor.start();
       executor.join();

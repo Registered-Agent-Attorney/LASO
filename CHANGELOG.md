@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added opt-in PostgreSQL multi-instance execution. Multiple LASO service
+  processes can claim whole queued runs using database-time leases, heartbeats,
+  fencing tokens, durable service-instance state, and crash takeover. SQLite
+  remains single-instance; distributed execution does not claim exactly-once
+  external effects or distribute individual graph branches.
+
 - Hardened the CLI schedule and trigger deletion results so successful deletes
   return an explicit stable result instead of depending on post-delete record
   lookup. Added an integration regression test and refreshed the release-
@@ -11,8 +17,8 @@
 - Added a bounded PostgreSQL connection pool and opaque service-instance identity.
   Added PostgreSQL lease, heartbeat, expiry, takeover, and fencing primitives with
   migration version 6 and contention/crash coverage. SQLite and default
-  single-owner service behavior remain unchanged; distributed scheduling is not
-  enabled.
+  single-owner service behavior remain unchanged; multi-instance run ownership is
+  an explicit PostgreSQL-only opt-in.
 
 - Added an optional supervised Claude Code adapter using the documented
   structured `stream-json` CLI interface. Session identifiers, resume/follow-up,

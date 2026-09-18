@@ -20,8 +20,9 @@ exceptions are distinct from job failures.
 Current plugins and API semantics remain unchanged. Process workers have
 bounded framing, timeouts, cooperative cancellation, process-group cleanup,
 and conservative failure handling. The boundary is lifecycle isolation, not an
-OS/container sandbox. Unix sockets, remote transports, worker leasing, and
-distributed execution can be added later; vendor-specific behavior remains
+OS/container sandbox. Unix sockets, remote transports, and distributed worker
+leasing remain future work; opt-in whole-run distributed execution uses the
+separate PostgreSQL coordination layer. Vendor-specific behavior remains
 outside Core.
 
 ## Supersedes

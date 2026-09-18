@@ -4,6 +4,7 @@
 #include <laso/events/events.hpp>
 #include <laso/nodes/node.hpp>
 #include <laso/schema/validator.hpp>
+#include <laso/storage/coordination.hpp>
 #include <laso/storage/storage.hpp>
 #include <laso/workers/manager.hpp>
 #include <memory>
@@ -22,6 +23,8 @@ struct RuntimeDependencies {
   SchemaValidator &schemas;
   std::shared_ptr<WorkerManager> workers;
   std::function<PipelineDefinition(const std::string &)> resolve_pipeline;
+  Coordination *coordination = nullptr;
+  std::string instance_id;
 };
 class Runtime {
 public:
@@ -39,6 +42,7 @@ public:
               const std::string &comment);
   void shutdown();
   bool idle() const;
+  void start_distributed();
 
 private:
   struct ParallelState;
@@ -47,15 +51,24 @@ private:
   RuntimeDependencies deps_;
   AsyncLimiter nodes_, models_, tools_;
   mutable std::recursive_mutex mutex_;
-  std::map<std::string, std::stop_source> active_;
+  struct ActiveRun {
+    std::stop_source stop;
+    std::optional<LeaseRecord> lease;
+    bool ownership_lost = false;
+  };
+  std::map<std::string, ActiveRun> active_;
   bool stopping_ = false;
+  bool distributed_started_ = false;
+  std::shared_ptr<asio::steady_timer> claim_timer_, lease_timer_;
+  Task<void> claim_loop();
+  Task<void> lease_loop();
   Task<void> execute(Run run, std::stop_token stop);
   Task<void> execute_branch(const PipelineDefinition &, ExecutionToken,
                             std::shared_ptr<ParallelState>, std::shared_ptr<AsyncLimiter>,
                             std::chrono::steady_clock::time_point, unsigned);
   Task<void> execute_parallel(Run &, const PipelineDefinition &, std::shared_ptr<AsyncLimiter>,
                               std::stop_token, std::chrono::steady_clock::time_point, unsigned);
-  void schedule(Run run);
+  void schedule(Run run, std::optional<LeaseRecord> lease = std::nullopt);
   void cancel_locked(const std::string &, std::set<std::string> &, std::vector<std::string> &);
   void transition(Run &, RunState, const std::string &event, std::vector<Record> records = {});
   void checkpoint(Run &, const std::string &event, std::vector<Record> records = {});

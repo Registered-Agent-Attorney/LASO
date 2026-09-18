@@ -33,6 +33,13 @@ public:
   virtual ~Storage() = default;
   // An entire checkpoint commits atomically, or none of it does.
   virtual void commit(const std::vector<Record> &records) = 0;
+  // Atomically commits records only while the PostgreSQL run lease is current.
+  // SQLite implements this as its ordinary serialized commit because it is a
+  // single-instance backend and cannot provide distributed fencing.
+  virtual void commit_owned(const std::vector<Record> &records, const std::string &resource_key,
+                            const std::string &owner_instance, std::uint64_t fencing_token) = 0;
+  // Control-plane cancellation is intentionally owner-independent and durable.
+  virtual void request_cancellation(const std::string &run_id) = 0;
   // Atomically inserts a durable claim.  An existing id is never overwritten.
   // This is used for schedule occurrences, event-trigger deliveries, and
   // external event identities. Associated records are inserted in the same
@@ -51,6 +58,9 @@ public:
   SQLiteStorage(const SQLiteStorage &) = delete;
   SQLiteStorage &operator=(const SQLiteStorage &) = delete;
   void commit(const std::vector<Record> &) override;
+  void commit_owned(const std::vector<Record> &, const std::string &, const std::string &,
+                    std::uint64_t) override;
+  void request_cancellation(const std::string &) override;
   bool claim(const Record &, const std::vector<Record> &associated = {}) override;
   Json get(RecordKind, const std::string &) const override;
   std::vector<Json> list(RecordKind, const std::string &run_id = "", std::size_t limit = 1000,

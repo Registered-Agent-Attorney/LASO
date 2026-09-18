@@ -59,9 +59,11 @@ PostgreSQL is an optional build and runtime backend. Install `libpqxx-dev` and
 environment variables). SQLite remains the default. DSNs are never included
 in LASO error messages or logs. PostgreSQL uses a bounded connection pool;
 `postgres_pool_min_connections`, `postgres_pool_max_connections`, and
-`postgres_pool_acquisition_timeout_ms` tune it. Coordination primitives are
-available to PostgreSQL builds, but single-owner mode remains the only enabled
-service mode.
+`postgres_pool_acquisition_timeout_ms` tune it. Single-owner mode remains the
+default. PostgreSQL builds may opt into `execution_mode: multi_instance`; this
+enables durable run claiming and fencing for multiple LASO service processes.
+SQLite remains single-instance. See [distributed execution](docs/distributed-execution.md)
+for the exact ownership, crash-recovery, and non-exactly-once guarantees.
 
 The OpenCode worker adapter is optional and disabled by default. Build it only
 when needed with `-DLASO_BUILD_OPENCODE_ADAPTER=ON`; native and generic
@@ -233,11 +235,11 @@ daemon in the foreground as an unprivileged service account.
 
 - Linux builds, tests, sanitizer builds, and the Debian container path have been
   executed. Full systemd installation and shutdown behavior remain unvalidated.
-- One process owns each selected storage database: SQLite uses a lock file and
-  PostgreSQL uses a session-held advisory lock. There is no distributed scheduling
-  or horizontal scaling. PostgreSQL operations use bounded pooled connections.
-  Experimental lease, heartbeat, and fencing primitives are present for future
-  coordination work, but do not change this default ownership model.
+- SQLite remains one-process only. PostgreSQL supports an explicit multi-instance
+  execution mode with bounded run claims, database-time leases, heartbeats,
+  fencing tokens, and crash takeover. A run has one active owner at a time;
+  branches remain inside that owner and external side effects are not exactly
+  once. PostgreSQL operations use bounded pooled connections.
 - Fork branches execute concurrently through the bounded executor when capacity is
   available, while join results retain pipeline branch order. Global, per-run,
   model-call, and tool-call limits bound work; cancellation is cooperative. Approval
@@ -245,7 +247,8 @@ daemon in the foreground as an unprivileged service account.
 - Registered pipeline revisions are immutable `name@version` records. Subpipeline
   nodes execute normal durable child runs with persisted parent/child links,
   version resolution, approval/retry/recovery behavior, and a configurable maximum
-  depth. There is no distributed execution or package registry.
+  depth. Distributed execution is opt-in and requires PostgreSQL; there is no
+  package registry or distributed worker cluster.
 - Deadlines and cancellation are cooperative. A native plugin that blocks or
   misbehaves can block a worker or crash the process. The v1 tool/provider
   invocation ABI is for short local operations; event sources may emit from
@@ -263,9 +266,9 @@ daemon in the foreground as an unprivileged service account.
   GUI is included.
 - Schedules and event triggers are durable local framework records. One-time,
   interval, UTC five-field cron, and internal-event triggers launch normal runs;
-  misfire, overlap, delivery-depth, and pending-work bounds are explicit. There
-  vendor-specific adapters are optional and remain outside Core; there are no
-  distributed workers or exactly-once claims. Generic configured event-source and worker plugins can ingress validated
+  misfire, overlap, delivery-depth, and pending-work bounds are explicit. Vendor-
+  specific adapters are optional and remain outside Core; there are no distributed
+  workers or exactly-once claims. Generic configured event-source and worker plugins can ingress validated
   events or submit durable external jobs; supplied external IDs deduplicate within
   the selected storage database. See [worker adapters](docs/workers.md).
 
