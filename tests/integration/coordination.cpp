@@ -59,6 +59,15 @@ TEST(PostgresPool, BoundedAcquisitionAndReplacement) {
   EXPECT_GE(pool.diagnostics().replacements, 1U);
 }
 
+TEST(PostgresPool, ConnectionFailureIsBoundedAndRedacted) {
+  if (!std::getenv("LASO_TEST_POSTGRES_DSN"))
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  EXPECT_THROW(PostgresConnectionPool("host=127.0.0.1 port=1 dbname=missing "
+                                     "connect_timeout=1",
+                                     "public", {1, 1, 50}),
+               Error);
+}
+
 TEST(Coordination, InstanceIdentityIsOpaqueAndUnique) {
   const auto first = generate_service_instance_id();
   const auto second = generate_service_instance_id();

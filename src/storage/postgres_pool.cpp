@@ -177,18 +177,28 @@ PostgresConnectionPool::Lease PostgresConnectionPool::acquire() {
   }
   if (state_->shutting_down)
     throw Error(ErrorCode::Storage, "PostgreSQL connection pool is shutting down");
-  for (std::size_t i = 0; i < state_->slots.size(); ++i) {
-    auto &slot = state_->slots[i];
-    if (!slot.in_use) {
-      if (!slot.connection)
-        slot.connection = connect(state_);
-      slot.in_use = true;
-      return Lease(state_, i);
+  try {
+    for (std::size_t i = 0; i < state_->slots.size(); ++i) {
+      auto &slot = state_->slots[i];
+      if (!slot.in_use) {
+        if (!slot.connection)
+          slot.connection = connect(state_);
+        slot.in_use = true;
+        return Lease(state_, i);
+      }
     }
+    const auto index = state_->slots.size();
+    state_->slots.push_back({connect(state_), true});
+    return Lease(state_, index);
+  } catch (const Error &) {
+    throw;
+  } catch (const pqxx::broken_connection &) {
+    throw Error(ErrorCode::Storage, "Cannot connect to PostgreSQL");
+  } catch (const pqxx::sql_error &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL connection initialization failed");
+  } catch (const std::exception &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL connection initialization failed");
   }
-  const auto index = state_->slots.size();
-  state_->slots.push_back({connect(state_), true});
-  return Lease(state_, index);
 }
 
 PostgresPoolDiagnostics PostgresConnectionPool::diagnostics() const {
