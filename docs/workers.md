@@ -158,7 +158,22 @@ dependency to the default build or configuration. The optional
 structured JSON-RPC, supports durable thread IDs and LASO-controlled approval
 requests, and is built only with `-DLASO_BUILD_CODEX_ADAPTER=ON`; see
 [Codex worker](codex-worker.md). Remote worker networking, mandatory process
-isolation, distributed leasing, and Claude adapters remain future work.
+isolation, and distributed leasing remain future work.
+
+`laso-claude-worker` is an optional adapter outside Core. It starts the
+configured Claude Code executable directly in headless `stream-json` mode and
+maps its typed system, assistant, result, and supported control messages into
+the process-worker protocol. Session IDs are returned as external job IDs and
+can be supplied on a later request for `--resume`. See [Claude Code worker](claude-worker.md).
+
+The adapter accepts Claude's `can_use_tool` control request as a LASO
+permission request and accepts compatible question control messages when the
+installed CLI emits them. Unsupported control requests are rejected rather
+than approved. The documented CLI does not guarantee that every permission or
+question interaction is exposed in headless mode, so vendor-specific
+interaction coverage is version-dependent. The adapter reports unsupported
+cancellation truthfully; LASO still applies bounded request timeouts and
+process-group cleanup without resubmitting an ambiguous turn.
 
 ## Policy, secrets, and trust
 
