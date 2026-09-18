@@ -15,8 +15,8 @@
 #include <signal.h>
 #include <stdexcept>
 #include <string>
-#include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
