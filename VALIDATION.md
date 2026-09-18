@@ -158,3 +158,27 @@ durable schedules/triggers, occurrence/delivery deduplication, and restart/reope
 recovery. Scheduler tests cover UTC one-time/interval/cron behavior, misfire and
 overlap policies, bounded capacity retry, event matching/depth/deduplication,
 API/CLI surfaces, and normal-runtime launch provenance.
+
+## Claude worker validation snapshot
+
+This snapshot covers the optional Claude Code adapter from upstream base
+`82c17350aae87207b2febd12dc3a7f523e5adf2b`. The adapter is disabled in the
+default build and the real-provider test is gated; no Claude executable was
+available in the validation environment.
+
+| Configuration | Result |
+|---|---|
+| Default SQLite Debug | **PASS: 180/180; 178 passed and 2 PostgreSQL cases skipped** |
+| Claude-enabled Debug | **PASS: 189 scheduled; 188 passed and 1 real-Claude case skipped** |
+| PostgreSQL + Claude Debug | **PASS: 189 scheduled; 188 passed and 1 real-Claude case skipped; PostgreSQL cases executed** |
+| Claude-enabled ASan/UBSan | **PASS: 189 scheduled; 186 passed and 3 expected cases skipped (2 PostgreSQL, 1 real Claude)** |
+| Claude deterministic adapter tests | **PASS: 8/8 executed; session resume, project/symlink boundaries, interactions, failures, cancellation truthfulness, and bounded process cleanup** |
+| Real Claude Code integration | **SKIPPED: no installed Claude Code executable; no provider credentials were changed** |
+| clang-format dry run | **PASS** |
+
+The deterministic fixture emits Claude-shaped structured `stream-json` system,
+assistant, result, and control messages without a network or account. The
+vendor-specific permission/question path remains version-dependent because the
+headless Claude CLI does not guarantee that every interaction is exposed to a
+custom stream host. No real Claude session or provider transcript was used in
+this validation.
