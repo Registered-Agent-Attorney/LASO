@@ -51,7 +51,8 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
                                   RecordKind::EventSource,
                                   RecordKind::ExternalEventClaim,
                                   RecordKind::WorkerJob,
-                                  RecordKind::WorkerInteraction};
+                                  RecordKind::WorkerInteraction,
+                                  RecordKind::NodeWork};
     std::vector<Record> records;
     for (std::size_t i = 0; i < kinds.size(); ++i)
       records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});
@@ -340,6 +341,31 @@ TEST(Storage, ConformanceClaimsWorkerJobIdentityOnce) {
     EXPECT_TRUE(s->claim({RecordKind::WorkerJob, job.id, job.run_id, Json(job)}));
     EXPECT_FALSE(s->claim({RecordKind::WorkerJob, job.id, job.run_id, Json(job)}));
     EXPECT_EQ(s->list(RecordKind::WorkerJob, job.run_id).size(), 1U);
+  });
+}
+TEST(Storage, ConformancePersistsAndFencesNodeWork) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    NodeWork work;
+    work.id = "node-work-1";
+    work.run_id = "run-1";
+    work.group_id = "group-1";
+    work.node_id = "branch";
+    work.join = "join";
+    work.token = {"branch", Message{}, {{"group-1", "join", 1, 0}}};
+    s->commit({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}});
+    work.state = NodeWorkState::Running;
+    work.attempt = 1;
+    s->commit({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}});
+    work.state = NodeWorkState::Completed;
+    work.result = Message{};
+    s->commit({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}});
+    EXPECT_EQ(s->get(RecordKind::NodeWork, work.id).get<NodeWork>().state,
+              NodeWorkState::Completed);
+    auto stale = work;
+    stale.state = NodeWorkState::Running;
+    EXPECT_THROW(s->commit({{RecordKind::NodeWork, stale.id, stale.run_id, Json(stale)}}), Error);
   });
 }
 
