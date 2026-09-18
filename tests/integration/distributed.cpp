@@ -365,6 +365,56 @@ edges:
 #endif
 }
 
+TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+#if defined(LASO_HAS_POSTGRES)
+  StorageOptions storage_options;
+  storage_options.backend = "postgres";
+  storage_options.postgres_dsn = database.dsn;
+  storage_options.postgres_schema = database.schema;
+  storage_options.allow_multiple_processes = true;
+  auto storage = create_storage(storage_options);
+  CoordinationOptions coordination_options;
+  coordination_options.postgres_dsn = database.dsn;
+  coordination_options.postgres_schema = database.schema;
+  auto first = create_coordination(coordination_options, "stale-first");
+  auto second = create_coordination(coordination_options, "stale-second");
+  NodeWork work;
+  work.id = "stale-node-work";
+  work.run_id = "run-1";
+  work.group_id = "group-1";
+  work.node_id = "branch";
+  work.join = "join";
+  work.token = {"branch", Message{}, {{"group-1", "join", 1, 0}}};
+  storage->commit({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}});
+  const auto old = first->acquire("node:" + work.id, 100);
+  ASSERT_TRUE(old);
+  work.state = NodeWorkState::Running;
+  work.attempt = 1;
+  storage->commit_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}},
+                        "node:" + work.id, old->owner_instance, old->fencing_token);
+  std::this_thread::sleep_for(std::chrono::milliseconds{180});
+  const auto current = second->acquire("node:" + work.id, 5000);
+  ASSERT_TRUE(current);
+  EXPECT_GT(current->fencing_token, old->fencing_token);
+  work.state = NodeWorkState::Completed;
+  work.result = Message{};
+  EXPECT_THROW(storage->commit_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}},
+                                     "node:" + work.id, old->owner_instance,
+                                     old->fencing_token),
+               Error);
+  storage->commit_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}},
+                        "node:" + work.id, current->owner_instance,
+                        current->fencing_token);
+  EXPECT_EQ(storage->get(RecordKind::NodeWork, work.id).get<NodeWork>().state,
+            NodeWorkState::Completed);
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
+
 TEST(DistributedExecution, MultiInstanceRejectsSQLite) {
   TemporaryDirectory directory;
   auto configuration = config(directory.path);
