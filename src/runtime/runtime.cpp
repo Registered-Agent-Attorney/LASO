@@ -795,6 +795,19 @@ void Runtime::decide(const std::string &id, bool approve, const std::string &act
       records.push_back({RecordKind::Attempt, attempt.id, r.id, Json(attempt)});
     }
   }
+  if (deps_.coordination) {
+    // Approval is a control-plane decision and may be made by an instance
+    // other than the one that was executing the run.  The paused executor
+    // has already persisted its checkpoint and will release its lease when
+    // it returns, so the decision must not require that executor's fencing
+    // proof.  Clearing the stale execution ownership also makes the queued
+    // run claimable by any healthy instance.
+    r.owner_instance_id.clear();
+    r.lease_expires_at.clear();
+    r.claimed_at.clear();
+    r.last_renewed_at.clear();
+    r.fencing_token = 0;
+  }
   if (approve) {
     // Decision and resumable queue checkpoint are one transaction.
     transition(r, RunState::Queued, "approval.approved", std::move(records));
