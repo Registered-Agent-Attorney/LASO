@@ -3,11 +3,11 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <filesystem>
 #include <fcntl.h>
+#include <filesystem>
+#include <iostream>
 #include <laso/workers/process_protocol.hpp>
 #include <laso/workers/worker.hpp>
-#include <iostream>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -30,8 +30,7 @@ constexpr std::size_t max_session_bytes = 512;
 constexpr std::size_t max_summary_bytes = 65536;
 std::mutex output_mutex;
 
-std::string option(int argc, char **argv, const std::string &name,
-                   std::string fallback = {}) {
+std::string option(int argc, char **argv, const std::string &name, std::string fallback = {}) {
   for (int i = 1; i < argc; ++i) {
     const std::string value = argv[i];
     if (value == name && i + 1 < argc)
@@ -55,7 +54,8 @@ std::vector<std::string> options(int argc, char **argv, const std::string &name)
 }
 
 int remaining_ms(Clock::time_point deadline) {
-  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+  const auto remaining =
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
   if (remaining.count() <= 0)
     return 0;
   return static_cast<int>(std::min<std::int64_t>(remaining.count(), 60000));
@@ -88,7 +88,9 @@ public:
                 std::filesystem::path directory)
       : executable_(std::move(executable)), arguments_(std::move(arguments)),
         directory_(std::move(directory)) {}
-  ~ClaudeProcess() { stop(); }
+  ~ClaudeProcess() {
+    stop();
+  }
   ClaudeProcess(const ClaudeProcess &) = delete;
   ClaudeProcess &operator=(const ClaudeProcess &) = delete;
 
@@ -228,8 +230,12 @@ private:
   std::string output_, stderr_;
 
   static void close_all(int (&in)[2], int (&out)[2], int (&err)[2]) noexcept {
-    close_fd(in[0]); close_fd(in[1]); close_fd(out[0]); close_fd(out[1]);
-    close_fd(err[0]); close_fd(err[1]);
+    close_fd(in[0]);
+    close_fd(in[1]);
+    close_fd(out[0]);
+    close_fd(out[1]);
+    close_fd(err[0]);
+    close_fd(err[1]);
   }
   static void set_nonblocking(int fd) {
     const auto flags = ::fcntl(fd, F_GETFL, 0);
@@ -262,7 +268,7 @@ struct Job {
 };
 
 std::optional<WorkerInteractionResponse> read_worker_response(const std::string &request_id,
-                                                               std::uint64_t timeout_ms) {
+                                                              std::uint64_t timeout_ms) {
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   std::string line;
   for (;;) {
@@ -311,9 +317,9 @@ std::filesystem::path safe_project(const Json &metadata,
   throw WorkerTransportError("Claude project_dir is outside an allowed root");
 }
 
-void interaction_response(ClaudeProcess &process, const Json &event,
-                          const WorkerRequest &job, const std::string &session,
-                          std::uint64_t timeout_ms, const std::string &subtype) {
+void interaction_response(ClaudeProcess &process, const Json &event, const WorkerRequest &job,
+                          const std::string &session, std::uint64_t timeout_ms,
+                          const std::string &subtype) {
   const auto request_id = event.value("request_id", std::string{});
   if (request_id.empty() || request_id.size() > process_protocol::max_interaction_id_bytes)
     throw WorkerTransportError("Claude control request id is invalid");
@@ -330,10 +336,11 @@ void interaction_response(ClaudeProcess &process, const Json &event,
   interaction.worker_id = "claude";
   interaction.external_job_id = session;
   interaction.session_id = session;
-  interaction.type = permission ? WorkerInteractionType::Permission : WorkerInteractionType::Question;
+  interaction.type =
+      permission ? WorkerInteractionType::Permission : WorkerInteractionType::Question;
   interaction.title = permission ? "Claude requests tool permission" : "Claude asks a question";
-  interaction.summary = permission ? "Claude requests permission to use a tool"
-                                   : "Claude requests human input";
+  interaction.summary =
+      permission ? "Claude requests permission to use a tool" : "Claude requests human input";
   interaction.created_at = timestamp();
   interaction.risk = permission ? "medium" : "low";
   interaction.category = permission ? "claude.permission" : "claude.question";
@@ -350,8 +357,7 @@ void interaction_response(ClaudeProcess &process, const Json &event,
   const auto answer = read_worker_response(interaction.request_id, timeout_ms);
   if (!answer)
     throw WorkerTransportError("Claude interaction response timed out");
-  Json response{{"type", "control_response"},
-                {"response", {{"request_id", request_id}}}};
+  Json response{{"type", "control_response"}, {"response", {{"request_id", request_id}}}};
   auto &body = response["response"];
   if (question) {
     if (answer->state != WorkerInteractionState::Answered)
@@ -376,8 +382,9 @@ WorkerStatus run_turn(const std::string &claude, const std::vector<std::filesyst
   const auto session = request.metadata.value("claude_session_id", std::string{});
   if (session.size() > max_session_bytes)
     throw WorkerTransportError("Claude session id is too long");
-  std::vector<std::string> args{"--print", "--output-format", "stream-json", "--input-format",
-                                "stream-json", "--verbose", "--permission-prompt-tool", "stdio"};
+  std::vector<std::string> args{
+      "--print",   "--output-format",          "stream-json", "--input-format", "stream-json",
+      "--verbose", "--permission-prompt-tool", "stdio"};
   if (!session.empty()) {
     args.push_back("--resume");
     args.push_back(session);
@@ -386,11 +393,12 @@ WorkerStatus run_turn(const std::string &claude, const std::vector<std::filesyst
   ClaudeProcess process(claude, std::move(args), project);
   process.start();
   const auto started = Clock::now();
-  process.write_json(Json{{"type", "user"},
-                          {"message", {{"role", "user"},
-                                        {"content", Json::array({Json{{"type", "text"},
-                                                                       {"text", request.instructions}}})}}}},
-                     started + std::chrono::milliseconds(timeout_ms));
+  process.write_json(
+      Json{{"type", "user"},
+           {"message",
+            {{"role", "user"},
+             {"content", Json::array({Json{{"type", "text"}, {"text", request.instructions}}})}}}},
+      started + std::chrono::milliseconds(timeout_ms));
   WorkerStatus result;
   result.state = WorkerJobState::Unknown;
   result.result = Json::object();
@@ -403,15 +411,15 @@ WorkerStatus run_turn(const std::string &claude, const std::vector<std::filesyst
   std::string model;
   std::uint64_t tools = 0;
   for (;;) {
-    const auto event = Json::parse(process.read_line(started + std::chrono::milliseconds(timeout_ms)),
-                                   nullptr, false);
+    const auto event = Json::parse(
+        process.read_line(started + std::chrono::milliseconds(timeout_ms)), nullptr, false);
     if (event.is_discarded() || !event.is_object())
       throw WorkerTransportError("Claude emitted malformed JSON");
     const auto type = event.value("type", std::string{});
     if (type == "control_request") {
       const auto request_object = event.value("request", Json::object());
-      interaction_response(process, event, request, session_id,
-                            interaction_timeout_ms, request_object.value("subtype", std::string{}));
+      interaction_response(process, event, request, session_id, interaction_timeout_ms,
+                           request_object.value("subtype", std::string{}));
       continue;
     }
     if (type == "system" && event.value("subtype", std::string{}) == "init") {
@@ -449,10 +457,12 @@ WorkerStatus run_turn(const std::string &claude, const std::vector<std::filesyst
     if (session_id.empty() || session_id.size() > max_session_bytes)
       throw WorkerTransportError("Claude did not return a valid session id");
     const auto duration = event.value("duration_ms", std::uint64_t{0});
-    usage.wall_duration_ms = duration != 0
-                                 ? std::optional<std::uint64_t>(duration)
-                                 : std::optional<std::uint64_t>(static_cast<std::uint64_t>(
-                                       std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count()));
+    usage.wall_duration_ms =
+        duration != 0
+            ? std::optional<std::uint64_t>(duration)
+            : std::optional<std::uint64_t>(static_cast<std::uint64_t>(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started)
+                      .count()));
     if (event.contains("usage") && event.at("usage").is_object()) {
       const auto u = event.at("usage");
       if (u.contains("input_tokens") && u.at("input_tokens").is_number_unsigned())
@@ -466,15 +476,16 @@ WorkerStatus run_turn(const std::string &claude, const std::vector<std::filesyst
       usage.total_tokens = *usage.input_tokens + *usage.output_tokens;
     if (tools)
       usage.tool_calls = tools;
-    result.state = event.value("is_error", false) ||
-                           event.value("subtype", std::string{}) != "success"
-                       ? WorkerJobState::Failed
-                       : WorkerJobState::Completed;
+    result.state =
+        event.value("is_error", false) || event.value("subtype", std::string{}) != "success"
+            ? WorkerJobState::Failed
+            : WorkerJobState::Completed;
     result.error = result.state == WorkerJobState::Failed
                        ? event.value("error", event.value("result", "Claude reported a failure"))
                        : "";
     result.result = Json{{"summary", event.value("result", summary)},
-                         {"session_id", session_id}, {"model", model},
+                         {"session_id", session_id},
+                         {"model", model},
                          {"executor", "claude"}};
     result.metadata = Json{{"claude_session_id", session_id}, {"project_root_verified", true}};
     result.usage = usage;
@@ -487,7 +498,8 @@ WorkerStatus run_turn(const std::string &claude, const std::vector<std::filesyst
 int main(int argc, char **argv) {
   const auto claude = option(argc, argv, "--claude", "claude");
   const auto timeout_ms = std::stoull(option(argc, argv, "--timeout-ms", "120000"));
-  const auto interaction_timeout_ms = std::stoull(option(argc, argv, "--interaction-timeout-ms", "300000"));
+  const auto interaction_timeout_ms =
+      std::stoull(option(argc, argv, "--interaction-timeout-ms", "300000"));
   const auto claude_args = options(argc, argv, "--claude-arg");
   std::vector<std::filesystem::path> roots;
   for (const auto &raw : options(argc, argv, "--allowed-root")) {
@@ -508,13 +520,15 @@ int main(int argc, char **argv) {
       return 65;
     const auto operation = request.value("operation", std::string{});
     if (operation == "hello") {
-      send_response(request, {{"ok", true},
-                              {"metadata", Json{{"name", "Claude Code"},
-                                                  {"version", "stream-json"},
-                                                  {"description", "optional Claude Code adapter"},
-                                                  {"capabilities", Json::array({"coding", "sessions", "interactions"})},
-                                                  {"supports_recovery", true},
-                                                  {"supports_cancellation", false}}}});
+      send_response(
+          request,
+          {{"ok", true},
+           {"metadata", Json{{"name", "Claude Code"},
+                             {"version", "stream-json"},
+                             {"description", "optional Claude Code adapter"},
+                             {"capabilities", Json::array({"coding", "sessions", "interactions"})},
+                             {"supports_recovery", true},
+                             {"supports_cancellation", false}}}});
       continue;
     }
     if (operation == "shutdown") {
@@ -526,7 +540,8 @@ int main(int argc, char **argv) {
       try {
         (void)safe_project(payload.value("metadata", Json::object()), roots);
       } catch (const WorkerTransportError &error) {
-        send_response(request, {{"ok", true}, {"state", WorkerJobState::Failed},
+        send_response(request, {{"ok", true},
+                                {"state", WorkerJobState::Failed},
                                 {"external_job_id", "claude-invalid-project"},
                                 {"error", error.what()}});
         continue;
@@ -539,8 +554,12 @@ int main(int argc, char **argv) {
       auto status = run_turn(claude, roots, job, timeout_ms, interaction_timeout_ms, claude_args);
       const auto external = status.result.value("session_id", std::string{});
       jobs[external] = {external, status};
-      Json body{{"ok", true}, {"state", status.state}, {"external_job_id", external},
-                {"payload", status.result}, {"metadata", status.metadata}, {"usage", status.usage}};
+      Json body{{"ok", true},
+                {"state", status.state},
+                {"external_job_id", external},
+                {"payload", status.result},
+                {"metadata", status.metadata},
+                {"usage", status.usage}};
       if (!status.error.empty())
         body["error"] = status.error;
       send_response(request, body);
@@ -556,7 +575,8 @@ int main(int argc, char **argv) {
       send_response(request, {{"ok", true}, {"state", "Unknown"}});
       continue;
     }
-    send_response(request, {{"ok", true}, {"state", found->second.status.state},
+    send_response(request, {{"ok", true},
+                            {"state", found->second.status.state},
                             {"payload", found->second.status.result},
                             {"metadata", found->second.status.metadata},
                             {"usage", found->second.status.usage},

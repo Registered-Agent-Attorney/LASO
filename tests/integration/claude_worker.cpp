@@ -10,9 +10,9 @@ ProcessWorkerConfig config(const std::filesystem::path &root, const std::string 
                            std::uint64_t timeout = 1000) {
   ProcessWorkerConfig result;
   result.executable = LASO_CLAUDE_WORKER;
-  result.args = {"--claude", LASO_CLAUDE_FIXTURE, "--claude-arg", "--mode",
-                 "--claude-arg", mode,
-                 "--allowed-root", root.string(), "--timeout-ms", std::to_string(timeout)};
+  result.args = {
+      "--claude", LASO_CLAUDE_FIXTURE, "--claude-arg", "--mode",       "--claude-arg",
+      mode,       "--allowed-root",    root.string(),  "--timeout-ms", std::to_string(timeout)};
   result.startup_timeout_ms = timeout;
   result.request_timeout_ms = timeout;
   result.interaction_timeout_ms = timeout;
