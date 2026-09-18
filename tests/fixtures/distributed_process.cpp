@@ -20,6 +20,8 @@ int main() {
   if (!dsn || !schema || !run_id)
     return 2;
   try {
+    const auto hold_ms = required("LASO_DISTRIBUTED_TEST_HOLD_MS");
+    const auto delay = Milliseconds{hold_ms ? std::stoll(hold_ms) : 10000LL};
     Config config;
     config.storage_backend = "postgres";
     config.postgres_dsn = dsn;
@@ -36,8 +38,9 @@ int main() {
     Service service(executor.context(), config);
     service.functions().add(
         "distributed_hold",
-        std::make_shared<Function>([](ExecutionContext &context, const Json &input) -> Task<Json> {
-          co_await context.delay(Milliseconds{10000});
+        std::make_shared<Function>([delay](ExecutionContext &context,
+                                           const Json &input) -> Task<Json> {
+          co_await context.delay(delay);
           co_return input;
         }));
     executor.start();

@@ -299,7 +299,7 @@ edges:
   const auto run_id = seed.start("process-recovery@1", Json{{"value", "crash-safe"}});
   seed.shutdown();
 
-  const auto start_process = [&] {
+  const auto start_process = [&](const char *hold_ms) {
     const auto child = fork();
     if (child == -1) {
       ADD_FAILURE() << "fork failed";
@@ -309,12 +309,13 @@ edges:
       setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
       setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
       setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
+      setenv("LASO_DISTRIBUTED_TEST_HOLD_MS", hold_ms, 1);
       execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
       _exit(127);
     }
     return child;
   };
-  const auto owner = start_process();
+  const auto owner = start_process("10000");
   ASSERT_NE(owner, -1);
   std::string old_owner;
   std::uint64_t old_token = 0;
@@ -337,7 +338,7 @@ edges:
   int owner_status = 0;
   ASSERT_EQ(waitpid(owner, &owner_status, 0), owner);
   ASSERT_TRUE(WIFSIGNALED(owner_status));
-  const auto recovery = start_process();
+  const auto recovery = start_process("0");
   laso::Run result;
   for (unsigned i = 0; i < 600; ++i) {
     result = seed.get(RecordKind::Run, run_id).get<laso::Run>();
