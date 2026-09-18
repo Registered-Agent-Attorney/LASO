@@ -93,7 +93,7 @@ No non-Linux C++ compilation was attempted because LASO is intentionally Linux-o
 | PostgreSQL-enabled GCC Debug CTest suite | **BUILD PASS; local cluster authentication did not match the CI-only test role, so the PostgreSQL test result is taken from the public service job below** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
-| Debian 13 container | **PASS: public workflow 35371117026** |
+| Debian 13 container | **PASS: public workflow 35380101673** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
@@ -113,7 +113,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **PASS: public workflow 35371117026; GCC, Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL jobs succeeded** |
+| GitHub Actions execution | **PASS: public workflow 35380101673; GCC, Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL jobs succeeded** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
