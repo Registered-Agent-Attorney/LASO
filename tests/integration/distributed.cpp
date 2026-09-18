@@ -326,6 +326,7 @@ edges:
   ASSERT_NE(owner, -1);
   std::string old_owner;
   std::uint64_t old_token = 0;
+  std::string old_attempt_id;
   std::string work_id;
   for (unsigned i = 0; i < 300; ++i) {
     for (const auto &value : seed.list(RecordKind::NodeWork, run_id)) {
@@ -334,6 +335,7 @@ edges:
         work_id = work.id;
         old_owner = work.owner_instance_id;
         old_token = work.fencing_token;
+        old_attempt_id = work.attempt_id;
       }
     }
     if (!work_id.empty())
@@ -365,7 +367,8 @@ edges:
     EXPECT_EQ(work.state, NodeWorkState::Completed);
     if (work.id == work_id) {
       retaken = work.attempt >= 2 && work.fencing_token > old_token &&
-                work.owner_instance_id != old_owner;
+                work.owner_instance_id != old_owner && !work.attempt_id.empty() &&
+                work.attempt_id != old_attempt_id;
     }
   }
   EXPECT_TRUE(retaken);

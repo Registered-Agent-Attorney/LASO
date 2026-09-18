@@ -407,6 +407,7 @@ Task<void> Runtime::claim_loop() {
         }
         work.state = NodeWorkState::Running;
         ++work.attempt;
+        work.attempt_id = uuid();
         work.owner_instance_id = work_lease->owner_instance;
         work.fencing_token = work_lease->fencing_token;
         work.claimed_at = work_lease->acquired_at;

@@ -56,7 +56,8 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
                                    std::chrono::steady_clock::time_point pipeline_deadline,
                                    unsigned subpipeline_depth,
                                    std::optional<LeaseRecord> work_lease,
-                                   std::string work_id) {
+                                   std::string work_id,
+                                   std::string work_attempt_id) {
   auto persist = [&](const std::vector<Record> &records) {
     if (work_lease) {
       NodeWork work;
@@ -130,6 +131,8 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
         NodeExecution attempt;
         attempt.run_id = branch.id;
         attempt.node_id = definition.id;
+        if (attempt_number == 1 && !work_attempt_id.empty())
+          attempt.id = work_attempt_id;
         attempt.attempt = attempt_number;
         persist({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
         try {
@@ -277,7 +280,7 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
     std::stop_callback parent_stop(stop, [branch_state] { branch_state->stop.request_stop(); });
     co_await execute_branch(pipeline, std::move(work.token), branch_state, run_nodes,
                             std::chrono::steady_clock::now() + pipeline.timeout.timeout,
-                            run.subpipeline_depth, work_lease, work.id);
+                            run.subpipeline_depth, work_lease, work.id, work.attempt_id);
     NodeWork completed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
     const auto current_run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
     if (current_run.cancellation_requested || terminal(current_run.state)) {
@@ -341,7 +344,26 @@ Task<bool> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipelin
                                      unsigned subpipeline_depth) {
   std::vector<ExecutionToken> tokens;
   tokens.swap(run.ready);
-  if (deps_.coordination) {
+  auto distributable = [&](const ExecutionToken &token) {
+    std::vector<std::string> pending{token.node_id};
+    std::set<std::string> visited;
+    while (!pending.empty()) {
+      const auto node_id = std::move(pending.back());
+      pending.pop_back();
+      if (!visited.insert(node_id).second)
+        continue;
+      const auto &node = pipeline.nodes.at(node_id);
+      if (node.type == "join")
+        continue;
+      if (node.type != "function" && node.type != "validator" && node.type != "router")
+        return false;
+      for (const auto &edge : pipeline.edges)
+        if (edge.from == node_id)
+          pending.push_back(edge.to);
+    }
+    return true;
+  };
+  if (deps_.coordination && std::all_of(tokens.begin(), tokens.end(), distributable)) {
     const auto group = uuid();
     const auto join = pipeline.nodes.at(run.active_node).join;
     std::vector<Record> records;

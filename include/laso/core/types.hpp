@@ -341,7 +341,7 @@ inline bool valid_node_work_transition(NodeWorkState from, NodeWorkState to) {
 }
 struct NodeWork {
   std::string id = uuid(), run_id, group_id, node_id, join, created_at = timestamp(), updated_at = created_at,
-              owner_instance_id, lease_expires_at, claimed_at, last_renewed_at, error;
+              owner_instance_id, lease_expires_at, claimed_at, last_renewed_at, attempt_id, error;
   unsigned index = 0, attempt = 0, steps = 0;
   std::uint64_t fencing_token = 0;
   NodeWorkState state = NodeWorkState::Queued;
@@ -360,6 +360,7 @@ inline void to_json(Json &j, const NodeWork &w) {
        {"lease_expires_at", w.lease_expires_at},
        {"claimed_at", w.claimed_at},
        {"last_renewed_at", w.last_renewed_at},
+       {"attempt_id", w.attempt_id},
        {"error", w.error},
        {"index", w.index},
        {"attempt", w.attempt},
@@ -382,6 +383,7 @@ inline void from_json(const Json &j, NodeWork &w) {
   w.lease_expires_at = j.value("lease_expires_at", std::string{});
   w.claimed_at = j.value("claimed_at", std::string{});
   w.last_renewed_at = j.value("last_renewed_at", std::string{});
+  w.attempt_id = j.value("attempt_id", std::string{});
   w.error = j.value("error", std::string{});
   w.index = j.value("index", 0U);
   w.attempt = j.value("attempt", 0U);
