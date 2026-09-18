@@ -1,6 +1,6 @@
 # Validation record
 
-Snapshot validated: 2026-09-17. Source review and packaging were performed in a
+Snapshot validated: 2026-09-18. Source review and packaging were performed in a
 development environment. Native validation used an isolated Ubuntu 24.04.5 LTS
 (x86-64) environment.
 
@@ -11,8 +11,10 @@ SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress
 and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
 Linux CI are present.
 
-The test inventory contains **175 GoogleTest cases** plus **2 CTest entries** for CLI
-validation and a process smoke/restart scenario, for **177 CTest entries**. Composition,
+The current combined-adapter audit inventory contains **201 GoogleTest cases** plus
+**2 CTest entries** for CLI validation and a process smoke/restart scenario, for
+**203 CTest entries**. The default build contains **181 GoogleTest cases** plus the
+same **2 CTest entries**, for **183 CTest entries**. Composition,
 storage, event-ingress, and worker-adapter coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
@@ -82,15 +84,16 @@ No non-Linux C++ compilation was attempted because LASO is intentionally Linux-o
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| GCC Release CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Debug CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| Clang Release CTest suite | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 177/177 scheduled; 175 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
-| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 177/177; all PostgreSQL cases executed against an isolated PostgreSQL 16 cluster** |
+| GCC Debug CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| GCC Debug combined optional-adapter audit suite | **PASS: 203/203 scheduled; 196 passed and 7 expected opt-in/PostgreSQL cases skipped** |
+| GCC Release CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Debug CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| Clang Release CTest suite | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 183/183 scheduled; 181 passed and 2 PostgreSQL cases skipped without a PostgreSQL DSN** |
+| PostgreSQL-enabled GCC Debug CTest suite | **BUILD PASS; local cluster authentication did not match the CI-only test role, so the PostgreSQL test result is taken from the public service job below** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
-| Debian 13 container | **PASS: post-merge workflow 35243451484** |
+| Debian 13 container | **PASS: public workflow 35371117026** |
 | Multi-stage Debian runtime image build | **PASS** |
 | Runtime image health endpoint and unprivileged UID | **PASS: host-network health endpoint; image runs as `laso:laso`** |
 | systemd unit syntax and dependency verification | **PASS** |
@@ -110,7 +113,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 | Check | Status |
 |---|---|
 | Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
-| GitHub Actions execution | **PASS: post-merge workflow 35243451484; GCC, Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL jobs succeeded** |
+| GitHub Actions execution | **PASS: public workflow 35371117026; GCC, Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL jobs succeeded** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
 Use [the Linux validation procedure](docs/first-linux-validation.md) when validating
@@ -118,6 +121,12 @@ another distribution or deployment environment. Ubuntu and Debian results above
 are actual executions; pending and blocked rows do not imply success. The TSan
 failure occurred before LASO tests ran and must be repeated on a compatible kernel
 and sanitizer runtime; global ASLR settings were not weakened to work around it.
+
+## Historical validation snapshots
+
+The following sections preserve earlier milestone evidence and are intentionally
+historical. Their older test counts and branch names are not the current release-
+readiness result above.
 
 ## Worker-hardening branch validation
 

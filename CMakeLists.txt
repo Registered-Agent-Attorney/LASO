@@ -184,6 +184,7 @@ if(BUILD_TESTING)
       tests/integration/adapters.cpp
       tests/integration/scheduler.cpp
       tests/integration/event_sources.cpp
+      tests/integration/cli.cpp
       tests/integration/workers.cpp
       tests/integration/process_workers.cpp)
   if(LASO_ENABLE_POSTGRES)
@@ -208,7 +209,7 @@ if(BUILD_TESTING)
   endif()
   add_executable(laso_tests ${LASO_TEST_SOURCES})
   laso_target(laso_tests)
-  target_link_libraries(laso_tests PRIVATE laso_api GTest::gtest_main)
+  target_link_libraries(laso_tests PRIVATE laso_api laso_cli GTest::gtest_main)
   target_compile_definitions(laso_tests PRIVATE LASO_SOURCE_DIR="${PROJECT_SOURCE_DIR}" LASO_PLUGIN_DIR="$<TARGET_FILE_DIR:laso_example_tool>" LASO_WORKER_PLUGIN_DIR="$<TARGET_FILE_DIR:laso_example_worker>" LASO_BAD_PLUGIN_DIR="$<TARGET_FILE_DIR:laso_bad_abi>" LASO_EVENT_PLUGIN_DIR="$<TARGET_FILE_DIR:laso_example_event_source>" LASO_EVENT_BAD_PLUGIN_DIR="$<TARGET_FILE_DIR:laso_event_source_lifecycle_fail>" LASO_PROCESS_WORKER_HOST="$<TARGET_FILE:laso-example-worker-host>")
   if(LASO_BUILD_OPENCODE_ADAPTER)
     target_compile_definitions(laso_tests PRIVATE LASO_OPENCODE_WORKER="$<TARGET_FILE:laso-opencode-worker>")

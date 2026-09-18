@@ -194,7 +194,7 @@ int cli_main(int argc, char **argv) {
       result = service.get(RecordKind::Schedule, target);
     } else if (*schedule_delete) {
       service.delete_schedule(target);
-      result = service.get(RecordKind::Schedule, target);
+      result = {{"id", target}, {"deleted", true}};
     } else if (*trigger_list)
       result = service.list(RecordKind::Trigger);
     else if (*trigger_show)
@@ -209,7 +209,7 @@ int cli_main(int argc, char **argv) {
       result = service.get(RecordKind::Trigger, target);
     } else if (*trigger_delete) {
       service.delete_trigger(target);
-      result = service.get(RecordKind::Trigger, target);
+      result = {{"id", target}, {"deleted", true}};
     } else if (*event_source_list)
       result = service.event_sources();
     else if (*event_source_show)

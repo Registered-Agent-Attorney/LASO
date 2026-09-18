@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Hardened the CLI schedule and trigger deletion results so successful deletes
+  return an explicit stable result instead of depending on post-delete record
+  lookup. Added an integration regression test and refreshed the release-
+  readiness validation inventory; no version bump or production-readiness claim
+  is implied.
+
 - Added a bounded PostgreSQL connection pool and opaque service-instance identity.
   Added PostgreSQL lease, heartbeat, expiry, takeover, and fencing primitives with
   migration version 6 and contention/crash coverage. SQLite and default
