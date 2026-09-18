@@ -361,7 +361,7 @@ TEST(Storage, ConformancePersistsAndFencesNodeWork) {
     work.state = NodeWorkState::Completed;
     work.result = Message{};
     s->commit({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}});
-    EXPECT_EQ(s->get(RecordKind::NodeWork, work.id).get<NodeWork>().state,
+    EXPECT_EQ(s->get(RecordKind::NodeWork, work.id).template get<NodeWork>().state,
               NodeWorkState::Completed);
     auto stale = work;
     stale.state = NodeWorkState::Running;
