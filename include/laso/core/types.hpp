@@ -331,6 +331,8 @@ inline bool valid_node_work_transition(NodeWorkState from, NodeWorkState to) {
     return true;
   if (from == NodeWorkState::Queued && to == NodeWorkState::Running)
     return true;
+  if (from == NodeWorkState::Queued && to == NodeWorkState::Cancelled)
+    return true;
   if (from == NodeWorkState::Running &&
       (to == NodeWorkState::Completed || to == NodeWorkState::Failed ||
        to == NodeWorkState::Cancelled))

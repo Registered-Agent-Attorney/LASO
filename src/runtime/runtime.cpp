@@ -536,6 +536,24 @@ Task<void> Runtime::lease_loop() {
       }
     }
     for (auto &node : node_leases) {
+      try {
+        const auto run = deps_.storage.get(RecordKind::Run,
+                                           deps_.storage.get(RecordKind::NodeWork, node.id)
+                                               .get<NodeWork>()
+                                               .run_id)
+                              .get<Run>();
+        if (run.cancellation_requested || terminal(run.state)) {
+          std::lock_guard lock(mutex_);
+          if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end())
+            active->second.stop.request_stop();
+        }
+      } catch (const Error &) {
+        std::lock_guard lock(mutex_);
+        if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end()) {
+          active->second.ownership_lost = true;
+          active->second.stop.request_stop();
+        }
+      }
       bool valid = true;
       for (auto *lease : {&node.work, node.global ? &*node.global : nullptr,
                           node.run ? &*node.run : nullptr}) {
@@ -616,6 +634,18 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
     throw Error(ErrorCode::Conflict, "Run is already terminal");
   if (deps_.coordination) {
     deps_.storage.request_cancellation(id);
+    for (const auto &record : deps_.storage.list(RecordKind::NodeWork, id, 10000, 0)) {
+      auto work = record.get<NodeWork>();
+      if (work.state == NodeWorkState::Queued) {
+        work.state = NodeWorkState::Cancelled;
+        work.error = "Parent run cancellation requested";
+        work.updated_at = timestamp();
+        deps_.storage.commit({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}});
+      } else if (work.state == NodeWorkState::Running) {
+        if (const auto active = active_nodes_.find(work.id); active != active_nodes_.end())
+          active->second.stop.request_stop();
+      }
+    }
     std::set<std::string> children;
     if (!r.child_id.empty())
       children.insert(r.child_id);

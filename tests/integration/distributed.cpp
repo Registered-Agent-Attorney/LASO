@@ -422,6 +422,82 @@ TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
 #endif
 }
 
+TEST(DistributedExecution, CancellationPropagatesToRemoteNodeWork) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+#if defined(LASO_DISTRIBUTED_PROCESS)
+  TemporaryDirectory directory;
+  Config configuration = config(directory.path);
+  configuration.storage_backend = "postgres";
+  configuration.postgres_dsn = database.dsn;
+  configuration.postgres_schema = database.schema;
+  configuration.execution_mode = "multi_instance";
+  configuration.max_runs = 1;
+  configuration.max_nodes = 1;
+  configuration.max_nodes_per_run = 1;
+  configuration.coordination_lease_ttl_ms = 1000;
+  configuration.coordination_heartbeat_interval_ms = 100;
+  configuration.validate();
+  asio::io_context io;
+  Service controller(io, configuration);
+  const auto pipeline = R"yaml(
+laso: '1'
+name: process-cancel
+version: 1
+nodes:
+  input: {type: input}
+  fork: {type: parallel, join: join}
+  left: {type: function, function: distributed_hold}
+  right: {type: function, function: identity}
+  join: {type: join}
+  output: {type: output}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: left}
+  - {from: fork, to: right}
+  - {from: left, to: join}
+  - {from: right, to: join}
+  - {from: join, to: output}
+)yaml";
+  controller.register_pipeline(pipeline);
+  const auto run_id = controller.start("process-cancel@1");
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_HOLD_MS", "10000", 1);
+    execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
+    _exit(127);
+  }
+  bool running = false;
+  for (unsigned i = 0; i < 300; ++i) {
+    for (const auto &value : controller.list(RecordKind::NodeWork, run_id))
+      running = running || value.get<NodeWork>().state == NodeWorkState::Running;
+    if (running)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  ASSERT_TRUE(running);
+  controller.runtime().cancel(run_id);
+  auto result = controller.get(RecordKind::Run, run_id).get<Run>();
+  for (unsigned i = 0; i < 300 && !terminal(result.state); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    result = controller.get(RecordKind::Run, run_id).get<Run>();
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  ASSERT_EQ(result.state, RunState::Cancelled);
+  for (const auto &value : controller.list(RecordKind::NodeWork, run_id))
+    EXPECT_EQ(value.get<NodeWork>().state, NodeWorkState::Cancelled);
+#else
+  GTEST_SKIP() << "distributed process fixture is not built";
+#endif
+}
+
 TEST(DistributedExecution, MultiInstanceRejectsSQLite) {
   TemporaryDirectory directory;
   auto configuration = config(directory.path);
