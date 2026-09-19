@@ -25,8 +25,10 @@ SQLite has a single-service ownership lease using Linux `flock`. PostgreSQL
 defaults to the same single-owner behavior using a session-held advisory lock.
 With `execution_mode: multi_instance`, PostgreSQL instead permits multiple
 services and the runtime claims whole runs with database-time leases and fencing
-tokens. API readers share the same adapter; a graph's parallel branches are not
-distributed independently.
+tokens. API readers share the same adapter. The run controller may persist
+deterministic parallel branch work as `NodeWork` records so different instances
+can execute eligible function/validator/router paths; side-effecting and
+host-local node types remain under the run owner.
 
 On startup, single-owner runs left in active states are marked Paused with a
 recovery-required event. In multi-instance mode, active checkpoints remain

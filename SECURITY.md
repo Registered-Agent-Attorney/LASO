@@ -70,6 +70,14 @@ never written to LASO logs or API error responses. PostgreSQL schema names are
 validated as simple identifiers before they are used in DDL; SQL values are bound
 parameters. The PostgreSQL test service in CI uses disposable credentials and data.
 
+Opt-in PostgreSQL multi-instance execution uses database-time leases and fencing
+for run control and deterministic `NodeWork` claims. Lease loss fails closed:
+stale processes cannot commit node results after takeover. Only structured,
+deterministic local branch paths are distributed; tools, providers, workers,
+subpipelines, approvals inside branch paths, local workspaces, and other
+side-effecting operations remain owner-local. This protects ownership and
+persistence, but does not provide exactly-once external side effects.
+
 Scheduler definitions are bounded before persistence: schedule input is limited to
 1 MiB, trigger metadata filters to 32 scalar entries and 16 KiB, intervals to one
 year, cron fields to the documented five-field UTC form, pending launches and

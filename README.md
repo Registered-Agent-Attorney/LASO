@@ -237,9 +237,11 @@ daemon in the foreground as an unprivileged service account.
   executed. Full systemd installation and shutdown behavior remain unvalidated.
 - SQLite remains one-process only. PostgreSQL supports an explicit multi-instance
   execution mode with bounded run claims, database-time leases, heartbeats,
-  fencing tokens, and crash takeover. A run has one active owner at a time;
-  branches remain inside that owner and external side effects are not exactly
-  once. PostgreSQL operations use bounded pooled connections.
+  fencing tokens, crash takeover, and durable deterministic branch work. A run
+  has one control owner at a time; eligible pure branch paths may execute on
+  different instances, while side-effecting/local-session branches remain with
+  the owner. External side effects are not exactly once. PostgreSQL operations
+  use bounded pooled connections.
 - Fork branches execute concurrently through the bounded executor when capacity is
   available, while join results retain pipeline branch order. Global, per-run,
   model-call, and tool-call limits bound work; cancellation is cooperative. Approval

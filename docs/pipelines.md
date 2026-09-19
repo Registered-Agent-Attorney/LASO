@@ -40,9 +40,9 @@ branches.
 Registration rejects missing or ambiguous references and detects direct and
 indirect recursive dependencies. Runtime also enforces `max_subpipeline_depth`,
 which defaults to 16 and accepts values from 1 through 64. The registry is local
-and durable. Optional multi-instance run ownership is documented in
-[distributed execution](distributed-execution.md); this feature does not provide
-a package registry or distributed worker leasing.
+and durable. Optional multi-instance ownership and deterministic branch work are
+documented in [distributed execution](distributed-execution.md); this feature
+does not provide a package registry or distributed worker leasing.
 
 The offline examples in `examples/composition` show a versioned two-pipeline
 composition and a three-pipeline chain. Register referenced children first, then

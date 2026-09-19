@@ -3,8 +3,8 @@
 This ADR records the coordination primitives that preceded the distributed
 execution milestone. The single-owner defaults remain authoritative, while the
 later opt-in `execution_mode: multi_instance` uses these primitives for whole-run
-ownership. It does not provide distributed worker leasing or exactly-once side
-effects.
+ownership and deterministic branch `NodeWork` claims. It does not provide
+distributed worker leasing or exactly-once side effects.
 
 ## Context
 

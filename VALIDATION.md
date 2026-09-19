@@ -11,10 +11,10 @@ SQLite persistence, runtime, API/CLI, policies, scheduling, event-source ingress
 and artifact interfaces, tests, systemd/Docker deployment files, documentation, and
 Linux CI are present.
 
-The current default build registers **182 GoogleTest cases** plus **2 CTest entries**
-for CLI validation and a process smoke/restart scenario, for **184 CTest entries**.
-The PostgreSQL-enabled build registers **192 GoogleTest cases** plus the same **2
-CTest entries**, for **194 CTest entries**. Composition,
+The current default build registers **182 GoogleTest cases** plus **3 CTest entries**
+for CLI validation, process smoke/restart, and the SQLite multi-instance guard, for
+**185 CTest entries**. The PostgreSQL-enabled build registers **198 GoogleTest
+cases** plus the same **3 CTest entries**, for **201 CTest entries**. Composition,
 storage, event-ingress, and worker-adapter coverage includes
 revision immutability, cross-boundary payload and schema behavior, child retry
 identity, approval-compatible persistence, parallel children, recursion, depth,
@@ -68,7 +68,7 @@ includes nested A → B → C execution and child output-contract failure propag
 
 | Check | Result |
 |---|---|
-| Native clang-format | Not installed in the development environment; the required Linux check is recorded below |
+| Native clang-format | **PASS: clang-format-18 check executed on Linux; no violations** |
 | CMake source paths | PASS: all referenced source files present |
 | LASO include resolution and documentation links | PASS |
 | Safe YAML/configuration document scan | PASS: 13 documents |
@@ -84,12 +84,12 @@ No non-Linux C++ compilation was attempted because LASO is intentionally Linux-o
 | CMake 3.28.3 + Ninja configure | **PASS** |
 | GCC 13.3.0 Debug build | **PASS** |
 | Clang 18.1.3 Debug build | **PASS** |
-| GCC Debug CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
-| GCC Release CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
-| Clang Debug CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
-| Clang Release CTest suite | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
-| ASan + UBSan build and CTest, leak detection enabled | **PASS: 184/184 scheduled; 181 passed and 3 expected PostgreSQL-disabled cases skipped** |
-| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 194/194; all PostgreSQL coordination, storage, and distributed execution tests ran against isolated PostgreSQL 16** |
+| GCC Debug CTest suite | **PASS: 201/201; all PostgreSQL and distributed-execution tests ran against isolated PostgreSQL 16** |
+| GCC Release CTest suite | **PASS: 201/201; all PostgreSQL and distributed-execution tests ran against isolated PostgreSQL 16** |
+| Clang Debug CTest suite | **PASS: 201/201; all PostgreSQL and distributed-execution tests ran against isolated PostgreSQL 16** |
+| Clang Release CTest suite | **PASS: 201/201; all PostgreSQL and distributed-execution tests ran against isolated PostgreSQL 16** |
+| ASan + UBSan build and CTest, leak detection enabled | **PASS: 185/185 scheduled; 182 passed and 3 expected PostgreSQL-disabled cases skipped** |
+| PostgreSQL-enabled GCC Debug CTest suite | **PASS: 201/201; all PostgreSQL storage, coordination, and distributed-execution tests ran against isolated PostgreSQL 16** |
 | clang-format `--dry-run --Werror` on Linux | **PASS** |
 | clang-tidy 18 against the Clang compilation database | **PASS: exit 0; advisory warnings remain** |
 | Debian 13 container | **PASS: public workflow 35380101673** |
@@ -120,6 +120,32 @@ another distribution or deployment environment. Ubuntu and Debian results above
 are actual executions; pending and blocked rows do not imply success. The TSan
 failure occurred before LASO tests ran and must be repeated on a compatible kernel
 and sanitizer runtime; global ASLR settings were not weakened to work around it.
+
+## Distributed execution milestone validation
+
+The Milestone 2 implementation was validated from the current source tree on an
+isolated Linux x86-64 host. The PostgreSQL-enabled matrix used a disposable
+PostgreSQL 16 instance; the default and sanitizer matrices kept PostgreSQL
+disabled and verified that the SQLite build remains independent of libpq.
+
+- SQLite/default GCC Debug: **185/185 scheduled; 182 passed and 3 expected
+  PostgreSQL-disabled cases skipped**.
+- PostgreSQL GCC Debug and Release: **201/201 passed**.
+- PostgreSQL Clang Debug and Release: **201/201 passed**.
+- ASan + UBSan: **185/185 scheduled; 182 passed and 3 expected
+  PostgreSQL-disabled cases skipped** with leak detection enabled.
+- The focused distributed tests cover run-owner takeover, durable `NodeWork`
+  claiming, fencing, retries with distinct attempt IDs, cancellation, approval
+  resume, process-crash recovery, and SQLite multi-instance rejection.
+- Storage failure handling is fail-closed: lease renewal and authoritative
+  node mutations stop when coordination/storage errors prevent proof of current
+  ownership. Connection failure is bounded and redacted by the PostgreSQL pool;
+  a live database-partition test remains an operational exercise rather than a
+  claim of exactly-once execution.
+- `clang-format-18 --dry-run --Werror` completed successfully after formatting
+  six distributed-execution source/test files. The repository clang-tidy command
+  completed with exit 0; its remaining output is advisory, non-LASO-owned or
+  intentionally non-fatal baseline guidance.
 
 ## Historical validation snapshots
 

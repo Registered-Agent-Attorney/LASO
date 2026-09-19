@@ -2,11 +2,19 @@
 
 ## Unreleased
 
+- Added opt-in PostgreSQL node-work distribution for deterministic parallel
+  branches. Durable fenced `NodeWork` records, bounded global/per-run node slots,
+  crash takeover, stale-result rejection, retry attempt identity, cross-instance
+  cancellation, and approval resume preserve the existing runtime path. Tools,
+  providers, workers, subpipelines, approvals inside branch paths, and other
+  host-local or side-effecting work remain run-owner controlled; no distributed
+  exactly-once guarantee is claimed.
+
 - Added opt-in PostgreSQL multi-instance execution. Multiple LASO service
   processes can claim whole queued runs using database-time leases, heartbeats,
   fencing tokens, durable service-instance state, and crash takeover. SQLite
   remains single-instance; distributed execution does not claim exactly-once
-  external effects or distribute individual graph branches.
+  external effects.
 
 - Hardened the CLI schedule and trigger deletion results so successful deletes
   return an explicit stable result instead of depending on post-delete record

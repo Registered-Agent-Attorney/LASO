@@ -19,7 +19,8 @@ startup.
 
 Claims and transactions are safe within the selected ownership model. Distributed
 worker leasing and HA remain explicitly out of scope; opt-in PostgreSQL
-multi-instance mode adds whole-run leases and fenced checkpoints only.
+multi-instance mode adds run leases and, at deterministic parallel boundaries,
+fenced `NodeWork` claims. It does not provide exactly-once external effects.
 
 ## Supersedes
 

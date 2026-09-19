@@ -101,8 +101,9 @@ claim operation is transactional and safe under concurrent adapter calls. Option
 PostgreSQL coordination provides opaque service identities, database-time leases,
 heartbeats, expiry takeover, and fencing checks. Explicit
 `execution_mode: multi_instance` uses those primitives to claim whole durable
-runs; it does not distribute graph branches or create a distributed worker
-cluster. See [distributed execution](distributed-execution.md).
+runs and, at deterministic parallel boundaries, fenced `NodeWork` records. It
+does not create a distributed worker cluster or provide exactly-once external
+effects. See [distributed execution](distributed-execution.md).
 
 Event triggers match an event type and optional scalar metadata fields. Delivery
 records keyed by `trigger_id|event_id` provide restart deduplication. Trigger depth

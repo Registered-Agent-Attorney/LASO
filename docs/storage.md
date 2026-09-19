@@ -41,10 +41,12 @@ format. `Service` acquires a filesystem process lease before opening the databas
 PostgreSQL uses a bounded RAII connection pool per `PostgresStorage`; each
 transaction remains bound to one acquired connection. Pool size and acquisition
 timeout are configurable and pool diagnostics are bounded. Startup creates the
-configured validated schema and applies immutable version-1 through version-7
+configured validated schema and applies immutable version-1 through version-8
 migrations in a transaction. Version 3 adds event-source state and external-event
 claim records; version 4 adds durable worker jobs; version 6 adds coordination
-lease state; version 7 adds service-instance state. A session-held advisory lock
+lease state; version 7 adds service-instance state; version 8 adds durable
+`NodeWork` records for eligible distributed branch execution. A session-held
+advisory lock
 still prevents two LASO services from owning the same database by default. In
 explicit `execution_mode: multi_instance`, schema migration uses a transaction
 advisory lock and run writes use lease/fencing predicates instead. Schema
@@ -56,9 +58,9 @@ The PostgreSQL-only `Coordination` abstraction provides atomic resource leases,
 database-time heartbeats, expiry takeover, monotonically increasing fencing
 tokens, release, inspection, and stale-token rejection. Each service gets a fresh
 opaque UUID identity that is not derived from host or user information. These are
-In multi-instance mode, the same primitives coordinate whole-run ownership and
-service heartbeats. They do not provide distributed scheduling, distributed
-worker leasing, or a cluster coordinator.
+In multi-instance mode, the same primitives coordinate whole-run ownership,
+service heartbeats, and fenced `NodeWork` claims. They do not provide distributed
+scheduling, distributed worker leasing, or a cluster coordinator.
 
 The public CI workflow starts an isolated PostgreSQL 16 service with disposable
 test credentials. The same storage conformance tests run against SQLite and
