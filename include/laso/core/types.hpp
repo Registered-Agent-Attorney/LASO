@@ -11,7 +11,7 @@
 namespace laso {
 using Json = nlohmann::json;
 using Milliseconds = std::chrono::milliseconds;
-inline constexpr auto version = "0.1.0";
+inline constexpr auto version = "0.1.0-rc.1";
 std::string uuid();
 std::string timestamp();
 enum class ErrorCode {

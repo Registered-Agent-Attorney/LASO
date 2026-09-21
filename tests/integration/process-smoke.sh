@@ -50,7 +50,7 @@ start_server() {
 }
 base="http://127.0.0.1:$port/api/v1"
 start_server
-curl -fsS "$base/version" | jq -e '.version == "0.1.0"'
+curl -fsS "$base/version" | jq -e '.version == "0.1.0-rc.1"'
 curl -fsS -X POST "$base/pipelines/human-approval/runs" -H 'Content-Type: application/json' -d '{}' > "$temp/api-run.json"
 run_id=$(jq -r '.id' "$temp/api-run.json")
 for _ in $(seq 1 100); do

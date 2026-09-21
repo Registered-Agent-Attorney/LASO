@@ -6,7 +6,8 @@ Local AI System for Orchestration is an early, Linux-first C++20 framework for
 declarative workflows, deterministic functions, model and tool registries, policy
 checks, durable human approval, and execution history. Applications supply their
 own logic and integrations. Agents are one node type; pipelines are the root
-abstraction. Version **0.1.0** is a foundation, not a production-readiness claim.
+abstraction. This tree is release candidate **0.1.0-rc.1**; read the support
+matrix and security limitations before production deployment.
 
 **Validation status:** implemented, statically reviewed, and validated on Ubuntu
 with GCC and Clang, ASan/UBSan, a Debian 13 container build, a runtime image
@@ -42,15 +43,9 @@ account, or GUI is required to build or run LASO. Dependencies come from the
 distribution; CMake fetches the pinned small MIT-licensed JSON Schema validator
 when it is not already available locally.
 
-```sh
-sudo apt-get update
-sudo apt-get install -y build-essential cmake ninja-build \
-  libsqlite3-dev libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev \
-  libcli11-dev libboost-system-dev libgtest-dev curl jq
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
+See [build and install](docs/build.md) for the clean-clone dependency list,
+Debug/Release/sanitizer commands, PostgreSQL options, provider adapters, and
+installation layout.
 
 PostgreSQL is an optional build and runtime backend. Install `libpqxx-dev` and
 `libpq-dev`, configure with `-DLASO_ENABLE_POSTGRES=ON`, then select it with
@@ -82,8 +77,8 @@ binaries are `build/bin/laso`, `build/bin/laso-server`, and
 `build/worker-plugins/liblaso_example_worker.so`. Core, runtime, storage factory,
 SQLite, optional PostgreSQL, plugin loader, application, API, and CLI are separate
 library targets. Installation currently
-installs the executables, public headers, C SDK header, and example configuration;
-a relocatable CMake SDK package is deferred.
+installs the executables, public headers, C SDK header, example configuration,
+and public documentation. A relocatable CMake SDK package is deferred.
 
 ## First pipeline
 
@@ -114,6 +109,10 @@ through registries; no shell command interpretation occurs. See
 ./build/bin/laso run start process@1 --input '{"value":42}'
 ./build/bin/laso approval list
 ./build/bin/laso approval approve APPROVAL_ID --actor operator --comment Reviewed
+./build/bin/laso run list
+./build/bin/laso run inspect RUN_ID
+./build/bin/laso node-work list --run-id RUN_ID
+./build/bin/laso instance list
 ```
 
 The approval example exits with `WaitingApproval`. A later CLI process opens the
@@ -122,6 +121,8 @@ to `.laso` relative to the working directory. The CLI is a local service adapter
 not an HTTP command wrapper. Only one service process may own a database: while
 the daemon is running, use its API. Stop it before using local CLI database commands.
 `laso health` checks local storage initialization; use HTTP health to probe the daemon.
+[Configuration reference](docs/configuration.md) explains storage, deadlines,
+worker capabilities, budgets, cancellation, and security-sensitive values.
 
 ## API
 
@@ -202,6 +203,7 @@ process.** Metadata validation does not isolate native code. See the
 | `event-source` | Offline native event-source plugin → durable event trigger → pipeline |
 | `worker-adapter` | Offline worker plugin → durable worker job → status event → validated output |
 | `process-worker` | Supervised local process transport → deterministic reference worker host |
+| `distributed` | PostgreSQL owner + worker → durable claim → deterministic validation |
 | `opencode-worker` | Optional supervised OpenCode session adapter (requires a local OpenCode installation) |
 | `codex-worker` | Optional supervised Codex session adapter (requires a local Codex installation) |
 | `claude-worker` | Optional supervised Claude Code session adapter (requires a local Claude Code installation) |
@@ -217,6 +219,10 @@ See [architecture](docs/architecture.md), [runtime semantics](docs/runtime.md),
 [pipeline composition](docs/pipelines.md),
 [storage backends](docs/storage.md),
 [scheduling and event triggers](docs/scheduling.md),
+[build and install](docs/build.md), [configuration](docs/configuration.md),
+[capability matrix](docs/capability-matrix.md),
+[operations and recovery](docs/operations.md),
+[security threat model](docs/security-threat-model.md),
 [Linux deployment](docs/linux-deployment.md), [security](SECURITY.md), and
 [contribution instructions](CONTRIBUTING.md). CI specifies Ubuntu GCC/Clang,
 Debian 13, ASan/UBSan, formatting, clang-tidy, and a real PostgreSQL service job.
@@ -233,8 +239,9 @@ daemon in the foreground as an unprivileged service account.
 
 ## Current limitations and deferred work
 
-- Linux builds, tests, sanitizer builds, and the Debian container path have been
-  executed. Full systemd installation and shutdown behavior remain unvalidated.
+- Linux builds, tests, sanitizer builds, and the Debian container path are
+  covered by the documented validation paths. Full systemd installation and
+  shutdown behavior remain deployment-dependent.
 - SQLite remains one-process only. PostgreSQL supports an explicit multi-instance
   execution mode with bounded run claims, database-time leases, heartbeats,
   fencing tokens, crash takeover, and durable deterministic branch work. A run
@@ -249,8 +256,8 @@ daemon in the foreground as an unprivileged service account.
 - Registered pipeline revisions are immutable `name@version` records. Subpipeline
   nodes execute normal durable child runs with persisted parent/child links,
   version resolution, approval/retry/recovery behavior, and a configurable maximum
-  depth. Distributed execution is opt-in and requires PostgreSQL; there is no
-  package registry or distributed worker cluster.
+  depth. Distributed execution is opt-in and requires PostgreSQL; LASO does not
+  provide a package registry or cluster scheduler.
 - Deadlines and cancellation are cooperative. A native plugin that blocks or
   misbehaves can block a worker or crash the process. The v1 tool/provider
   invocation ABI is for short local operations; event sources may emit from
@@ -258,7 +265,7 @@ daemon in the foreground as an unprivileged service account.
   returns. Native plugins are privileged in-process code and are not sandboxed.
 - Approval waits and history survive restart. In-flight external effects are not
   exactly once; an explicit resume may replay an unfinished node. Operators must
-  review interrupted runs. Automatic general crash recovery is deferred.
+  review interrupted runs and use the durable inspection commands during recovery.
 - Validator nodes retain the legacy field/value routing mode when no `schema` is
   declared; declared schemas use the shared local JSON Schema engine. Prompt values
   are inline text, not automatically read from files.
@@ -269,8 +276,8 @@ daemon in the foreground as an unprivileged service account.
 - Schedules and event triggers are durable local framework records. One-time,
   interval, UTC five-field cron, and internal-event triggers launch normal runs;
   misfire, overlap, delivery-depth, and pending-work bounds are explicit. Vendor-
-  specific adapters are optional and remain outside Core; there are no distributed
-  workers or exactly-once claims. Generic configured event-source and worker plugins can ingress validated
+  specific adapters are optional and remain outside Core; arbitrary remote tools
+  and exactly-once claims are not supported. Generic configured event-source and worker plugins can ingress validated
   events or submit durable external jobs; supplied external IDs deduplicate within
   the selected storage database. See [worker adapters](docs/workers.md).
 

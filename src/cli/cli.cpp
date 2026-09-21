@@ -32,6 +32,8 @@ int cli_main(int argc, char **argv) {
   auto *run_list = run->add_subcommand("list");
   auto *show = run->add_subcommand("show");
   show->add_option("id", target)->required();
+  auto *inspect = run->add_subcommand("inspect", "Show safe durable execution lineage");
+  inspect->add_option("id", target)->required();
   auto *cancel = run->add_subcommand("cancel");
   cancel->add_option("id", target)->required();
   auto *resume = run->add_subcommand("resume");
@@ -102,6 +104,15 @@ int cli_main(int argc, char **argv) {
   worker_job_show->add_option("id", target)->required();
   auto *worker_job_cancel = worker_job->add_subcommand("cancel");
   worker_job_cancel->add_option("id", target)->required();
+  auto *worker_job_inspect = worker_job->add_subcommand("inspect", "Show safe job diagnostics");
+  worker_job_inspect->add_option("id", target)->required();
+  auto *node_work = app.add_subcommand("node-work", "Inspect durable distributed work");
+  node_work->require_subcommand(1);
+  auto *node_work_list = node_work->add_subcommand("list");
+  std::string node_work_run_id;
+  node_work_list->add_option("--run-id", node_work_run_id);
+  auto *node_work_show = node_work->add_subcommand("show");
+  node_work_show->add_option("id", target)->required();
   auto *instance = app.add_subcommand("instance");
   instance->require_subcommand(1);
   auto *instance_list = instance->add_subcommand("list");
@@ -157,9 +168,11 @@ int cli_main(int argc, char **argv) {
     else if (*pipeline_show)
       result = service.get(RecordKind::Pipeline, target);
     else if (*run_list)
-      result = service.list(RecordKind::Run);
+      result = service.inspect_runs();
     else if (*show)
       result = service.run_view(target);
+    else if (*inspect)
+      result = service.inspect_run(target);
     else if (*start) {
       run_id = service.start(target, Json::parse(input), actor, true);
       run_executor = true;
@@ -232,10 +245,16 @@ int cli_main(int argc, char **argv) {
       result = service.worker_jobs();
     else if (*worker_job_show)
       result = service.worker_job(target);
+    else if (*worker_job_inspect)
+      result = service.inspect_worker_job(target);
     else if (*worker_job_cancel) {
       service.cancel_worker_job(target);
       result = service.worker_job(target);
-    } else if (*instance_list)
+    } else if (*node_work_list)
+      result = service.inspect_node_works(node_work_run_id);
+    else if (*node_work_show)
+      result = service.inspect_node_work(target);
+    else if (*instance_list)
       result = service.instances();
     if (run_executor) {
       executor.start();

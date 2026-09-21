@@ -34,6 +34,14 @@ public:
   void set_trigger_enabled(const std::string &id, bool enabled);
   void delete_trigger(const std::string &id);
   Json run_view(const std::string &id) const;
+  // Operator-facing views omit message payloads, prompts, artifact locations,
+  // and other potentially sensitive content while preserving durable lineage.
+  std::vector<Json> inspect_runs() const;
+  Json inspect_run(const std::string &id) const;
+  std::vector<Json> inspect_node_works(const std::string &run_id = "") const;
+  Json inspect_node_work(const std::string &id) const;
+  std::vector<Json> inspect_worker_jobs(const std::string &run_id = "") const;
+  Json inspect_worker_job(const std::string &id) const;
   Json get(RecordKind kind, const std::string &id) const {
     return storage_->get(kind, id);
   }

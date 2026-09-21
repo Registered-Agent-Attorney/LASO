@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-rc.1
+
+- Release-hardening pass: documented clean-clone builds, optional dependencies,
+  configuration, capability boundaries, recovery semantics, migration policy,
+  and the public threat model.
+- Added safe operator inspection views for runs, durable node work, attempts,
+  worker jobs, leases/fences, failures, and artifact integrity metadata.
+- Added a credential-free deterministic PostgreSQL owner/worker example and
+  documented installation and controlled recovery workflows.
+
 ## Unreleased
 
 - Added opt-in PostgreSQL node-work distribution for deterministic parallel

@@ -1,7 +1,7 @@
 # Architecture and ownership
 
 The public API is C++20. The shared-library extension boundary is C. The framework
-version (0.1.0), YAML format (1), SQLite schema (4), and plugin ABI (1) are distinct.
+release identifier (0.1.0-rc.1), YAML format (1), SQLite schema (5), and plugin ABI (1) are distinct.
 
 | Target | Responsibility and dependencies |
 |---|---|

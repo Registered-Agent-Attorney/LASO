@@ -45,6 +45,23 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install release-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build libsqlite3-dev libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev libcli11-dev libboost-system-dev libgtest-dev curl jq
+      - name: Configure Release build
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+      - name: Verify installed command-line tools
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/laso-install"
+          test -x "$RUNNER_TEMP/laso-install/bin/laso"
+          "$RUNNER_TEMP/laso-install/bin/laso" version
   debian:
     runs-on: ubuntu-24.04
     container: debian:13

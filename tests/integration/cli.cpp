@@ -73,3 +73,40 @@ TEST(Cli, ScheduleAndTriggerDeleteReturnSuccess) {
   const Json expected_trigger{{"id", "cli-trigger"}, {"deleted", true}};
   EXPECT_EQ(Json::parse(deleted_trigger.output), expected_trigger);
 }
+
+TEST(Cli, OperatorInspectShowsDurableLineageWithoutPayloads) {
+  TemporaryDirectory directory;
+  const auto pipeline = directory.path / "pipeline.yaml";
+  std::ofstream(pipeline) << single();
+  const auto data_dir = directory.path.string();
+
+  ASSERT_EQ(invoke_cli({"laso", "--data-dir", data_dir, "pipeline", "register",
+                        pipeline.string()})
+                .status,
+            0);
+  const auto started =
+      invoke_cli({"laso", "--data-dir", data_dir, "run", "start", "test",
+                  "--input", R"({"operator_probe":"safe"})"});
+  ASSERT_EQ(started.status, 0);
+  const auto run = Json::parse(started.output);
+  ASSERT_TRUE(run.contains("id"));
+
+  const auto inspected = invoke_cli(
+      {"laso", "--data-dir", data_dir, "run", "inspect", run.at("id").get<std::string>()});
+  ASSERT_EQ(inspected.status, 0);
+  const auto view = Json::parse(inspected.output);
+  EXPECT_EQ(view.at("id"), run.at("id"));
+  EXPECT_TRUE(view.contains("attempts"));
+  EXPECT_TRUE(view.contains("node_work"));
+  EXPECT_TRUE(view.contains("worker_jobs"));
+  EXPECT_TRUE(view.contains("artifacts"));
+  EXPECT_EQ(inspected.output.find("operator_probe"), std::string::npos);
+
+  const auto listed =
+      invoke_cli({"laso", "--data-dir", data_dir, "run", "list"});
+  ASSERT_EQ(listed.status, 0);
+  const auto runs = Json::parse(listed.output);
+  ASSERT_EQ(runs.size(), 1U);
+  EXPECT_EQ(runs.front().at("id"), run.at("id"));
+  EXPECT_EQ(runs.front().at("state"), "Completed");
+}

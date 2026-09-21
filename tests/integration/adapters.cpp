@@ -662,7 +662,7 @@ TEST(Api, HealthAndVersion) {
   LocalDevelopmentIdentity identity;
   Api api(s, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/health", "").status, 200U);
-  EXPECT_EQ(api.handle("GET", "/api/v1/version", "").body.at("version"), "0.1.0");
+  EXPECT_EQ(api.handle("GET", "/api/v1/version", "").body.at("version"), "0.1.0-rc.1");
 }
 TEST(Api, RegistersAndCreatesRun) {
   TemporaryDirectory dir;

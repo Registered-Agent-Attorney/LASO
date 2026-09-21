@@ -1,6 +1,6 @@
 # Security boundaries
 
-LASO v0.1 is an early framework. It has not been independently audited or validated
+LASO v0.1.0-rc.1 is an early framework. It has not been independently audited or validated
 in production. Ubuntu GCC/Clang, ASan/UBSan, Debian container, runtime-image, and
 hosted CI validation have been performed; full systemd deployment behavior remains
 unvalidated. See [VALIDATION.md](VALIDATION.md) for the exact record.
@@ -36,13 +36,14 @@ unvalidated. See [VALIDATION.md](VALIDATION.md) for the exact record.
   repositories. SQLite, PostgreSQL, and artifacts are not encrypted secret vaults.
 - Cancellation and deadlines are cooperative. A faulty native extension can block
   a worker, corrupt memory or crash the daemon. Out-of-process isolation is deferred.
-- External worker plugins are privileged in-process adapters, not distributed LASO
-  workers. Worker requests omit instructions and input from durable job metadata;
-  results, status events, and artifact references are bounded and treated as
-  untrusted. Worker callbacks cannot assign LASO source identity or trigger depth,
-  terminal jobs ignore late status events, and cancellation is reported as
-  acknowledged only when the adapter confirms it. Native worker plugins are not
-  sandboxed and must not receive production secrets through ordinary configuration.
+- Native worker plugins are privileged in-process adapters. Supervised process
+  workers and PostgreSQL multi-instance workers are separate opt-in paths;
+  neither is an OS sandbox. Worker requests omit instructions and input from
+  durable job metadata; results, status events, and artifact references are
+  bounded and treated as untrusted. Worker callbacks cannot assign LASO source
+  identity or trigger depth, terminal jobs ignore late status events, and
+  cancellation is reported as acknowledged only when the adapter confirms it.
+  Workers must not receive production secrets through ordinary configuration.
 
 For a vulnerability, use the repository host's private vulnerability reporting
 feature when it is enabled, or contact the repository maintainer privately. Do not
@@ -72,10 +73,10 @@ parameters. The PostgreSQL test service in CI uses disposable credentials and da
 
 Opt-in PostgreSQL multi-instance execution uses database-time leases and fencing
 for run control and deterministic `NodeWork` claims. Lease loss fails closed:
-stale processes cannot commit node results after takeover. Only structured,
-deterministic local branch paths are distributed; tools, providers, workers,
-subpipelines, approvals inside branch paths, local workspaces, and other
-side-effecting operations remain owner-local. This protects ownership and
+stale processes cannot commit node results after takeover. Supported agent/worker
+workloads may execute on another LASO instance using bounded workspace manifests
+and artifact metadata; arbitrary tools, shell commands, credentials, and other
+side-effecting operations are not distributed. This protects ownership and
 persistence, but does not provide exactly-once external side effects.
 
 Scheduler definitions are bounded before persistence: schedule input is limited to

@@ -563,6 +563,153 @@ Json Service::run_view(const std::string &id) const {
   result["children"] = std::move(children);
   return result;
 }
+namespace {
+Json operator_run_summary(const Run &run) {
+  return {{"id", run.id},
+          {"pipeline_id", run.pipeline_id},
+          {"pipeline_version", run.pipeline_version},
+          {"state", run.state},
+          {"created_at", run.created_at},
+          {"updated_at", run.updated_at},
+          {"active_node", run.active_node},
+          {"error", run.error},
+          {"cancellation_requested", run.cancellation_requested},
+          {"owner_instance_id", run.owner_instance_id},
+          {"fencing_token", run.fencing_token},
+          {"lease_expires_at", run.lease_expires_at},
+          {"worker", run.worker},
+          {"worker_job_id", run.worker_job_id}};
+}
+Json operator_node_work_summary(const NodeWork &work) {
+  return {{"id", work.id},
+          {"run_id", work.run_id},
+          {"node_id", work.node_id},
+          {"group_id", work.group_id},
+          {"index", work.index},
+          {"state", work.state},
+          {"created_at", work.created_at},
+          {"updated_at", work.updated_at},
+          {"attempt", work.attempt},
+          {"attempt_id", work.attempt_id},
+          {"owner_instance_id", work.owner_instance_id},
+          {"fencing_token", work.fencing_token},
+          {"claimed_at", work.claimed_at},
+          {"last_renewed_at", work.last_renewed_at},
+          {"lease_expires_at", work.lease_expires_at},
+          {"required_worker_id", work.required_worker_id},
+          {"required_capability", work.required_capability},
+          {"error", work.error},
+          {"result_present", work.result.has_value()}};
+}
+Json operator_attempt_summary(const Json &value) {
+  const auto attempt = value.get<NodeExecution>();
+  return {{"id", attempt.id},
+          {"run_id", attempt.run_id},
+          {"node_id", attempt.node_id},
+          {"attempt", attempt.attempt},
+          {"state", attempt.state},
+          {"started_at", attempt.started_at},
+          {"finished_at", attempt.finished_at},
+          {"duration_ms", attempt.duration_ms},
+          {"error", attempt.error},
+          {"worker_job_id", attempt.worker_job_id},
+          {"worker_id", attempt.worker_id},
+          {"external_job_id", attempt.external_job_id}};
+}
+Json operator_worker_job_summary(const Json &value) {
+  const auto job = value.get<WorkerJob>();
+  Json usage = {{"provider", job.usage.provider},
+                {"model", job.usage.model},
+                {"executor", job.usage.executor}};
+  if (job.usage.wall_duration_ms)
+    usage["wall_duration_ms"] = *job.usage.wall_duration_ms;
+  if (job.usage.total_tokens)
+    usage["total_tokens"] = *job.usage.total_tokens;
+  if (job.usage.cost_units)
+    usage["cost_units"] = *job.usage.cost_units;
+  return {{"id", job.id},
+          {"run_id", job.run_id},
+          {"node_id", job.node_id},
+          {"worker_id", job.worker_id},
+          {"attempt", job.attempt},
+          {"state", job.state},
+          {"failure_kind", job.failure_kind},
+          {"submitted_at", job.submitted_at},
+          {"started_at", job.started_at},
+          {"completed_at", job.completed_at},
+          {"external_job_id", job.external_job_id},
+          {"error", job.error},
+          {"cancellation_error", job.cancellation_error},
+          {"cancellation_requested", job.cancellation_requested},
+          {"cancellation_acknowledged", job.cancellation_acknowledged},
+          {"result_present", !job.result.is_null() && !job.result.empty()},
+          {"artifact_count", job.artifacts.size()},
+          {"usage", std::move(usage)}};
+}
+Json operator_artifact_summary(const Json &value) {
+  const auto artifact = value.get<Artifact>();
+  Json result = {{"id", artifact.id},
+                 {"run_id", artifact.run_id},
+                 {"node_id", artifact.node_id},
+                 {"name", artifact.name},
+                 {"media_type", artifact.media_type},
+                 {"created_at", artifact.created_at},
+                 {"location_present", !artifact.location.empty()}};
+  // Only expose integrity/provenance keys; arbitrary metadata may contain
+  // paths or provider-specific content and is deliberately not dumped.
+  for (const auto *key : {"sha256", "size", "attempt_id", "worker_id", "fencing_token"})
+    if (artifact.metadata.contains(key))
+      result["metadata"][key] = artifact.metadata.at(key);
+  return result;
+}
+} // namespace
+std::vector<Json> Service::inspect_runs() const {
+  std::vector<Json> result;
+  for (const auto &value : storage_->list(RecordKind::Run, "", 10000, 0))
+    result.push_back(operator_run_summary(value.get<Run>()));
+  return result;
+}
+Json Service::inspect_run(const std::string &id) const {
+  const auto run = storage_->get(RecordKind::Run, id).get<Run>();
+  Json result = operator_run_summary(run);
+  result["children"] = Json::array();
+  result["node_work"] = Json::array();
+  result["attempts"] = Json::array();
+  result["worker_jobs"] = Json::array();
+  result["artifacts"] = Json::array();
+  for (const auto &value : storage_->list(RecordKind::Run, "", 10000, 0)) {
+    const auto child = value.get<Run>();
+    if (child.parent_id == id)
+      result["children"].push_back(operator_run_summary(child));
+  }
+  for (const auto &value : storage_->list(RecordKind::NodeWork, id, 10000, 0))
+    result["node_work"].push_back(operator_node_work_summary(value.get<NodeWork>()));
+  for (const auto &value : storage_->list(RecordKind::Attempt, id, 10000, 0))
+    result["attempts"].push_back(operator_attempt_summary(value));
+  for (const auto &value : worker_manager_->jobs(id, 10000, 0))
+    result["worker_jobs"].push_back(operator_worker_job_summary(value));
+  for (const auto &value : storage_->list(RecordKind::Artifact, id, 10000, 0))
+    result["artifacts"].push_back(operator_artifact_summary(value));
+  return result;
+}
+std::vector<Json> Service::inspect_node_works(const std::string &run_id) const {
+  std::vector<Json> result;
+  for (const auto &value : storage_->list(RecordKind::NodeWork, run_id, 10000, 0))
+    result.push_back(operator_node_work_summary(value.get<NodeWork>()));
+  return result;
+}
+Json Service::inspect_node_work(const std::string &id) const {
+  return operator_node_work_summary(storage_->get(RecordKind::NodeWork, id).get<NodeWork>());
+}
+std::vector<Json> Service::inspect_worker_jobs(const std::string &run_id) const {
+  std::vector<Json> result;
+  for (const auto &value : worker_manager_->jobs(run_id, 10000, 0))
+    result.push_back(operator_worker_job_summary(value));
+  return result;
+}
+Json Service::inspect_worker_job(const std::string &id) const {
+  return operator_worker_job_summary(Json(worker_manager_->job(id)));
+}
 Json Service::providers() const {
   Json result = Json::array();
   for (const auto &name : providers_.names()) {
