@@ -17,6 +17,9 @@ nodes:
     type: validator
     field: ok
     value: true
+  deterministic:
+    type: function
+    function: identity
   rejected:
     type: function
     function: identity
@@ -27,8 +30,10 @@ nodes:
 edges:
   - {from: input, to: fork}
   - {from: fork, to: work}
+  - {from: fork, to: deterministic}
   - {from: work, to: verify}
   - {from: verify, condition: accepted, to: join}
   - {from: verify, condition: rejected, to: rejected}
   - {from: rejected, to: join}
+  - {from: deterministic, to: join}
   - {from: join, to: output}
