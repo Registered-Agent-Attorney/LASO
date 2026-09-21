@@ -116,9 +116,8 @@ bool WorkerManager::can_execute(const std::string &worker_id, const std::string 
     if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
         (metadata.status != "healthy" && !recoverable))
       continue;
-    if (!capability.empty() &&
-        std::find(metadata.capabilities.begin(), metadata.capabilities.end(), capability) ==
-            metadata.capabilities.end())
+    if (!capability.empty() && std::find(metadata.capabilities.begin(), metadata.capabilities.end(),
+                                         capability) == metadata.capabilities.end())
       continue;
     return true;
   }
@@ -133,12 +132,11 @@ Json WorkerManager::distributed_capabilities() const {
     if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
         (metadata.status != "healthy" && !recoverable))
       continue;
-    result["workloads"].push_back(
-        {{"worker_id", metadata.id},
-         {"capabilities", metadata.capabilities},
-         {"supports_recovery", metadata.supports_recovery},
-         {"supports_cancellation", metadata.supports_cancellation},
-         {"workspace_transport", true}});
+    result["workloads"].push_back({{"worker_id", metadata.id},
+                                   {"capabilities", metadata.capabilities},
+                                   {"supports_recovery", metadata.supports_recovery},
+                                   {"supports_cancellation", metadata.supports_cancellation},
+                                   {"workspace_transport", true}});
   }
   if (result.dump().size() > 4096)
     throw Error(ErrorCode::Configuration, "Worker capability advertisement is too large");
@@ -764,18 +762,18 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
           log_diagnostic("worker.submission_deferred_after_storage_error",
                          {{"worker_job_id", id}, {"worker_id", request.worker_id}});
         } else {
-        try {
-          std::lock_guard state_lock(state_mutex_);
-          auto failed = job(id);
-          if (!worker_job_terminal(failed.state)) {
-            failed.state = WorkerJobState::Failed;
-            failed.failure_kind = WorkerFailureKind::Job;
-            failed.error = bounded_error(error.what());
-            failed.completed_at = timestamp();
-            persist(failed);
+          try {
+            std::lock_guard state_lock(state_mutex_);
+            auto failed = job(id);
+            if (!worker_job_terminal(failed.state)) {
+              failed.state = WorkerJobState::Failed;
+              failed.failure_kind = WorkerFailureKind::Job;
+              failed.error = bounded_error(error.what());
+              failed.completed_at = timestamp();
+              persist(failed);
+            }
+          } catch (...) {
           }
-        } catch (...) {
-        }
         }
       } catch (...) {
         try {
@@ -845,8 +843,8 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
       acknowledged = adapter->cancel(external_job_id);
     }
   } catch (...) {
-    cancellation_error = pending_submission ? "Worker pending cancellation failed"
-                                             : "Worker cancellation failed";
+    cancellation_error =
+        pending_submission ? "Worker pending cancellation failed" : "Worker cancellation failed";
   }
 
   std::lock_guard state_lock(state_mutex_);

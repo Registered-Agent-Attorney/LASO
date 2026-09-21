@@ -28,9 +28,10 @@ int main() {
     config.postgres_schema = schema;
     config.execution_mode = "multi_instance";
     config.max_runs = 1;
-    config.max_nodes = required("LASO_DISTRIBUTED_TEST_MAX_NODES")
-                           ? static_cast<unsigned>(std::stoul(required("LASO_DISTRIBUTED_TEST_MAX_NODES")))
-                           : 1;
+    config.max_nodes =
+        required("LASO_DISTRIBUTED_TEST_MAX_NODES")
+            ? static_cast<unsigned>(std::stoul(required("LASO_DISTRIBUTED_TEST_MAX_NODES")))
+            : 1;
     config.max_nodes_per_run = config.max_nodes;
     config.coordination_lease_ttl_ms = 1000;
     config.coordination_heartbeat_interval_ms = 100;
@@ -47,11 +48,11 @@ int main() {
     Executor executor(config.workers);
     Service service(executor.context(), config);
     service.functions().add("distributed_hold",
-                             std::make_shared<Function>([delay](ExecutionContext &context,
-                                                                const Json &input) -> Task<Json> {
-                               co_await context.delay(delay);
-                               co_return input;
-                             }));
+                            std::make_shared<Function>([delay](ExecutionContext &context,
+                                                               const Json &input) -> Task<Json> {
+                              co_await context.delay(delay);
+                              co_return input;
+                            }));
     if (required("LASO_DISTRIBUTED_TEST_WORKER_HOST")) {
       service.register_pipeline(R"yaml(
 laso: '1'

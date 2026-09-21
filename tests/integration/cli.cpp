@@ -80,13 +80,11 @@ TEST(Cli, OperatorInspectShowsDurableLineageWithoutPayloads) {
   std::ofstream(pipeline) << single();
   const auto data_dir = directory.path.string();
 
-  ASSERT_EQ(invoke_cli({"laso", "--data-dir", data_dir, "pipeline", "register",
-                        pipeline.string()})
+  ASSERT_EQ(invoke_cli({"laso", "--data-dir", data_dir, "pipeline", "register", pipeline.string()})
                 .status,
             0);
-  const auto started =
-      invoke_cli({"laso", "--data-dir", data_dir, "run", "start", "test",
-                  "--input", R"({"operator_probe":"safe"})"});
+  const auto started = invoke_cli({"laso", "--data-dir", data_dir, "run", "start", "test",
+                                   "--input", R"({"operator_probe":"safe"})"});
   ASSERT_EQ(started.status, 0);
   const auto run = Json::parse(started.output);
   ASSERT_TRUE(run.contains("id"));
@@ -102,8 +100,7 @@ TEST(Cli, OperatorInspectShowsDurableLineageWithoutPayloads) {
   EXPECT_TRUE(view.contains("artifacts"));
   EXPECT_EQ(inspected.output.find("operator_probe"), std::string::npos);
 
-  const auto listed =
-      invoke_cli({"laso", "--data-dir", data_dir, "run", "list"});
+  const auto listed = invoke_cli({"laso", "--data-dir", data_dir, "run", "list"});
   ASSERT_EQ(listed.status, 0);
   const auto runs = Json::parse(listed.output);
   ASSERT_EQ(runs.size(), 1U);

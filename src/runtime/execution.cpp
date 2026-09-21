@@ -329,9 +329,9 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
     if (!work.required_worker_id.empty() || !work.required_capability.empty()) {
       token.message.metadata.erase("project_dir");
       if (token.message.metadata.contains("workspace_manifest")) {
-        staged_workspace = stage_workspace(token.message.metadata.at("workspace_manifest"),
-                                           deps_.workspace_root, work.run_id, work.id,
-                                           work.attempt_id);
+        staged_workspace =
+            stage_workspace(token.message.metadata.at("workspace_manifest"), deps_.workspace_root,
+                            work.run_id, work.id, work.attempt_id);
         token.message.metadata.erase("workspace_manifest");
         token.message.metadata["project_dir"] = staged_workspace->string();
       }
@@ -376,8 +376,7 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
       // Leave the durable NodeWork attempt recoverable; the lease loop and a
       // replacement owner will reconcile it after the current fence expires.
       log_diagnostic("runtime.distributed_node_deferred_after_storage_error",
-                     { {"node_work_id", work.id},
-                       {"fencing_token", work_lease.fencing_token} });
+                     {{"node_work_id", work.id}, {"fencing_token", work_lease.fencing_token}});
       co_return;
     }
     if (error.code == ErrorCode::Conflict)

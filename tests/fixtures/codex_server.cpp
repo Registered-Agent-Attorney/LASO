@@ -1,6 +1,6 @@
 // Deterministic app-server-shaped fixture for the optional Codex adapter tests.
-#include <cstdlib>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <laso/core/types.hpp>
 #include <thread>

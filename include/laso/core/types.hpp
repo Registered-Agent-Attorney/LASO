@@ -419,10 +419,9 @@ inline bool equivalent_terminal_node_work(const NodeWork &left, const NodeWork &
       left.required_worker_id != right.required_worker_id ||
       left.required_capability != right.required_capability ||
       left.owner_instance_id != right.owner_instance_id || left.state != right.state ||
-      left.attempt != right.attempt ||
-      left.attempt_id != right.attempt_id || left.fencing_token != right.fencing_token ||
-      left.error != right.error || left.steps != right.steps || Json(left.token) != Json(right.token) ||
-      !same_result)
+      left.attempt != right.attempt || left.attempt_id != right.attempt_id ||
+      left.fencing_token != right.fencing_token || left.error != right.error ||
+      left.steps != right.steps || Json(left.token) != Json(right.token) || !same_result)
     return false;
   return left.state == NodeWorkState::Completed || left.state == NodeWorkState::Failed ||
          left.state == NodeWorkState::Cancelled;

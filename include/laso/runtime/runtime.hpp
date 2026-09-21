@@ -3,10 +3,10 @@
 #include <laso/core/config.hpp>
 #include <laso/events/events.hpp>
 #include <laso/nodes/node.hpp>
+#include <laso/runtime/workspace.hpp>
 #include <laso/schema/validator.hpp>
 #include <laso/storage/coordination.hpp>
 #include <laso/storage/storage.hpp>
-#include <laso/runtime/workspace.hpp>
 #include <laso/workers/manager.hpp>
 #include <memory>
 #include <mutex>

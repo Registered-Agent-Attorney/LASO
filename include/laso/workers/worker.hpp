@@ -172,7 +172,9 @@ public:
   // handle.  Local process transports can terminate that owned invocation;
   // transports without this capability leave the request pending so the
   // eventual provider outcome remains authoritative.
-  virtual bool cancel_pending(const std::string &) { return false; }
+  virtual bool cancel_pending(const std::string &) {
+    return false;
+  }
   // Optional for native adapters. Process transports use it to route bounded
   // worker-originated approval/permission/question requests to LASO.
   virtual void set_interaction_handler(WorkerInteractionHandler) {}

@@ -170,7 +170,9 @@ struct ProcessWorkerTransport::Impl {
     active_submit.store(true, std::memory_order_release);
     struct ActiveSubmitGuard {
       std::atomic<bool> &active;
-      ~ActiveSubmitGuard() { active.store(false, std::memory_order_release); }
+      ~ActiveSubmitGuard() {
+        active.store(false, std::memory_order_release);
+      }
     } active_guard{active_submit};
     Json payload{{"job_id", request.job_id},
                  {"worker_id", request.worker_id},
@@ -189,9 +191,8 @@ struct ProcessWorkerTransport::Impl {
     const auto timeout_ms = request.timeout_ms == 0
                                 ? config.request_timeout_ms
                                 : std::min(request.timeout_ms, config.request_timeout_ms);
-    return parse_submission_locked(request.job_id,
-                                   request_response_locked("submit", request.job_id, "", payload,
-                                                           timeout_ms));
+    return parse_submission_locked(
+        request.job_id, request_response_locked("submit", request.job_id, "", payload, timeout_ms));
   }
 
   WorkerStatus status(const std::string &external_job_id) {

@@ -90,8 +90,8 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
       }
       if (current.state == WorkerJobState::Failed)
         log_diagnostic("worker.node_terminal", {{"worker_job_id", current.id},
-                                                 {"state", current.state},
-                                                 {"worker_id", current.worker_id}});
+                                                {"state", current.state},
+                                                {"worker_id", current.worker_id}});
       if (current.state == WorkerJobState::Failed)
         throw Error(ErrorCode::Execution,
                     current.error.empty() ? "Worker job failed" : current.error,
@@ -100,8 +100,8 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
                      {"external_job_id", current.external_job_id}});
       if (current.state == WorkerJobState::Cancelled)
         log_diagnostic("worker.node_terminal", {{"worker_job_id", current.id},
-                                                 {"state", current.state},
-                                                 {"worker_id", current.worker_id}});
+                                                {"state", current.state},
+                                                {"worker_id", current.worker_id}});
       if (current.state == WorkerJobState::Cancelled)
         throw Error(ErrorCode::Cancellation, "Worker job was cancelled",
                     {{"worker_job_id", current.id},
@@ -109,8 +109,8 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
                      {"external_job_id", current.external_job_id}});
       if (current.state == WorkerJobState::TimedOut)
         log_diagnostic("worker.node_terminal", {{"worker_job_id", current.id},
-                                                 {"state", current.state},
-                                                 {"worker_id", current.worker_id}});
+                                                {"state", current.state},
+                                                {"worker_id", current.worker_id}});
       if (current.state == WorkerJobState::TimedOut)
         throw Error(ErrorCode::Timeout, "Worker job exceeded its deadline",
                     {{"worker_job_id", current.id},
@@ -126,14 +126,14 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
     }
   } catch (const Error &error) {
     log_diagnostic("worker.node_error", {{"worker_job_id", current.id},
-                                          {"error_code", error.code},
-                                          {"worker_id", current.worker_id}});
+                                         {"error_code", error.code},
+                                         {"worker_id", current.worker_id}});
     if (error.code == ErrorCode::Cancellation || error.code == ErrorCode::Timeout) {
       try {
         if (!current.id.empty())
           manager_->cancel(current.id,
-                            error.code == ErrorCode::Timeout ? WorkerJobState::TimedOut
-                                                             : WorkerJobState::Cancelled,
+                           error.code == ErrorCode::Timeout ? WorkerJobState::TimedOut
+                                                            : WorkerJobState::Cancelled,
                            error.what());
         log_diagnostic("worker.node_cancellation_processed",
                        {{"worker_job_id", current.id}, {"worker_id", current.worker_id}});

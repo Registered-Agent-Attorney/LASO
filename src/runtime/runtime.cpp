@@ -22,8 +22,7 @@ std::vector<Json> list_all(const Storage &storage, RecordKind kind, const std::s
 }
 
 Json capability_advertisement(const std::shared_ptr<WorkerManager> &workers) {
-  Json capabilities{{"protocol_version", 1},
-                    {"features", Json::array({"run-claims", "fencing"})}};
+  Json capabilities{{"protocol_version", 1}, {"features", Json::array({"run-claims", "fencing"})}};
   if (workers) {
     capabilities["features"].push_back("worker-claims");
     capabilities["workers"] = workers->distributed_capabilities().value("workloads", Json::array());
@@ -42,8 +41,7 @@ Runtime::~Runtime() = default; // Owner must drain the executor before destructi
 void Runtime::start_distributed() {
   if (!deps_.coordination || distributed_started_)
     return;
-  deps_.coordination->register_instance(version,
-                                         capability_advertisement(deps_.workers).dump());
+  deps_.coordination->register_instance(version, capability_advertisement(deps_.workers).dump());
   distributed_started_ = true;
   // Database connectivity is allowed to fail transiently.  These loops own
   // claims and leases, so an unexpected exception must not escape a detached
@@ -201,9 +199,8 @@ void Runtime::reconcile_distributed_parallel(Run &r, const PipelineDefinition &)
     if (work.result->metadata.contains("workspace_result_manifest")) {
       const auto &manifest = work.result->metadata.at("workspace_result_manifest");
       validate_workspace_manifest(manifest);
-      workspace_results.push_back({{"work_id", work.id},
-                                   {"attempt_id", work.attempt_id},
-                                   {"manifest", manifest}});
+      workspace_results.push_back(
+          {{"work_id", work.id}, {"attempt_id", work.attempt_id}, {"manifest", manifest}});
     }
     r.steps = std::max(r.steps, work.steps);
   }
@@ -277,14 +274,13 @@ void Runtime::reconcile_terminal_worker(const NodeWork &observed,
       return;
   }
 
-  attempt.state = job.state == WorkerJobState::Cancelled ? NodeState::Cancelled
-                                                          : job.state == WorkerJobState::TimedOut
-                                                              ? NodeState::TimedOut
-                                                              : NodeState::Failed;
+  attempt.state = job.state == WorkerJobState::Cancelled  ? NodeState::Cancelled
+                  : job.state == WorkerJobState::TimedOut ? NodeState::TimedOut
+                                                          : NodeState::Failed;
   attempt.error = job.error.empty()
-                      ? (attempt.state == NodeState::TimedOut ? "Worker job timed out"
+                      ? (attempt.state == NodeState::TimedOut    ? "Worker job timed out"
                          : attempt.state == NodeState::Cancelled ? "Worker job cancelled"
-                                                                  : "Worker job failed")
+                                                                 : "Worker job failed")
                       : job.error;
   attempt.finished_at = timestamp();
 
@@ -293,8 +289,7 @@ void Runtime::reconcile_terminal_worker(const NodeWork &observed,
     auto extensions = deps_.nodes.names();
     const auto pipeline = parse_pipeline(run.definition, {extensions.begin(), extensions.end()});
     const auto node = pipeline.nodes.find(current.node_id);
-    retry = node != pipeline.nodes.end() &&
-            current.attempt < node->second.retry.max_attempts &&
+    retry = node != pipeline.nodes.end() && current.attempt < node->second.retry.max_attempts &&
             attempt.state != NodeState::Cancelled && !run.cancellation_requested &&
             !terminal(run.state);
   } catch (const Error &) {
@@ -365,18 +360,16 @@ void Runtime::reconcile_terminal_worker(const NodeWork &observed,
         current.error = attempt.error;
       }
       current.updated_at = timestamp();
-      deps_.storage.commit_owned(records(), "node:" + current.id,
-                                 replacement_lease->owner_instance,
+      deps_.storage.commit_owned(records(), "node:" + current.id, replacement_lease->owner_instance,
                                  replacement_lease->fencing_token);
       commit_lease = &*replacement_lease;
     }
-    log_diagnostic("runtime.worker_terminal_reconciled",
-                   {{"node_work_id", current.id},
-                    {"attempt_id", attempt.id},
-                    {"worker_job_id", job.id},
-                    {"worker_state", job.state},
-                    {"node_work_state", current.state},
-                    {"retry", retry}});
+    log_diagnostic("runtime.worker_terminal_reconciled", {{"node_work_id", current.id},
+                                                          {"attempt_id", attempt.id},
+                                                          {"worker_job_id", job.id},
+                                                          {"worker_state", job.state},
+                                                          {"node_work_state", current.state},
+                                                          {"retry", retry}});
     std::optional<LeaseRecord> old_global_slot;
     std::optional<LeaseRecord> old_run_slot;
     std::optional<LeaseRecord> old_work_lease;
@@ -648,8 +641,7 @@ Task<void> Runtime::claim_loop() {
       try {
         work = value.get<NodeWork>();
         const auto run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
-        const auto cancellation_cleanup = run.cancellation_requested &&
-                                          terminal(run.state) &&
+        const auto cancellation_cleanup = run.cancellation_requested && terminal(run.state) &&
                                           work.state == NodeWorkState::Running;
         if (!cancellation_cleanup && deps_.workers &&
             !deps_.workers->can_execute(work.required_worker_id, work.required_capability))
@@ -846,8 +838,7 @@ Task<void> Runtime::lease_loop() {
     }
     for (auto &node : node_leases) {
       try {
-        const auto observed =
-            deps_.storage.get(RecordKind::NodeWork, node.id).get<NodeWork>();
+        const auto observed = deps_.storage.get(RecordKind::NodeWork, node.id).get<NodeWork>();
         reconcile_terminal_worker(observed, node.work);
       } catch (const Error &) {
       }
@@ -901,8 +892,7 @@ Task<void> Runtime::lease_loop() {
       }
       if (!valid) {
         log_diagnostic("runtime.distributed_node_lease_lost",
-                       {{"node_work_id", node.id},
-                        {"fencing_token", node.work.fencing_token}});
+                       {{"node_work_id", node.id}, {"fencing_token", node.work.fencing_token}});
         std::lock_guard lock(mutex_);
         if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end()) {
           active->second.ownership_lost = true;

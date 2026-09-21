@@ -53,7 +53,8 @@ bool port_open(unsigned port) {
   address.sin_family = AF_INET;
   address.sin_port = htons(static_cast<std::uint16_t>(port));
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  const auto connected = ::connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0;
+  const auto connected =
+      ::connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0;
   ::close(fd);
   return connected;
 }

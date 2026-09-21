@@ -1,8 +1,8 @@
 #pragma once
 // <utility> must precede Boost.Asio on the oldest supported Boost package.
 #include <boost/asio.hpp>
-#include <laso/core/types.hpp>
 #include <functional>
+#include <laso/core/types.hpp>
 #include <stop_token>
 #include <utility>
 

@@ -413,9 +413,15 @@ TEST(Workers, PendingSubmissionCancellationIsAcknowledgedAndTerminal) {
       changed.wait(lock, [&] { return cancellation_requested; });
       throw WorkerTransportError("pending worker was cancelled");
     }
-    WorkerStatus status(const std::string &) override { return {}; }
-    WorkerStatus result(const std::string &) override { return {}; }
-    bool cancel(const std::string &) override { return false; }
+    WorkerStatus status(const std::string &) override {
+      return {};
+    }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &) override {
+      return false;
+    }
     bool cancel_pending(const std::string &) override {
       std::lock_guard lock(mutex);
       cancellation_requested = true;
@@ -454,8 +460,8 @@ TEST(Workers, PendingSubmissionCancellationIsAcknowledgedAndTerminal) {
   });
   {
     std::unique_lock lock(adapter->mutex);
-    ASSERT_TRUE(adapter->changed.wait_for(lock, std::chrono::seconds(2),
-                                          [&] { return adapter->started; }));
+    ASSERT_TRUE(
+        adapter->changed.wait_for(lock, std::chrono::seconds(2), [&] { return adapter->started; }));
   }
   const auto jobs = manager.jobs(request.run_id);
   ASSERT_EQ(jobs.size(), 1U);
@@ -492,8 +498,12 @@ TEST(Workers, AsyncSubmissionReturnsBeforeProviderHandleAndSupportsCancellation)
       status_called = true;
       return {};
     }
-    WorkerStatus result(const std::string &) override { return {}; }
-    bool cancel(const std::string &) override { return false; }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &) override {
+      return false;
+    }
     bool cancel_pending(const std::string &) override {
       std::lock_guard lock(mutex);
       cancellation_requested = true;
@@ -524,24 +534,24 @@ TEST(Workers, AsyncSubmissionReturnsBeforeProviderHandleAndSupportsCancellation)
 
   const auto started_at = std::chrono::steady_clock::now();
   const auto submitted = manager.submit_async(request);
-  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started_at)
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                  started_at)
                 .count(),
             500);
   EXPECT_EQ(submitted.id, manager.job_id_for(request.idempotency_key));
   EXPECT_EQ(submitted.state, WorkerJobState::Submitting);
   const auto refresh_started = std::chrono::steady_clock::now();
   const auto refreshed = manager.refresh(submitted.id);
-  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - refresh_started)
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                  refresh_started)
                 .count(),
             200);
   EXPECT_EQ(refreshed.state, WorkerJobState::Submitting);
   EXPECT_FALSE(adapter->status_called.load());
   {
     std::unique_lock lock(adapter->mutex);
-    ASSERT_TRUE(adapter->changed.wait_for(lock, std::chrono::seconds(2),
-                                          [&] { return adapter->started; }));
+    ASSERT_TRUE(
+        adapter->changed.wait_for(lock, std::chrono::seconds(2), [&] { return adapter->started; }));
   }
   manager.cancel(submitted.id, WorkerJobState::Cancelled, "test async cancellation");
   for (unsigned attempt = 0; attempt < 200; ++attempt) {
@@ -573,13 +583,24 @@ TEST(Workers, ProviderCompletionWinsIfItBeatsCancellationAcknowledgement) {
       started = true;
       changed.notify_all();
       changed.wait(lock, [&] { return release; });
-      return {"external-completed", WorkerJobState::Completed, Json::object(), {},
+      return {"external-completed",
+              WorkerJobState::Completed,
+              Json::object(),
+              {},
               Json{{"winner", "provider"}}};
     }
-    WorkerStatus status(const std::string &) override { return {}; }
-    WorkerStatus result(const std::string &) override { return {}; }
-    bool cancel(const std::string &) override { return false; }
-    bool cancel_pending(const std::string &) override { return false; }
+    WorkerStatus status(const std::string &) override {
+      return {};
+    }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &) override {
+      return false;
+    }
+    bool cancel_pending(const std::string &) override {
+      return false;
+    }
     void start() override {}
     void stop() noexcept override {}
 
@@ -606,8 +627,8 @@ TEST(Workers, ProviderCompletionWinsIfItBeatsCancellationAcknowledgement) {
   std::thread submitter([&] { completion.set_value(manager.submit(request)); });
   {
     std::unique_lock lock(adapter->mutex);
-    ASSERT_TRUE(adapter->changed.wait_for(lock, std::chrono::seconds(2),
-                                          [&] { return adapter->started; }));
+    ASSERT_TRUE(
+        adapter->changed.wait_for(lock, std::chrono::seconds(2), [&] { return adapter->started; }));
   }
   const auto jobs = manager.jobs(request.run_id);
   ASSERT_EQ(jobs.size(), 1U);

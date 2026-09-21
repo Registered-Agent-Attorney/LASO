@@ -94,8 +94,8 @@ TEST(CodexWorker, StartsNewSessionForDifferentWorkspaceRoot) {
 TEST(CodexWorker, QuietProviderIntervalUsesOverallDeadline) {
   TemporaryDirectory root;
   auto worker_config = codex_config(root.path, "quiet-over-one-minute");
-  worker_config.args = {"--codex",     LASO_CODEX_FIXTURE, "--allowed-root",
-                        root.path.string(), "--timeout-ms", "65000"};
+  worker_config.args = {"--codex",          LASO_CODEX_FIXTURE, "--allowed-root",
+                        root.path.string(), "--timeout-ms",     "65000"};
   worker_config.startup_timeout_ms = 2000;
   worker_config.request_timeout_ms = 65000;
   ProcessWorkerTransport transport("codex", worker_config);
