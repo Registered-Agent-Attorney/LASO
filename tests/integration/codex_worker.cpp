@@ -74,6 +74,37 @@ TEST(CodexWorker, SessionCanBeReconciledAfterAdapterRestart) {
   restarted.stop();
 }
 
+TEST(CodexWorker, StartsNewSessionForDifferentWorkspaceRoot) {
+  TemporaryDirectory parent;
+  const auto first_root = parent.path / "first";
+  const auto second_root = parent.path / "second";
+  std::filesystem::create_directories(first_root);
+  std::filesystem::create_directories(second_root);
+  ProcessWorkerTransport transport("codex", codex_config(parent.path));
+  ASSERT_NO_THROW(transport.start());
+  const auto first = transport.submit(request(first_root, "codex-first-root", "first"));
+  ASSERT_EQ(first.state, WorkerJobState::Completed);
+  const auto second = transport.submit(request(second_root, "codex-second-root", "second"));
+  EXPECT_EQ(second.state, WorkerJobState::Completed);
+  EXPECT_EQ(first.result.value("project_dir", ""), first_root.string());
+  EXPECT_EQ(second.result.value("project_dir", ""), second_root.string());
+  transport.stop();
+}
+
+TEST(CodexWorker, QuietProviderIntervalUsesOverallDeadline) {
+  TemporaryDirectory root;
+  auto worker_config = codex_config(root.path, "quiet-over-one-minute");
+  worker_config.args = {"--codex",     LASO_CODEX_FIXTURE, "--allowed-root",
+                        root.path.string(), "--timeout-ms", "65000"};
+  worker_config.startup_timeout_ms = 2000;
+  worker_config.request_timeout_ms = 65000;
+  ProcessWorkerTransport transport("codex", worker_config);
+  ASSERT_NO_THROW(transport.start());
+  const auto result = transport.submit(request(root.path, "codex-quiet-provider", "continue"));
+  EXPECT_EQ(result.state, WorkerJobState::Completed) << result.error;
+  transport.stop();
+}
+
 TEST(CodexWorker, ProjectRootIsEnforced) {
   TemporaryDirectory root;
   TemporaryDirectory outside;

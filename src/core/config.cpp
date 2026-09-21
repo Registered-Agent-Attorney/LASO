@@ -93,8 +93,8 @@ void Config::validate() {
     }
     if (worker.args.size() > 128 || worker.environment_allowlist.size() > 64 ||
         worker.environment.size() > 64 || worker.startup_timeout_ms == 0 ||
-        worker.startup_timeout_ms > 60000 || worker.request_timeout_ms == 0 ||
-        worker.request_timeout_ms > 60000 || worker.interaction_timeout_ms == 0 ||
+        worker.startup_timeout_ms > 300000 || worker.request_timeout_ms == 0 ||
+        worker.request_timeout_ms > 300000 || worker.interaction_timeout_ms == 0 ||
         worker.interaction_timeout_ms > 3600000)
       throw Error(ErrorCode::Configuration, "Invalid process worker limits");
     static const std::regex env_name("[A-Za-z_][A-Za-z0-9_]{0,127}");

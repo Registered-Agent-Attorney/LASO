@@ -11,11 +11,15 @@
 #include <iostream>
 #include <laso/workers/process_protocol.hpp>
 #include <laso/workers/worker.hpp>
+#include <limits>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/wait.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <thread>
 #include <unistd.h>
 
@@ -28,6 +32,37 @@ constexpr std::size_t max_codex_stderr = 64 * 1024;
 constexpr std::size_t max_text = 256 * 1024;
 constexpr std::size_t max_actions = 128;
 
+bool arm_parent_death_signal() noexcept {
+#ifdef __linux__
+  const auto parent = ::getppid();
+  if (::prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || ::getppid() != parent)
+    return false;
+#endif
+  return true;
+}
+
+bool process_group_alive(pid_t process_group) noexcept {
+  if (process_group <= 0)
+    return false;
+  if (::kill(-process_group, 0) == 0)
+    return true;
+  return errno == EPERM;
+}
+
+void terminate_process_group(pid_t process_group) noexcept {
+  if (process_group <= 0)
+    return;
+  if (::kill(-process_group, SIGTERM) < 0 && errno != ESRCH)
+    (void)::kill(process_group, SIGTERM);
+  const auto graceful_deadline = Clock::now() + std::chrono::milliseconds(500);
+  while (process_group_alive(process_group) && Clock::now() < graceful_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (!process_group_alive(process_group))
+    return;
+  if (::kill(-process_group, SIGKILL) < 0 && errno != ESRCH)
+    (void)::kill(process_group, SIGKILL);
+}
+
 void close_fd(int &fd) {
   if (fd >= 0)
     ::close(fd);
@@ -39,7 +74,11 @@ int remaining_ms(Clock::time_point deadline) {
       std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
   if (remaining.count() <= 0)
     return 0;
-  return static_cast<int>(std::min<std::int64_t>(remaining.count(), 60000));
+  // poll() accepts an int timeout.  Do not cap this to one minute: a bounded
+  // poll interval is not the provider deadline, and treating it as one used
+  // to turn a quiet but valid Codex turn into a false timeout at 60 seconds.
+  return static_cast<int>(std::min<std::int64_t>(
+      remaining.count(), static_cast<std::int64_t>(std::numeric_limits<int>::max())));
 }
 
 std::string option(int argc, char **argv, const std::string &name, std::string fallback = {}) {
@@ -112,6 +151,8 @@ public:
       throw WorkerTransportError("Unable to start Codex app-server");
     }
     if (pid_ == 0) {
+      if (!arm_parent_death_signal())
+        _exit(125);
       (void)::setpgid(0, 0);
       if (::dup2(child_in[0], STDIN_FILENO) < 0 || ::dup2(child_out[1], STDOUT_FILENO) < 0 ||
           ::dup2(child_err[1], STDERR_FILENO) < 0)
@@ -146,7 +187,8 @@ public:
 
   void stop() noexcept {
     if (pid_ > 0) {
-      (void)::kill(-pid_, SIGTERM);
+      const auto process_group = pid_;
+      terminate_process_group(process_group);
       const auto deadline = Clock::now() + std::chrono::milliseconds(500);
       int status = 0;
       while (Clock::now() < deadline) {
@@ -155,10 +197,8 @@ public:
           break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
-      if (::waitpid(pid_, &status, WNOHANG) == 0) {
-        (void)::kill(-pid_, SIGKILL);
+      if (::waitpid(pid_, &status, WNOHANG) == 0)
         (void)::waitpid(pid_, &status, 0);
-      }
     }
     pid_ = -1;
     close_fd(input_fd_);
@@ -319,8 +359,19 @@ public:
       resume_thread(requested_session, directory);
     if (session_id_.empty())
       start_thread(directory, metadata);
-    else if (directory != project_dir_)
-      throw CodexFailure("Codex session belongs to a different project directory");
+    else if (directory != project_dir_) {
+      if (!requested_session.empty())
+        throw CodexFailure("Codex session belongs to a different project directory");
+      // Distributed attempts use fresh, owner-scoped staging directories.
+      // Start a new provider thread for a new directory instead of reusing a
+      // session bound to the previous attempt's workspace.
+      session_id_.clear();
+      project_dir_.clear();
+      active_turn_id_.clear();
+      model_.clear();
+      provider_.clear();
+      start_thread(directory, metadata);
+    }
 
     summary_.clear();
     actions_ = Json::array();
@@ -606,6 +657,8 @@ void response(const Json &request, const Json &body) {
 
 int main(int argc, char **argv) {
   try {
+    if (!arm_parent_death_signal())
+      return 125;
     const auto codex = option(argc, argv, "--codex", "codex");
     auto roots = options(argc, argv, "--allowed-root");
     const auto timeout = std::stoull(option(argc, argv, "--timeout-ms", "60000"));

@@ -6,6 +6,8 @@
 #include <laso/storage/storage.hpp>
 #include <laso/workers/worker.hpp>
 #include <mutex>
+#include <set>
+#include <thread>
 
 namespace laso {
 class WorkerManager final : public EventSubscriber {
@@ -18,6 +20,12 @@ public:
                 std::uint64_t max_wall_time_ms = 0, std::uint64_t max_tokens_per_run = 0,
                 double max_cost_units_per_run = 0.0);
   WorkerJob submit(const WorkerRequest &);
+  // Begin provider submission without blocking the caller's execution loop.
+  // The durable job is created before the adapter is invoked; callers can
+  // refresh/cancel it immediately, including while a local process transport
+  // is still obtaining its external handle.
+  WorkerJob submit_async(const WorkerRequest &);
+  std::string job_id_for(const std::string &idempotency_key) const;
   WorkerJob job(const std::string &) const;
   // Refresh an active job through a recovery-capable transport.  This is used
   // by WorkerNode for transports that do not emit asynchronous status events.
@@ -26,6 +34,8 @@ public:
                          std::size_t offset = 0) const;
   Json workers() const;
   Json worker(const std::string &) const;
+  bool can_execute(const std::string &worker_id, const std::string &capability) const;
+  Json distributed_capabilities() const;
   std::string resolve_worker(const std::string &worker_id, const std::string &capability) const;
   void cancel(const std::string &, WorkerJobState requested_state, const std::string &reason);
   WorkerInteractionResponse handle_interaction(const WorkerInteractionRequest &);
@@ -46,11 +56,16 @@ private:
   Policy *policy_ = nullptr;
   std::atomic<bool> stopped_{false};
   mutable std::mutex submit_mutex_;
+  mutable std::mutex async_mutex_;
+  std::set<std::string> async_submissions_;
+  std::vector<std::jthread> async_threads_;
   mutable std::mutex state_mutex_;
+  std::condition_variable state_changed_;
   mutable std::mutex interaction_mutex_;
   std::condition_variable interaction_changed_;
   void apply_event(const Event &);
   WorkerJob reconcile(WorkerJob, bool fail_transport);
+  void retire_superseded_distributed_jobs_locked();
   void persist(WorkerJob &);
   std::string budget_violation(const WorkerJob &) const;
   static void merge_usage(WorkerUsage &, const WorkerUsage &);

@@ -20,6 +20,18 @@ std::vector<Json> list_all(const Storage &storage, RecordKind kind, const std::s
     offset += page_size;
   }
 }
+
+Json capability_advertisement(const std::shared_ptr<WorkerManager> &workers) {
+  Json capabilities{{"protocol_version", 1},
+                    {"features", Json::array({"run-claims", "fencing"})}};
+  if (workers) {
+    capabilities["features"].push_back("worker-claims");
+    capabilities["workers"] = workers->distributed_capabilities().value("workloads", Json::array());
+  }
+  if (capabilities.dump().size() > 4096)
+    throw Error(ErrorCode::Configuration, "Instance capability advertisement is too large");
+  return capabilities;
+}
 } // namespace
 Runtime::Runtime(asio::io_context &io, Config config, RuntimeDependencies dependencies)
     : io_(io), config_(std::move(config)), deps_(dependencies), nodes_(config_.max_nodes),
@@ -30,10 +42,58 @@ Runtime::~Runtime() = default; // Owner must drain the executor before destructi
 void Runtime::start_distributed() {
   if (!deps_.coordination || distributed_started_)
     return;
-  deps_.coordination->register_instance(version, "runtime,run-claims,fencing");
+  deps_.coordination->register_instance(version,
+                                         capability_advertisement(deps_.workers).dump());
   distributed_started_ = true;
-  asio::co_spawn(io_, claim_loop(), asio::detached);
-  asio::co_spawn(io_, lease_loop(), asio::detached);
+  // Database connectivity is allowed to fail transiently.  These loops own
+  // claims and leases, so an unexpected exception must not escape a detached
+  // coroutine and terminate the LASO process.  Restarting the loop lets the
+  // normal database-authoritative lease checks fence stale work after the
+  // connection returns.
+  asio::co_spawn(io_, supervise_claim_loop(), asio::detached);
+  asio::co_spawn(io_, supervise_lease_loop(), asio::detached);
+}
+Task<void> Runtime::supervise_claim_loop() {
+  for (;;) {
+    try {
+      co_await claim_loop();
+      co_return;
+    } catch (...) {
+      log_diagnostic("runtime.claim_loop_failed", {{"instance_id", deps_.instance_id}});
+    }
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        co_return;
+    }
+    asio::steady_timer retry(io_);
+    retry.expires_after(Milliseconds{100});
+    boost::system::error_code error;
+    co_await retry.async_wait(asio::redirect_error(asio::use_awaitable, error));
+    if (error)
+      co_return;
+  }
+}
+Task<void> Runtime::supervise_lease_loop() {
+  for (;;) {
+    try {
+      co_await lease_loop();
+      co_return;
+    } catch (...) {
+      log_diagnostic("runtime.lease_loop_failed", {{"instance_id", deps_.instance_id}});
+    }
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        co_return;
+    }
+    asio::steady_timer retry(io_);
+    retry.expires_after(Milliseconds{100});
+    boost::system::error_code error;
+    co_await retry.async_wait(asio::redirect_error(asio::use_awaitable, error));
+    if (error)
+      co_return;
+  }
 }
 void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> records) {
   std::lock_guard lock(mutex_);
@@ -132,18 +192,228 @@ void Runtime::reconcile_distributed_parallel(Run &r, const PipelineDefinition &)
       throw Error(ErrorCode::Execution,
                   work.error.empty() ? "Distributed parallel branch failed" : work.error);
   r.message.payload = Json::array();
+  Json workspace_results = Json::array();
   r.steps = 0;
   for (const auto &work : works) {
     r.message.payload.push_back(work.result->payload);
     r.message.provenance.insert(r.message.provenance.end(), work.result->provenance.begin(),
                                 work.result->provenance.end());
+    if (work.result->metadata.contains("workspace_result_manifest")) {
+      const auto &manifest = work.result->metadata.at("workspace_result_manifest");
+      validate_workspace_manifest(manifest);
+      workspace_results.push_back({{"work_id", work.id},
+                                   {"attempt_id", work.attempt_id},
+                                   {"manifest", manifest}});
+    }
     r.steps = std::max(r.steps, work.steps);
   }
+  if (!workspace_results.empty())
+    r.message.metadata["workspace_result_manifests"] = std::move(workspace_results);
   r.frames.clear();
   r.active_node = r.pending_parallel_join;
   r.prepared_join = r.active_node;
   r.pending_parallel_group.clear();
   r.pending_parallel_join.clear();
+}
+void Runtime::reconcile_terminal_worker(const NodeWork &observed,
+                                        const LeaseRecord &observed_lease) {
+  if (!deps_.workers || observed.state != NodeWorkState::Running)
+    return;
+  Run run;
+  try {
+    run = deps_.storage.get(RecordKind::Run, observed.run_id).get<Run>();
+  } catch (const Error &) {
+    return;
+  }
+
+  NodeExecution attempt;
+  bool found = false;
+  try {
+    for (const auto &record : deps_.storage.list(RecordKind::Attempt, observed.run_id, 10000, 0)) {
+      const auto candidate = record.get<NodeExecution>();
+      if (candidate.node_id != observed.node_id || candidate.worker_job_id.empty())
+        continue;
+      if (candidate.id == observed.attempt_id) {
+        attempt = candidate;
+        found = true;
+        break;
+      }
+      if (observed.attempt_id.empty() && candidate.state == NodeState::Running) {
+        attempt = candidate;
+        found = true;
+      }
+    }
+  } catch (const Error &) {
+    return;
+  }
+  if (!found)
+    return;
+
+  WorkerJob job;
+  try {
+    job = deps_.workers->job(attempt.worker_job_id);
+  } catch (const Error &) {
+    return;
+  }
+  if (!worker_job_terminal(job.state) || job.state == WorkerJobState::Completed)
+    return;
+
+  NodeWork current;
+  try {
+    current = deps_.storage.get(RecordKind::NodeWork, observed.id).get<NodeWork>();
+  } catch (const Error &) {
+    return;
+  }
+  if (current.state != NodeWorkState::Running || current.attempt_id != observed.attempt_id)
+    return;
+  {
+    // The active owner still has an execution coroutine that can observe the
+    // terminal worker job and apply the normal retry policy.  Requeueing here
+    // would race that unwind and could create a second retry for one logical
+    // attempt.  Durable reconciliation remains the recovery path once the
+    // owner is gone or has lost the in-memory node entry.
+    std::lock_guard lock(mutex_);
+    if (active_nodes_.contains(current.id))
+      return;
+  }
+
+  attempt.state = job.state == WorkerJobState::Cancelled ? NodeState::Cancelled
+                                                          : job.state == WorkerJobState::TimedOut
+                                                              ? NodeState::TimedOut
+                                                              : NodeState::Failed;
+  attempt.error = job.error.empty()
+                      ? (attempt.state == NodeState::TimedOut ? "Worker job timed out"
+                         : attempt.state == NodeState::Cancelled ? "Worker job cancelled"
+                                                                  : "Worker job failed")
+                      : job.error;
+  attempt.finished_at = timestamp();
+
+  bool retry = false;
+  try {
+    auto extensions = deps_.nodes.names();
+    const auto pipeline = parse_pipeline(run.definition, {extensions.begin(), extensions.end()});
+    const auto node = pipeline.nodes.find(current.node_id);
+    retry = node != pipeline.nodes.end() &&
+            current.attempt < node->second.retry.max_attempts &&
+            attempt.state != NodeState::Cancelled && !run.cancellation_requested &&
+            !terminal(run.state);
+  } catch (const Error &) {
+    retry = false;
+  }
+
+  if (attempt.state == NodeState::Cancelled || run.cancellation_requested || terminal(run.state)) {
+    current.state = NodeWorkState::Cancelled;
+    current.error = "Worker cancellation reconciled";
+  } else if (retry) {
+    current.state = NodeWorkState::Queued;
+    current.error = "Worker attempt reconciled for retry";
+    current.owner_instance_id.clear();
+    current.lease_expires_at.clear();
+    current.claimed_at.clear();
+    current.last_renewed_at.clear();
+    current.attempt_id.clear();
+    current.fencing_token = 0;
+  } else {
+    current.state = NodeWorkState::Failed;
+    current.error = attempt.error;
+  }
+  current.updated_at = timestamp();
+
+  const auto records = [&] {
+    return std::vector<Record>{{RecordKind::Attempt, attempt.id, attempt.run_id, Json(attempt)},
+                               {RecordKind::NodeWork, current.id, current.run_id, Json(current)}};
+  };
+  std::optional<LeaseRecord> replacement_lease;
+  const LeaseRecord *commit_lease = &observed_lease;
+  try {
+    try {
+      deps_.storage.commit_owned(records(), "node:" + current.id, observed_lease.owner_instance,
+                                 observed_lease.fencing_token);
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::Conflict || !deps_.coordination)
+        throw;
+      // The provider can time out just after the original node lease expires.
+      // Reacquire the same resource before reconciling so recovery remains a
+      // fenced write instead of weakening ownership checks.
+      replacement_lease =
+          deps_.coordination->acquire("node:" + current.id, config_.coordination_lease_ttl_ms);
+      if (!replacement_lease)
+        return;
+      current = deps_.storage.get(RecordKind::NodeWork, current.id).get<NodeWork>();
+      if (current.state != NodeWorkState::Running || current.attempt_id != observed.attempt_id) {
+        deps_.coordination->release(*replacement_lease);
+        replacement_lease.reset();
+        return;
+      }
+      // Reapply the decision to the freshly read record before the fenced
+      // takeover commit, preserving any state that changed while acquiring.
+      if (attempt.state == NodeState::Cancelled || run.cancellation_requested ||
+          terminal(run.state)) {
+        current.state = NodeWorkState::Cancelled;
+        current.error = "Worker cancellation reconciled";
+      } else if (retry) {
+        current.state = NodeWorkState::Queued;
+        current.error = "Worker attempt reconciled for retry";
+        current.owner_instance_id.clear();
+        current.lease_expires_at.clear();
+        current.claimed_at.clear();
+        current.last_renewed_at.clear();
+        current.attempt_id.clear();
+        current.fencing_token = 0;
+      } else {
+        current.state = NodeWorkState::Failed;
+        current.error = attempt.error;
+      }
+      current.updated_at = timestamp();
+      deps_.storage.commit_owned(records(), "node:" + current.id,
+                                 replacement_lease->owner_instance,
+                                 replacement_lease->fencing_token);
+      commit_lease = &*replacement_lease;
+    }
+    log_diagnostic("runtime.worker_terminal_reconciled",
+                   {{"node_work_id", current.id},
+                    {"attempt_id", attempt.id},
+                    {"worker_job_id", job.id},
+                    {"worker_state", job.state},
+                    {"node_work_state", current.state},
+                    {"retry", retry}});
+    std::optional<LeaseRecord> old_global_slot;
+    std::optional<LeaseRecord> old_run_slot;
+    std::optional<LeaseRecord> old_work_lease;
+    {
+      std::lock_guard lock(mutex_);
+      if (const auto active = active_nodes_.find(current.id); active != active_nodes_.end()) {
+        active->second.stop.request_stop();
+        old_global_slot = active->second.global_slot;
+        old_run_slot = active->second.run_slot;
+        old_work_lease = active->second.work_lease;
+        // The worker job is already terminal.  Do not let the unwinding
+        // coroutine hold a scheduler slot and delay the replacement claim.
+        // Its later commit is still fenced by the old work lease.
+        active_nodes_.erase(active);
+      }
+    }
+    for (const auto &lease : {old_run_slot, old_global_slot, old_work_lease})
+      if (lease) {
+        try {
+          deps_.coordination->release(*lease);
+        } catch (const Error &) {
+        }
+      }
+    try {
+      deps_.coordination->release(*commit_lease);
+    } catch (const Error &) {
+    }
+  } catch (const Error &error) {
+    if (replacement_lease) {
+      try {
+        deps_.coordination->release(*replacement_lease);
+      } catch (const Error &) {
+      }
+    }
+    if (error.code != ErrorCode::Conflict)
+      log_diagnostic("runtime.worker_terminal_reconcile_failed", {{"node_work_id", current.id}});
+  }
 }
 void Runtime::transition(Run &r, RunState state, const std::string &event,
                          std::vector<Record> records) {
@@ -322,6 +592,24 @@ Task<void> Runtime::claim_loop() {
           deps_.coordination->release(*lease);
           continue;
         }
+        // The first readiness check happens before the run lease is acquired.
+        // A remote worker may claim a NodeWork branch between that check and
+        // this reread.  Revalidate from the lease-protected snapshot so an
+        // owner cannot resume a paused distributed join while a branch is
+        // still queued/running.
+        if (run.state == RunState::Paused) {
+          if (!run.pending_parallel_group.empty() && !distributed_parallel_ready(run)) {
+            deps_.coordination->release(*lease);
+            continue;
+          }
+          if (run.pending_parallel_group.empty() && !run.child_id.empty()) {
+            const auto child = deps_.storage.get(RecordKind::Run, run.child_id).get<Run>();
+            if (!terminal(child.state)) {
+              deps_.coordination->release(*lease);
+              continue;
+            }
+          }
+        }
         // A takeover replays from the durable node checkpoint.  This avoids
         // attempting to continue an in-flight coroutine that died with the
         // previous process.
@@ -360,7 +648,13 @@ Task<void> Runtime::claim_loop() {
       try {
         work = value.get<NodeWork>();
         const auto run = deps_.storage.get(RecordKind::Run, work.run_id).get<Run>();
-        if (terminal(run.state) || run.cancellation_requested ||
+        const auto cancellation_cleanup = run.cancellation_requested &&
+                                          terminal(run.state) &&
+                                          work.state == NodeWorkState::Running;
+        if (!cancellation_cleanup && deps_.workers &&
+            !deps_.workers->can_execute(work.required_worker_id, work.required_capability))
+          continue;
+        if ((!cancellation_cleanup && (terminal(run.state) || run.cancellation_requested)) ||
             run.pending_parallel_group != work.group_id)
           continue;
       } catch (const Error &) {
@@ -415,6 +709,12 @@ Task<void> Runtime::claim_loop() {
         work.updated_at = timestamp();
         commit_node_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}}, work,
                           *work_lease);
+        log_diagnostic("runtime.distributed_node_claimed",
+                       {{"node_work_id", work.id},
+                        {"attempt", work.attempt},
+                        {"attempt_id", work.attempt_id},
+                        {"required_worker_id", work.required_worker_id},
+                        {"fencing_token", work.fencing_token}});
         std::lock_guard lock(mutex_);
         if (stopping_ || active_nodes_.size() >= config_.max_nodes) {
           deps_.coordination->release(*run_slot);
@@ -509,6 +809,8 @@ Task<void> Runtime::lease_loop() {
         node_leases.push_back({id, active.work_lease, active.global_slot, active.run_slot});
     }
     try {
+      deps_.coordination->register_instance(version,
+                                            capability_advertisement(deps_.workers).dump());
       if (!deps_.coordination->heartbeat_instance("ACTIVE"))
         log_diagnostic("runtime.instance_heartbeat_missing", {{"instance_id", deps_.instance_id}});
     } catch (const Error &) {
@@ -527,7 +829,14 @@ Task<void> Runtime::lease_loop() {
         std::lock_guard lock(mutex_);
         if (const auto active = active_.find(id); active != active_.end() && active->second.lease)
           *active->second.lease = lease;
-      } catch (const Error &) {
+      } catch (const Error &error) {
+        // A transient database failure is not proof that this instance lost
+        // ownership. Keep the database-authoritative lease snapshot and try
+        // again before its expiry; an explicit fence loss still stops the run.
+        if (error.code == ErrorCode::Storage) {
+          log_diagnostic("runtime.run_lease_renew_deferred", {{"run_id", id}});
+          continue;
+        }
         std::lock_guard lock(mutex_);
         if (const auto active = active_.find(id); active != active_.end()) {
           active->second.ownership_lost = true;
@@ -536,6 +845,12 @@ Task<void> Runtime::lease_loop() {
       }
     }
     for (auto &node : node_leases) {
+      try {
+        const auto observed =
+            deps_.storage.get(RecordKind::NodeWork, node.id).get<NodeWork>();
+        reconcile_terminal_worker(observed, node.work);
+      } catch (const Error &) {
+      }
       try {
         const auto run =
             deps_.storage
@@ -547,11 +862,16 @@ Task<void> Runtime::lease_loop() {
           if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end())
             active->second.stop.request_stop();
         }
-      } catch (const Error &) {
-        std::lock_guard lock(mutex_);
-        if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end()) {
-          active->second.ownership_lost = true;
-          active->second.stop.request_stop();
+      } catch (const Error &error) {
+        if (error.code == ErrorCode::Storage) {
+          log_diagnostic("runtime.distributed_node_state_read_deferred",
+                         {{"node_work_id", node.id}});
+        } else {
+          std::lock_guard lock(mutex_);
+          if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end()) {
+            active->second.ownership_lost = true;
+            active->second.stop.request_stop();
+          }
         }
       }
       bool valid = true;
@@ -560,13 +880,29 @@ Task<void> Runtime::lease_loop() {
         if (!lease)
           continue;
         try {
-          if (!deps_.coordination->renew(*lease, config_.coordination_lease_ttl_ms))
+          if (!deps_.coordination->renew(*lease, config_.coordination_lease_ttl_ms)) {
+            log_diagnostic("runtime.distributed_node_lease_renew_failed",
+                           {{"node_work_id", node.id}, {"resource", lease->resource_key}});
             valid = false;
-        } catch (const Error &) {
+          }
+        } catch (const Error &error) {
+          if (error.code == ErrorCode::Storage) {
+            // Keep the last database-authoritative lease snapshot. A
+            // transient outage must not be treated as an immediate fence loss;
+            // the next heartbeat either renews it or observes expiry.
+            log_diagnostic("runtime.distributed_node_lease_renew_deferred",
+                           {{"node_work_id", node.id}, {"resource", lease->resource_key}});
+            continue;
+          }
+          log_diagnostic("runtime.distributed_node_lease_renew_error",
+                         {{"node_work_id", node.id}, {"resource", lease->resource_key}});
           valid = false;
         }
       }
       if (!valid) {
+        log_diagnostic("runtime.distributed_node_lease_lost",
+                       {{"node_work_id", node.id},
+                        {"fencing_token", node.work.fencing_token}});
         std::lock_guard lock(mutex_);
         if (const auto active = active_nodes_.find(node.id); active != active_nodes_.end()) {
           active->second.ownership_lost = true;

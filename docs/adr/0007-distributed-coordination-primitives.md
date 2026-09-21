@@ -3,8 +3,9 @@
 This ADR records the coordination primitives that preceded the distributed
 execution milestone. The single-owner defaults remain authoritative, while the
 later opt-in `execution_mode: multi_instance` uses these primitives for whole-run
-ownership and deterministic branch `NodeWork` claims. It does not provide
-distributed worker leasing or exactly-once side effects.
+ownership and deterministic branch `NodeWork` claims. It now also provides the
+first opt-in worker-claim foundation; it does not provide exactly-once side
+effects.
 
 ## Context
 
@@ -51,6 +52,16 @@ default remains unchanged.
 
 ## Future work
 
-WorkerJob ownership and distributed event delivery remain future work. Pipeline-run
-ownership uses these primitives only in explicit multi-instance mode, with fenced
-writes and end-to-end recovery coverage.
+Remote worker execution is restricted to durable `NodeWork` branches whose
+persisted worker requirement matches an advertised healthy local worker. Worker
+capability advertisements are bounded and identity-free. The same database-time
+lease and fence used by run/node ownership protects completion, including
+duplicate and late completion. An equivalent terminal replay is idempotent; a
+conflicting terminal replay is rejected.
+
+The current inline workspace manifest is bounded and content-addressed with
+SHA-256. It is staged under the worker's LASO data directory and never treats an
+owner absolute path as portable state. Larger artifact transport, explicit
+remote cancellation acknowledgement, and worker lease-loss signalling remain
+future work. Pipeline-run ownership continues to use explicit multi-instance
+mode with fenced writes; exactly-once execution is not claimed.

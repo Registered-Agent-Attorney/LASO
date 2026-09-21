@@ -111,6 +111,11 @@ void write_records(pqxx::work &tx, const std::vector<Record> &records) {
       if (!existing.empty()) {
         const auto old_work = Json::parse(existing.front()[0].c_str()).get<NodeWork>();
         const auto new_work = record.value.get<NodeWork>();
+        if (terminal(old_work.state)) {
+          if (equivalent_terminal_node_work(old_work, new_work))
+            continue;
+          throw Error(ErrorCode::Conflict, "Terminal node work is immutable");
+        }
         if (!valid_node_work_transition(old_work.state, new_work.state))
           throw Error(ErrorCode::Conflict, "Invalid node work state transition");
       }

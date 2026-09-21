@@ -3,6 +3,7 @@
 #include <boost/beast.hpp>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <laso/api/api.hpp>
 #include <laso/workers/process_transport.hpp>
 #include <thread>
@@ -148,6 +149,46 @@ TEST(ProcessWorker, MalformedOversizedExitAndHangAreBoundedFailures) {
     EXPECT_THROW(transport.submit(request()), WorkerTransportError) << mode;
     EXPECT_FALSE(transport.metadata().healthy);
   }
+}
+
+TEST(ProcessWorker, RequestTimeoutTerminatesOwnedProcessGroup) {
+  auto config = worker_config("delay-ms", 5000);
+  config.args = {"--mode", "delay-ms", "--delay-ms", "5000"};
+  ProcessWorkerTransport transport("process", std::move(config));
+  ASSERT_NO_THROW(transport.start());
+  auto timed = request();
+  timed.timeout_ms = 100;
+  try {
+    (void)transport.submit(timed);
+    FAIL() << "expected a bounded worker timeout";
+  } catch (const WorkerTransportError &error) {
+    EXPECT_TRUE(error.timed_out);
+  }
+  EXPECT_FALSE(transport.metadata().healthy);
+  EXPECT_FALSE(reference_host_running());
+}
+
+TEST(ProcessWorker, PendingCancellationTerminatesAndRestartsOwnedProcessGroup) {
+  ProcessWorkerTransport transport("process", worker_config("hang", 5000));
+  ASSERT_NO_THROW(transport.start());
+  std::promise<void> finished;
+  auto future = finished.get_future();
+  std::thread submitter([&] {
+    try {
+      (void)transport.submit(request());
+    } catch (const WorkerTransportError &) {
+    }
+    finished.set_value();
+  });
+  for (unsigned attempt = 0; attempt < 100 && !reference_host_running(); ++attempt)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_TRUE(transport.cancel_pending("job-process-1"));
+  EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  submitter.join();
+  EXPECT_FALSE(reference_host_running());
+  EXPECT_NO_THROW(transport.start());
+  transport.stop();
+  EXPECT_FALSE(reference_host_running());
 }
 
 TEST(ProcessWorker, CooperativeCancellationIsAcknowledged) {

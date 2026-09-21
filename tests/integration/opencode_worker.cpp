@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <laso/workers/process_transport.hpp>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -42,6 +44,19 @@ WorkerRequest opencode_request(const std::filesystem::path &root, const std::str
     request.metadata["opencode_session_id"] = session;
   return request;
 }
+
+bool port_open(unsigned port) {
+  const auto fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    return false;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<std::uint16_t>(port));
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  const auto connected = ::connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0;
+  ::close(fd);
+  return connected;
+}
 } // namespace
 
 TEST(OpenCodeWorker, RealInstalledAdapterCreatesAndContinuesSession) {
@@ -71,6 +86,7 @@ TEST(OpenCodeWorker, RealInstalledAdapterCreatesAndContinuesSession) {
   EXPECT_EQ(second.state, WorkerJobState::Completed) << second.error;
   EXPECT_EQ(second.result.value("session_id", std::string{}), session);
   transport.stop();
+  EXPECT_FALSE(port_open(port));
 
   ProcessWorkerTransport restarted("opencode", opencode_config(root.path, port));
   ASSERT_NO_THROW(restarted.start());
@@ -79,6 +95,7 @@ TEST(OpenCodeWorker, RealInstalledAdapterCreatesAndContinuesSession) {
   EXPECT_EQ(after_restart.state, WorkerJobState::Completed) << after_restart.error;
   EXPECT_EQ(after_restart.result.value("session_id", std::string{}), session);
   restarted.stop();
+  EXPECT_FALSE(port_open(port));
 }
 
 TEST(OpenCodeWorker, RealInstalledAdapterRoutesPermissionReplyToProject) {
@@ -109,6 +126,7 @@ TEST(OpenCodeWorker, RealInstalledAdapterRoutesPermissionReplyToProject) {
   std::getline(output, contents);
   EXPECT_EQ(contents, "allowed");
   transport.stop();
+  EXPECT_FALSE(port_open(port));
 }
 
 TEST(OpenCodeWorker, RejectsProjectOutsideConfiguredRoot) {
@@ -124,4 +142,6 @@ TEST(OpenCodeWorker, RejectsProjectOutsideConfiguredRoot) {
   const auto result = transport.submit(request);
   EXPECT_EQ(result.state, WorkerJobState::Failed);
   EXPECT_NE(result.error.find("outside an allowed root"), std::string::npos);
+  transport.stop();
+  EXPECT_FALSE(port_open(port));
 }

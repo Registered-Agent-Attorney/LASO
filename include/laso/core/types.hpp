@@ -326,12 +326,21 @@ NLOHMANN_JSON_SERIALIZE_ENUM(NodeWorkState, {{NodeWorkState::Queued, "Queued"},
                                              {NodeWorkState::Completed, "Completed"},
                                              {NodeWorkState::Failed, "Failed"},
                                              {NodeWorkState::Cancelled, "Cancelled"}})
+inline bool terminal(NodeWorkState state) {
+  return state == NodeWorkState::Completed || state == NodeWorkState::Failed ||
+         state == NodeWorkState::Cancelled;
+}
 inline bool valid_node_work_transition(NodeWorkState from, NodeWorkState to) {
   if (from == to)
     return true;
   if (from == NodeWorkState::Queued && to == NodeWorkState::Running)
     return true;
   if (from == NodeWorkState::Queued && to == NodeWorkState::Cancelled)
+    return true;
+  // A fenced recovery pass may requeue a running attempt after its durable
+  // worker job has reached a terminal state.  The old owner is fenced by the
+  // same commit, so it cannot subsequently publish a result for this work.
+  if (from == NodeWorkState::Running && to == NodeWorkState::Queued)
     return true;
   if (from == NodeWorkState::Running &&
       (to == NodeWorkState::Completed || to == NodeWorkState::Failed ||
@@ -342,7 +351,7 @@ inline bool valid_node_work_transition(NodeWorkState from, NodeWorkState to) {
 struct NodeWork {
   std::string id = uuid(), run_id, group_id, node_id, join, created_at = timestamp(),
               updated_at = created_at, owner_instance_id, lease_expires_at, claimed_at,
-              last_renewed_at, attempt_id, error;
+              last_renewed_at, attempt_id, error, required_worker_id, required_capability;
   unsigned index = 0, attempt = 0, steps = 0;
   std::uint64_t fencing_token = 0;
   NodeWorkState state = NodeWorkState::Queued;
@@ -368,7 +377,9 @@ inline void to_json(Json &j, const NodeWork &w) {
        {"steps", w.steps},
        {"fencing_token", w.fencing_token},
        {"state", w.state},
-       {"token", w.token}};
+       {"token", w.token},
+       {"required_worker_id", w.required_worker_id},
+       {"required_capability", w.required_capability}};
   if (w.result)
     j["result"] = *w.result;
 }
@@ -391,11 +402,30 @@ inline void from_json(const Json &j, NodeWork &w) {
   w.steps = j.value("steps", 0U);
   w.fencing_token = j.value("fencing_token", 0ULL);
   w.state = j.value("state", NodeWorkState::Queued);
+  w.required_worker_id = j.value("required_worker_id", std::string{});
+  w.required_capability = j.value("required_capability", std::string{});
   j.at("token").get_to(w.token);
   if (j.contains("result") && !j.at("result").is_null())
     w.result = j.at("result").get<Message>();
   else
     w.result.reset();
+}
+inline bool equivalent_terminal_node_work(const NodeWork &left, const NodeWork &right) {
+  const auto same_result =
+      (!left.result && !right.result) ||
+      (left.result && right.result && Json(*left.result) == Json(*right.result));
+  if (left.id != right.id || left.run_id != right.run_id || left.group_id != right.group_id ||
+      left.node_id != right.node_id || left.join != right.join ||
+      left.required_worker_id != right.required_worker_id ||
+      left.required_capability != right.required_capability ||
+      left.owner_instance_id != right.owner_instance_id || left.state != right.state ||
+      left.attempt != right.attempt ||
+      left.attempt_id != right.attempt_id || left.fencing_token != right.fencing_token ||
+      left.error != right.error || left.steps != right.steps || Json(left.token) != Json(right.token) ||
+      !same_result)
+    return false;
+  return left.state == NodeWorkState::Completed || left.state == NodeWorkState::Failed ||
+         left.state == NodeWorkState::Cancelled;
 }
 struct Approval {
   std::string id = uuid(), run_id, node_id, reason, action, created_at = timestamp(),

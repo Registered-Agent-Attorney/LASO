@@ -653,6 +653,100 @@ edges:
 #endif
 }
 
+TEST(DistributedExecution, TimedOutWorkerAttemptReconcilesNodeWork) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+#if defined(LASO_DISTRIBUTED_PROCESS)
+  TemporaryDirectory directory;
+  Config configuration = config(directory.path);
+  configuration.storage_backend = "postgres";
+  configuration.postgres_dsn = database.dsn;
+  configuration.postgres_schema = database.schema;
+  configuration.execution_mode = "multi_instance";
+  configuration.max_runs = 1;
+  configuration.max_nodes = 2;
+  configuration.max_nodes_per_run = 2;
+  configuration.coordination_lease_ttl_ms = 1000;
+  configuration.coordination_heartbeat_interval_ms = 100;
+  configuration.validate();
+
+  asio::io_context io;
+  Service controller(io, configuration);
+  setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
+  setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
+  setenv("LASO_DISTRIBUTED_TEST_WORKER_HOST", LASO_PROCESS_WORKER_HOST, 1);
+  setenv("LASO_DISTRIBUTED_TEST_MAX_NODES", "2", 1);
+  const auto pipeline = R"yaml(
+laso: '1'
+name: process-worker-timeout
+version: 1
+timeout_ms: 5000
+nodes:
+  input: {type: input}
+  fork: {type: parallel, join: join}
+  timeout: {type: worker, worker: process, task_type: deterministic, max_attempts: 2,
+            timeout_ms: 2000, retry_delay_ms: 10}
+  stable: {type: function, function: identity}
+  join: {type: join}
+  output: {type: output}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: timeout}
+  - {from: fork, to: stable}
+  - {from: timeout, to: join}
+  - {from: stable, to: join}
+  - {from: join, to: output}
+)yaml";
+  controller.register_pipeline(pipeline);
+  const auto run_id = controller.start("process-worker-timeout@1", Json{{"value", "timeout"}});
+  setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
+    _exit(127);
+  }
+
+  laso::Run result;
+  for (unsigned i = 0; i < 300; ++i) {
+    result = controller.get(RecordKind::Run, run_id).get<laso::Run>();
+    if (terminal(result.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 1);
+  result = controller.get(RecordKind::Run, run_id).get<laso::Run>();
+  unsetenv("LASO_DISTRIBUTED_TEST_WORKER_HOST");
+  unsetenv("LASO_DISTRIBUTED_TEST_MAX_NODES");
+  controller.shutdown();
+  ASSERT_EQ(result.state, RunState::Failed) << result.error;
+  const auto work = controller.list(RecordKind::NodeWork, run_id);
+  ASSERT_EQ(work.size(), 2U);
+  for (const auto &value : work)
+    EXPECT_TRUE(terminal(value.get<NodeWork>().state)) << value.dump();
+  const auto attempts = controller.list(RecordKind::Attempt, run_id);
+  std::set<std::string> worker_jobs;
+  for (const auto &value : attempts) {
+    const auto attempt = value.get<NodeExecution>();
+    if (attempt.node_id == "timeout") {
+      if (!attempt.worker_job_id.empty())
+        worker_jobs.insert(attempt.worker_job_id);
+    }
+  }
+  EXPECT_EQ(worker_jobs.size(), 2U);
+  const auto jobs = controller.worker_jobs(run_id);
+  ASSERT_EQ(jobs.size(), 2U);
+  for (const auto &value : jobs)
+    EXPECT_EQ(value.at("status"), "TimedOut");
+#else
+  GTEST_SKIP() << "distributed process fixture is not built";
+#endif
+}
+
 TEST(DistributedExecution, MultiInstanceRejectsSQLite) {
   TemporaryDirectory directory;
   auto configuration = config(directory.path);

@@ -2,6 +2,12 @@
 set -euo pipefail
 build=$(realpath "$1")
 source_dir=$(realpath "$2")
+jq_bin=${JQ_BIN:-$(command -v jq || true)}
+if [[ -z "$jq_bin" && -x "$source_dir/local-deps/root/usr/bin/jq" ]]; then
+  jq_bin="$source_dir/local-deps/root/usr/bin/jq"
+fi
+[[ -n "$jq_bin" && -x "$jq_bin" ]] || { echo "jq is required" >&2; exit 77; }
+jq() { "$jq_bin" "$@"; }
 temp=$(mktemp -d)
 server_pid=
 cleanup() {

@@ -99,7 +99,7 @@ Service::Service(asio::io_context &io, Config config)
                {*storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
                 worker_manager_,
                 [this](const std::string &reference) { return resolve_pipeline(reference); },
-                coordination_.get(), instance_id_}),
+                coordination_.get(), instance_id_, config_.data_dir / "distributed-workspaces"}),
       artifacts_(config_.data_dir / "artifacts", *storage_),
       scheduler_(
           io, *storage_,

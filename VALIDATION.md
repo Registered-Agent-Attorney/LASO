@@ -253,3 +253,208 @@ recovery. The distributed execution integration also exercises two LASO service
 instances sharing PostgreSQL, a durable queued run, a single owner claim, a
 multi-instance subpipeline with `max_runs: 1`, and normal runtime completion.
 Multi-instance mode is not used by SQLite.
+
+## Real-agent Phase 1.1 runtime-hardening acceptance (2026-09-19)
+
+The manual acceptance harness in `tests/acceptance/` uses a disposable synthetic
+C++ repository and the normal LASO HTTP API, worker adapters, durable SQLite
+state, and process-worker isolation. Its pipeline runs Codex and OpenCode in
+parallel with a deterministic validator, joins the branches deterministically,
+waits for a reviewer approval checkpoint, and then builds and tests the
+resulting workspace. The harness also includes an allowed-root failure case and
+an in-flight cancellation case. It is intentionally opt-in because it invokes
+real locally installed agent executables.
+
+Phase 1.1 hardens the provider lifecycle at the framework and adapter
+boundaries. Process-worker invocations now own an exact process group, use
+bounded graceful-then-forced teardown for timeout/cancellation, and expose a
+pending-submission cancellation hook. The Codex and OpenCode adapter hosts
+also use parent-death cleanup; OpenCode explicitly stops its server before
+acknowledging shutdown. Worker-node deadlines are propagated to process
+transport requests and timeout results remain distinguishable from ordinary
+provider failures.
+
+The completed acceptance run exercised real Codex and OpenCode workers, two
+successful repeated pipeline runs, parallel filesystem edits, durable worker
+attempts, deterministic joining, reviewer approval, controlled orchestrator
+termination and restart, recovery from the persisted checkpoint, and the
+synthetic project's build and CTest suite. The final harness result was
+`REAL_AGENT_PHASE1_OK` with `successful_repeated_runs=2`,
+`cancellation=acknowledged`, and `build_and_tests=pass`.
+
+The prior real OpenCode gate left three provider-server child processes. After
+the lifecycle fix, the normal, failure, timeout, cancellation, and shutdown
+regressions found zero LASO-owned provider descendants/listeners after
+completion. Cleanup after a hard orchestrator kill is best-effort when a
+provider daemonizes or escapes its owned process group; this is documented as
+a future reaper/lease boundary rather than an unconditional guarantee.
+
+Cancellation is durable and terminal-state protected. If cancellation wins,
+LASO records the request and acknowledgement and commits `Cancelled` (or
+`TimedOut` for an acknowledged deadline). If provider completion wins first,
+the completed result remains authoritative even if a cancellation request was
+also recorded. A late completion cannot rewrite a terminal cancelled or
+completed job. The regression suite also covers cancellation during pending
+submission and provider completion racing acknowledgement.
+
+The real-provider gates passed for Codex (1/1) and OpenCode (2/2). Claude was
+not invoked because no Claude executable was safely available. The failure
+boundary used an out-of-allowed-root workspace and retained the detailed
+failure on the durable worker job without exposing it through the redacted run
+summary.
+
+| Validation | Result |
+|---|---|
+| GCC Debug with Codex/OpenCode adapters | **PASS: 200 scheduled; 193 passed and 7 expected cases skipped** |
+| GCC Release with Codex/OpenCode adapters | **PASS: 200 scheduled; 193 passed and 7 expected cases skipped** |
+| ASan/UBSan Debug | **PASS: 189 scheduled; 186 passed and 3 PostgreSQL-related cases skipped** |
+| Real Codex adapter gate | **PASS: 1/1** |
+| Real OpenCode adapter gate | **PASS: 2/2** |
+| Real Claude adapter | **SKIPPED: executable unavailable; no credentials changed** |
+| PostgreSQL-backed validation | **BLOCKED: PostgreSQL server/tools unavailable on the execution host** |
+| clang-format / clang-tidy | **BLOCKED: tools unavailable on the execution host** |
+
+The harness documents the remaining Milestone 3 distributed-execution needs:
+capability advertisement, remote task claims with lease expiry and fencing,
+provider-aware remote cancellation handles, workspace/artifact transport,
+retry and duplicate-completion idempotency, ownership-loss handling, and
+explicit semantics that do not claim exactly-once execution across process or
+network failure. The Phase 1.1 lifecycle hooks provide a local foundation but
+do not by themselves make remote provider execution safe.
+
+## Distributed Execution Milestone 3 implementation status (2026-09-19)
+
+This milestone adds the first opt-in remote-agent foundation without broadening
+distributed execution to arbitrary tools or side effects. Supported worker
+branches now use the existing durable `NodeWork` record with persisted worker
+ID/capability requirements. Multi-instance services advertise a bounded,
+identity-free capability document and refresh it with their coordination
+heartbeat. Claim selection checks local worker health and capability before
+acquiring the node lease. Existing database-time lease and fencing predicates
+remain authoritative; workers may physically continue after lease loss, but a
+stale completion cannot commit.
+
+Terminal `NodeWork` records now accept equivalent replay safely while rejecting
+conflicting terminal rewrites. Cancelled parent runs permit a replacement
+instance to claim still-running branch work for fenced cancellation cleanup,
+including when the original worker disappeared. These semantics remain
+at-least-once and do not claim exactly-once execution.
+
+The first bounded workspace transport is an inline manifest of relative paths,
+byte content, sizes, and SHA-256 hashes. It rejects traversal, absolute paths,
+duplicate paths, symlinks, oversized files/workspaces, and integrity failures.
+The remote worker stages it below its local LASO data directory per
+run/work/attempt. Provider `project_dir` values are ephemeral and are removed
+from distributed durable result metadata; validated output manifests are carried
+through the deterministic join. Larger artifact/object-store transport and
+remote provider-control protocols remain follow-on work.
+
+## Historical M3 PostgreSQL validation pass before timeout closure
+
+The current pass used a disposable PostgreSQL 16.15 instance bound to Linux
+loopback only. LASO was compiled with PostgreSQL, Codex, and OpenCode support;
+the coordination database tests ran against PostgreSQL rather than SQLite.
+Credentials were supplied only through the test environment and are not part of
+the repository.
+
+| Validation | Result |
+|---|---|
+| SQLite/default regression matrix | **PASS: 219 total; 198 passed, 0 failed, 21 expected skips** |
+| GCC Release regression matrix without PostgreSQL | **PASS: 220 total; 198 passed, 0 failed, 22 expected skips** |
+| ASan/UBSan regression matrix | **PASS: 200 total; 196 passed, 0 failed, 4 expected skips** |
+| PostgreSQL storage/coordination/distributed focus | **PASS: 42/42** |
+| PostgreSQL-enabled full CTest excluding the real acceptance harness | **PASS: 215 passed, 4 expected provider-gate skips** |
+| PostgreSQL-enabled full CTest including the real acceptance harness | **PARTIAL: 215 passed, 4 expected skips, 1 real-acceptance failure** |
+| Real Codex adapter gate | **PASS: 1/1** |
+| Real OpenCode adapter gate | **PASS: 3/3** |
+| Real distributed basic runs | **PARTIAL: 5 attempted, 2 completed, 3 Codex-timeout runs failed/aborted and cleaned up** |
+
+The 42 PostgreSQL-focused tests cover migrations/backend initialization,
+concurrent claims, lease renewal and expiry, stale completion fencing,
+equivalent and conflicting duplicate completion, cancellation recovery,
+owner/process recovery, and SQLite multi-instance rejection. The two completed
+real runs used separate owner and worker LASO instances sharing PostgreSQL on
+the validation host; both real Codex and OpenCode work executed on the worker
+instance and returned through the durable join.
+
+The remaining real-acceptance failure is an operational boundary, not a green
+result hidden by the harness: the Codex provider exceeded its configured
+distributed request window, leaving the run paused with an unfinished NodeWork
+while the OpenCode branch had completed. The harness terminated its owned
+instances and left zero provider processes/listeners. A work-computer-owner to
+Linux-worker run, live stale-worker/database-interruption chaos, and real remote
+cancellation remain unvalidated in this pass. The implementation retains
+at-least-once semantics and one authoritative fenced completion; it does not
+claim exactly-once execution. SQLite remains explicitly single-instance.
+
+## M3 closure validation pass (2026-09-21)
+
+The timeout/reconciliation defect was fixed and then revalidated against the
+real PostgreSQL-backed runtime. The provider transport had been converting a
+quiet but valid provider into a false timeout because its polling interval was
+limited to 60 seconds even when the overall request deadline was longer. The
+transport now waits against the actual remaining deadline, bounded only by the
+platform integer limit. A quiet-provider regression now runs past that interval
+and completes successfully.
+
+The runtime also reconciles terminal worker attempts from durable state. A
+terminal success, provider failure, timeout, cancellation, or fenced ownership
+loss is mapped to its current `NodeWork`; retry policy is evaluated and the
+logical work is committed as completed, retryable, failed, cancelled, or
+superseded. Recovery does not depend on an in-memory callback or a surviving
+owner process. Temporary PostgreSQL storage failures are deferred while a
+currently valid lease remains authoritative; they do not become false terminal
+worker failures. Pending cancellation and synchronous submission races now
+wait for the durable terminal cancellation state before a transport failure can
+be persisted.
+
+The final disposable PostgreSQL environment was PostgreSQL 16.15, bound to
+loopback only and reached from the work-computer owner through a loopback SSH
+forward. The build used libpq 16.15 and libpqxx 7.8.1. The database used a
+dedicated synthetic test role/database and was removed after validation; no
+production or LAN/public database endpoint was used.
+
+The true cross-machine gate ran the owner on the authoritative work computer
+and the worker/provider on a separate Linux test workstation. Codex execution
+was observed on the worker side, with no owner-local provider fallback. Three
+complete Codex runs passed consecutively. The owner verified remote artifact
+identity, attempt/fence provenance, relative paths, sizes, SHA-256 hashes, and
+content before rebuilding and testing the reconstructed synthetic project.
+
+The required cross-machine chaos gates also passed: remote cancellation,
+worker death and lease recovery, a live stale worker after lease expiry,
+owner death and recovery, and bounded worker-side database interruption. The
+stale-worker gate produced `STALE_RESULT_REJECTED`; no stale worker committed
+authoritative state. Remote cancellation reached authoritative `Cancelled`.
+The provider termination acknowledgement was false with a recorded pending
+cancellation error, so the acceptance did not claim termination confirmation
+that was not observed. Late completion remained non-authoritative.
+
+| Validation | Result |
+|---|---|
+| PostgreSQL GCC Debug full CTest, excluding opt-in acceptance harness | **PASS: 223/223; 4 expected skips** |
+| PostgreSQL GCC Release full CTest, excluding opt-in acceptance harness | **PASS: 223/223; 4 expected skips** |
+| ASan + UBSan SQLite-only CTest | **PASS: 206/206; 8 expected skips** |
+| PostgreSQL focused distributed/storage/coordination coverage | **PASS: 42/42** |
+| Quiet-provider overall-deadline regression | **PASS: 1/1** |
+| Pending-submission cancellation race repetition | **PASS: 20/20** |
+| PostgreSQL schema upgrade v7 to current v8 | **PASS in Debug and Release** |
+| Complete cross-machine Codex runs | **PASS: 3/3** |
+| Cross-machine cancellation | **PASS: 2/2; termination acknowledgement accurately unconfirmed** |
+| Cross-machine worker death, stale worker, owner death, DB interruption | **PASS: 1/1 each** |
+| Cross-machine owner-side artifact rebuild and tests | **PASS for all 3 complete runs** |
+| Cross-machine OpenCode | **SKIPPED: executable unavailable on the Linux test host** |
+| Real Claude | **SKIPPED: executable unavailable; no credentials changed** |
+| Clang, clang-format, clang-tidy, TSAN | **SKIPPED: unavailable or environment-blocked** |
+
+The final cleanup inspection found zero LASO-owned provider processes,
+provider listeners, and acceptance staging workspaces. The acceptance harness
+cleanup is scoped to exact LASO-owned process trees and uses bounded escalation;
+it does not kill by provider name. PostgreSQL and the SSH forwarding resources
+were removed after the run.
+
+This pass preserves the distributed execution contract: attempts may execute
+at least once and may be duplicated after failure or lease expiry, while only a
+valid current fence can commit one authoritative result. LASO does not claim
+exactly-once execution. SQLite remains explicitly single-instance, and remote
+execution remains limited to the supported agent/worker path.

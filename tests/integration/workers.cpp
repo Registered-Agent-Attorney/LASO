@@ -1,7 +1,9 @@
 #include "../support.hpp"
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <fstream>
+#include <future>
 #include <laso/api/api.hpp>
 #include <laso/workers/manager.hpp>
 #include <thread>
@@ -72,6 +74,23 @@ public:
   bool transport_failure = false, job_failure = false;
 };
 } // namespace
+
+TEST(Workers, DistributedCapabilityAdvertisementContainsOnlySafeClaimData) {
+  TemporaryDirectory directory;
+  auto storage = make_storage(directory.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  PolicyEngine policy;
+  WorkerManager manager(*storage, registry, policy);
+  const auto advertised = manager.distributed_capabilities();
+  EXPECT_EQ(advertised.at("protocol_version"), 1);
+  ASSERT_EQ(advertised.at("workloads").size(), 1U);
+  EXPECT_EQ(advertised.at("workloads").front().at("worker_id"), "usage");
+  EXPECT_FALSE(advertised.dump().find("/home") != std::string::npos);
+  EXPECT_TRUE(manager.can_execute("usage", ""));
+  EXPECT_FALSE(manager.can_execute("missing", ""));
+}
 
 TEST(Workers, PluginLoadsStartsAndReportsHealth) {
   TemporaryDirectory dir;
@@ -372,6 +391,238 @@ TEST(Workers, TerminalWorkerJobIgnoresLateCompletionAndFailedCancellation) {
   EXPECT_EQ(manager.job(created.id).state, WorkerJobState::Completed);
   manager.cancel(created.id, WorkerJobState::Cancelled, "test cancellation");
   EXPECT_EQ(manager.job(created.id).state, WorkerJobState::Completed);
+}
+
+TEST(Workers, PendingSubmissionCancellationIsAcknowledgedAndTerminal) {
+  class BlockingWorker final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "blocking";
+      result.name = "blocking";
+      result.enabled = true;
+      result.healthy = true;
+      result.status = "healthy";
+      result.supports_cancellation = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &) override {
+      std::unique_lock lock(mutex);
+      started = true;
+      changed.notify_all();
+      changed.wait(lock, [&] { return cancellation_requested; });
+      throw WorkerTransportError("pending worker was cancelled");
+    }
+    WorkerStatus status(const std::string &) override { return {}; }
+    WorkerStatus result(const std::string &) override { return {}; }
+    bool cancel(const std::string &) override { return false; }
+    bool cancel_pending(const std::string &) override {
+      std::lock_guard lock(mutex);
+      cancellation_requested = true;
+      changed.notify_all();
+      return true;
+    }
+    void start() override {}
+    void stop() noexcept override {}
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool started = false;
+    bool cancellation_requested = false;
+  };
+
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<BlockingWorker>();
+  registry.add("blocking", adapter);
+  WorkerManager manager(*storage, registry);
+  WorkerRequest request;
+  request.worker_id = "blocking";
+  request.run_id = "pending-cancel";
+  request.node_id = "work";
+  request.idempotency_key = "pending-cancel:work:1";
+
+  std::promise<WorkerJob> completion;
+  auto future = completion.get_future();
+  std::thread submitter([&] {
+    try {
+      completion.set_value(manager.submit(request));
+    } catch (...) {
+      completion.set_exception(std::current_exception());
+    }
+  });
+  {
+    std::unique_lock lock(adapter->mutex);
+    ASSERT_TRUE(adapter->changed.wait_for(lock, std::chrono::seconds(2),
+                                          [&] { return adapter->started; }));
+  }
+  const auto jobs = manager.jobs(request.run_id);
+  ASSERT_EQ(jobs.size(), 1U);
+  manager.cancel(jobs.front().at("id"), WorkerJobState::Cancelled, "test cancellation");
+  const auto cancelled = future.get();
+  submitter.join();
+  EXPECT_EQ(cancelled.state, WorkerJobState::Cancelled);
+  EXPECT_TRUE(cancelled.cancellation_requested);
+  EXPECT_TRUE(cancelled.cancellation_acknowledged);
+}
+
+TEST(Workers, AsyncSubmissionReturnsBeforeProviderHandleAndSupportsCancellation) {
+  class BlockingWorker final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "async-blocking";
+      result.name = "async-blocking";
+      result.enabled = true;
+      result.healthy = true;
+      result.status = "healthy";
+      result.supports_recovery = true;
+      result.supports_cancellation = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &) override {
+      std::unique_lock lock(mutex);
+      started = true;
+      changed.notify_all();
+      changed.wait(lock, [&] { return cancellation_requested; });
+      throw WorkerTransportError("pending worker was cancelled");
+    }
+    WorkerStatus status(const std::string &) override {
+      status_called = true;
+      return {};
+    }
+    WorkerStatus result(const std::string &) override { return {}; }
+    bool cancel(const std::string &) override { return false; }
+    bool cancel_pending(const std::string &) override {
+      std::lock_guard lock(mutex);
+      cancellation_requested = true;
+      changed.notify_all();
+      return true;
+    }
+    void start() override {}
+    void stop() noexcept override {}
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool started = false;
+    bool cancellation_requested = false;
+    std::atomic<bool> status_called = false;
+  };
+
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<BlockingWorker>();
+  registry.add("async-blocking", adapter);
+  WorkerManager manager(*storage, registry);
+  WorkerRequest request;
+  request.worker_id = "async-blocking";
+  request.run_id = "async-submit";
+  request.node_id = "work";
+  request.idempotency_key = "async-submit:work:1";
+
+  const auto started_at = std::chrono::steady_clock::now();
+  const auto submitted = manager.submit_async(request);
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started_at)
+                .count(),
+            500);
+  EXPECT_EQ(submitted.id, manager.job_id_for(request.idempotency_key));
+  EXPECT_EQ(submitted.state, WorkerJobState::Submitting);
+  const auto refresh_started = std::chrono::steady_clock::now();
+  const auto refreshed = manager.refresh(submitted.id);
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - refresh_started)
+                .count(),
+            200);
+  EXPECT_EQ(refreshed.state, WorkerJobState::Submitting);
+  EXPECT_FALSE(adapter->status_called.load());
+  {
+    std::unique_lock lock(adapter->mutex);
+    ASSERT_TRUE(adapter->changed.wait_for(lock, std::chrono::seconds(2),
+                                          [&] { return adapter->started; }));
+  }
+  manager.cancel(submitted.id, WorkerJobState::Cancelled, "test async cancellation");
+  for (unsigned attempt = 0; attempt < 200; ++attempt) {
+    if (manager.job(submitted.id).state == WorkerJobState::Cancelled)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const auto cancelled = manager.job(submitted.id);
+  EXPECT_EQ(cancelled.state, WorkerJobState::Cancelled);
+  EXPECT_TRUE(cancelled.cancellation_requested);
+  EXPECT_TRUE(cancelled.cancellation_acknowledged);
+}
+
+TEST(Workers, ProviderCompletionWinsIfItBeatsCancellationAcknowledgement) {
+  class CompletingWorker final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "completing";
+      result.name = "completing";
+      result.enabled = true;
+      result.healthy = true;
+      result.status = "healthy";
+      result.supports_cancellation = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &) override {
+      std::unique_lock lock(mutex);
+      started = true;
+      changed.notify_all();
+      changed.wait(lock, [&] { return release; });
+      return {"external-completed", WorkerJobState::Completed, Json::object(), {},
+              Json{{"winner", "provider"}}};
+    }
+    WorkerStatus status(const std::string &) override { return {}; }
+    WorkerStatus result(const std::string &) override { return {}; }
+    bool cancel(const std::string &) override { return false; }
+    bool cancel_pending(const std::string &) override { return false; }
+    void start() override {}
+    void stop() noexcept override {}
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool started = false;
+    bool release = false;
+  };
+
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<CompletingWorker>();
+  registry.add("completing", adapter);
+  WorkerManager manager(*storage, registry);
+  WorkerRequest request;
+  request.worker_id = "completing";
+  request.run_id = "completion-wins";
+  request.node_id = "work";
+  request.idempotency_key = "completion-wins:work:1";
+
+  std::promise<WorkerJob> completion;
+  auto future = completion.get_future();
+  std::thread submitter([&] { completion.set_value(manager.submit(request)); });
+  {
+    std::unique_lock lock(adapter->mutex);
+    ASSERT_TRUE(adapter->changed.wait_for(lock, std::chrono::seconds(2),
+                                          [&] { return adapter->started; }));
+  }
+  const auto jobs = manager.jobs(request.run_id);
+  ASSERT_EQ(jobs.size(), 1U);
+  manager.cancel(jobs.front().at("id"), WorkerJobState::Cancelled, "late cancellation");
+  {
+    std::lock_guard lock(adapter->mutex);
+    adapter->release = true;
+  }
+  adapter->changed.notify_all();
+  const auto completed = future.get();
+  submitter.join();
+  EXPECT_EQ(completed.state, WorkerJobState::Completed);
+  EXPECT_TRUE(completed.cancellation_requested);
+  EXPECT_FALSE(completed.cancellation_acknowledged);
+  EXPECT_EQ(completed.result.at("winner"), "provider");
 }
 
 TEST(Workers, ExistingWorkerJobIsReconciledAfterManagerRestart) {

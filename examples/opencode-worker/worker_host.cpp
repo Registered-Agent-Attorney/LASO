@@ -21,6 +21,9 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <thread>
 #include <stop_token>
 #include <unistd.h>
@@ -31,6 +34,37 @@ namespace {
 constexpr std::size_t max_http_body = 4 * 1024 * 1024;
 constexpr std::size_t max_project_roots = 32;
 std::mutex protocol_output_mutex;
+
+bool arm_parent_death_signal() noexcept {
+#ifdef __linux__
+  const auto parent = ::getppid();
+  if (::prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || ::getppid() != parent)
+    return false;
+#endif
+  return true;
+}
+
+bool process_group_alive(pid_t process_group) noexcept {
+  if (process_group <= 0)
+    return false;
+  if (::kill(-process_group, 0) == 0)
+    return true;
+  return errno == EPERM;
+}
+
+void terminate_process_group(pid_t process_group) noexcept {
+  if (process_group <= 0)
+    return;
+  if (::kill(-process_group, SIGTERM) < 0 && errno != ESRCH)
+    (void)::kill(process_group, SIGTERM);
+  const auto graceful_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (process_group_alive(process_group) && std::chrono::steady_clock::now() < graceful_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (!process_group_alive(process_group))
+    return;
+  if (::kill(-process_group, SIGKILL) < 0 && errno != ESRCH)
+    (void)::kill(process_group, SIGKILL);
+}
 
 std::string option(int argc, char **argv, const std::string &name, std::string fallback = {}) {
   for (int i = 1; i < argc; ++i) {
@@ -102,6 +136,9 @@ public:
     if (pid_ < 0)
       throw std::runtime_error("cannot start OpenCode server");
     if (pid_ == 0) {
+      if (!arm_parent_death_signal())
+        _exit(125);
+      (void)::setpgid(0, 0);
       const auto null = open("/dev/null", O_WRONLY);
       if (null >= 0) {
         dup2(null, STDOUT_FILENO);
@@ -120,6 +157,7 @@ public:
         execvp(executable_.c_str(), argv.data());
       _exit(127);
     }
+    (void)::setpgid(pid_, pid_);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms_);
     while (std::chrono::steady_clock::now() < deadline) {
       int status = 0;
@@ -140,18 +178,11 @@ public:
   void stop() noexcept {
     if (pid_ <= 0)
       return;
-    (void)kill(pid_, SIGTERM);
+    const auto process_group = pid_;
+    terminate_process_group(process_group);
     int status = 0;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while (std::chrono::steady_clock::now() < deadline) {
-      if (waitpid(pid_, &status, WNOHANG) == pid_) {
-        pid_ = -1;
-        return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    (void)kill(pid_, SIGKILL);
-    (void)waitpid(pid_, &status, 0);
+    while (waitpid(pid_, &status, 0) < 0 && errno == EINTR)
+      continue;
     pid_ = -1;
   }
 
@@ -534,6 +565,8 @@ void route_opencode_interaction(OpenCodeServer &server, const Json &event,
 
 int main(int argc, char **argv) {
   try {
+    if (!arm_parent_death_signal())
+      return 125;
     const auto opencode = option(argc, argv, "--opencode", "opencode");
     const auto port = static_cast<unsigned>(std::stoul(option(argc, argv, "--port", "18091")));
     const auto timeout = static_cast<std::uint64_t>(std::stoull(
@@ -575,6 +608,7 @@ int main(int argc, char **argv) {
         continue;
       }
       if (operation == "shutdown") {
+        server.stop();
         response(request, {{"ok", true}, {"state", "Completed"}});
         return 0;
       }

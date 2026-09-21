@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -47,11 +48,40 @@ int remaining_ms(Clock::time_point deadline) {
       std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
   if (remaining.count() <= 0)
     return 0;
-  return static_cast<int>(std::min<std::int64_t>(remaining.count(), 60000));
+  // A bounded poll interval must not shorten the transport's actual request
+  // deadline.  The previous one-minute cap turned a quiet but valid provider
+  // response into a false terminal timeout.
+  return static_cast<int>(std::min<std::int64_t>(
+      remaining.count(), static_cast<std::int64_t>(std::numeric_limits<int>::max())));
 }
 
 bool bounded_text(const std::string &value, std::size_t maximum) {
   return !value.empty() && value.size() <= maximum;
+}
+
+bool process_group_alive(pid_t process_group) noexcept {
+  if (process_group <= 0)
+    return false;
+  if (::kill(-process_group, 0) == 0)
+    return true;
+  return errno == EPERM;
+}
+
+void terminate_process_group(pid_t process_group) noexcept {
+  if (process_group <= 0)
+    return;
+  if (::kill(-process_group, SIGTERM) < 0 && errno != ESRCH)
+    (void)::kill(process_group, SIGTERM);
+  const auto graceful_deadline = Clock::now() + std::chrono::milliseconds(500);
+  while (process_group_alive(process_group) && Clock::now() < graceful_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (!process_group_alive(process_group))
+    return;
+  if (::kill(-process_group, SIGKILL) < 0 && errno != ESRCH)
+    (void)::kill(process_group, SIGKILL);
+  const auto force_deadline = Clock::now() + std::chrono::milliseconds(500);
+  while (process_group_alive(process_group) && Clock::now() < force_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 } // namespace
 
@@ -65,7 +95,9 @@ struct ProcessWorkerTransport::Impl {
     metadata_.local = true;
     metadata_.remote = false;
     metadata_.enabled = true;
+    metadata_.supports_recovery = true;
     metadata_.status = "stopped";
+    publish_metadata_locked();
   }
 
   ~Impl() {
@@ -73,8 +105,8 @@ struct ProcessWorkerTransport::Impl {
   }
 
   WorkerMetadata metadata() const {
-    std::lock_guard lock(mutex);
-    return metadata_;
+    std::lock_guard lock(metadata_mutex);
+    return metadata_snapshot_;
   }
 
   void set_interaction_handler(WorkerInteractionHandler handler) {
@@ -84,10 +116,19 @@ struct ProcessWorkerTransport::Impl {
 
   void start() {
     std::lock_guard lock(mutex);
+    start_locked();
+  }
+
+  void start_locked() {
+    if (pid > 0 && metadata_.healthy)
+      return;
+    if (pid > 0)
+      terminate_locked();
     if (pid > 0)
       return;
     metadata_.status = "starting";
     metadata_.healthy = false;
+    publish_metadata_locked();
     try {
       spawn_locked();
       const auto response =
@@ -110,12 +151,15 @@ struct ProcessWorkerTransport::Impl {
       metadata_.local = true;
       metadata_.remote = false;
       metadata_.enabled = true;
+      metadata_.supports_recovery = true;
       metadata_.healthy = true;
       metadata_.status = "healthy";
+      publish_metadata_locked();
     } catch (...) {
       terminate_locked();
       metadata_.healthy = false;
       metadata_.status = "failed";
+      publish_metadata_locked();
       throw;
     }
   }
@@ -123,6 +167,11 @@ struct ProcessWorkerTransport::Impl {
   WorkerSubmission submit(const WorkerRequest &request) {
     std::lock_guard lock(mutex);
     ensure_started_locked();
+    active_submit.store(true, std::memory_order_release);
+    struct ActiveSubmitGuard {
+      std::atomic<bool> &active;
+      ~ActiveSubmitGuard() { active.store(false, std::memory_order_release); }
+    } active_guard{active_submit};
     Json payload{{"job_id", request.job_id},
                  {"worker_id", request.worker_id},
                  {"capability", request.capability},
@@ -137,8 +186,12 @@ struct ProcessWorkerTransport::Impl {
                  {"output_schema", request.output_schema},
                  {"metadata", request.metadata},
                  {"artifact_ids", request.artifact_ids}};
+    const auto timeout_ms = request.timeout_ms == 0
+                                ? config.request_timeout_ms
+                                : std::min(request.timeout_ms, config.request_timeout_ms);
     return parse_submission_locked(request.job_id,
-                                   request_response_locked("submit", request.job_id, "", payload));
+                                   request_response_locked("submit", request.job_id, "", payload,
+                                                           timeout_ms));
   }
 
   WorkerStatus status(const std::string &external_job_id) {
@@ -152,7 +205,8 @@ struct ProcessWorkerTransport::Impl {
   bool cancel(const std::string &external_job_id) {
     std::lock_guard lock(mutex);
     ensure_started_locked();
-    const auto response = request_response_locked("cancel", "", external_job_id, Json::object());
+    const auto response = request_response_locked("cancel", "", external_job_id, Json::object(),
+                                                  config.request_timeout_ms);
     if (!response.value("ok", false))
       throw WorkerTransportError("Worker cancellation was rejected");
     if (response.contains("acknowledged"))
@@ -160,9 +214,21 @@ struct ProcessWorkerTransport::Impl {
     return response.value("payload", Json::object()).value("acknowledged", false);
   }
 
+  bool cancel_pending(const std::string &) noexcept {
+    if (!active_submit.load(std::memory_order_acquire))
+      return false;
+    const auto process_group = owned_process_group.load(std::memory_order_acquire);
+    if (process_group <= 0)
+      return false;
+    terminate_process_group(process_group);
+    return true;
+  }
+
   void stop() noexcept {
     std::lock_guard lock(mutex);
     if (pid <= 0) {
+      terminate_process_group(owned_process_group.load(std::memory_order_acquire));
+      owned_process_group.store(-1, std::memory_order_release);
       close_fd(input_fd);
       close_fd(output_fd);
       close_fd(error_fd);
@@ -175,23 +241,35 @@ struct ProcessWorkerTransport::Impl {
     terminate_locked();
     metadata_.healthy = false;
     metadata_.status = "stopped";
+    publish_metadata_locked();
   }
 
 private:
   WorkerMetadata metadata_;
+  WorkerMetadata metadata_snapshot_;
   std::string id;
   ProcessWorkerConfig config;
   mutable std::mutex mutex;
+  mutable std::mutex metadata_mutex;
   pid_t pid = -1;
+  std::atomic<pid_t> owned_process_group{-1};
+  std::atomic<bool> active_submit{false};
   int input_fd = -1, output_fd = -1, error_fd = -1;
   std::uint64_t request_number = 0;
   std::string stderr_capture;
   std::string output_buffer;
   WorkerInteractionHandler interaction_handler;
 
+  void publish_metadata_locked() {
+    std::lock_guard lock(metadata_mutex);
+    metadata_snapshot_ = metadata_;
+  }
+
   void ensure_started_locked() {
-    if (pid <= 0 || !metadata_.healthy)
-      throw WorkerTransportError("Worker process is unavailable");
+    if (pid <= 0 || !metadata_.healthy) {
+      start_locked();
+      return;
+    }
     int status = 0;
     if (::waitpid(pid, &status, WNOHANG) == pid) {
       mark_dead_locked();
@@ -323,6 +401,7 @@ private:
     input_fd = child_input[1];
     output_fd = child_output[0];
     error_fd = child_error[0];
+    owned_process_group.store(pid, std::memory_order_release);
     try {
       nonblocking(input_fd);
       nonblocking(output_fd);
@@ -335,19 +414,23 @@ private:
   }
 
   void mark_dead_locked() {
+    terminate_process_group(owned_process_group.load(std::memory_order_acquire));
+    owned_process_group.store(-1, std::memory_order_release);
     pid = -1;
     close_fd(input_fd);
     close_fd(output_fd);
     close_fd(error_fd);
     metadata_.healthy = false;
     metadata_.status = "failed";
+    publish_metadata_locked();
     output_buffer.clear();
   }
 
   void terminate_locked() noexcept {
+    const auto process_group = owned_process_group.load(std::memory_order_acquire);
+    if (process_group > 0)
+      terminate_process_group(process_group);
     if (pid > 0) {
-      if (::kill(-pid, SIGTERM) < 0)
-        (void)::kill(pid, SIGTERM);
       const auto deadline = Clock::now() + std::chrono::milliseconds(500);
       int status = 0;
       while (Clock::now() < deadline) {
@@ -358,12 +441,9 @@ private:
           break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
-      if (::waitpid(pid, &status, WNOHANG) == 0) {
-        if (::kill(-pid, SIGKILL) < 0)
-          (void)::kill(pid, SIGKILL);
-        (void)::waitpid(pid, &status, 0);
-      }
+      (void)::waitpid(pid, &status, 0);
     }
+    owned_process_group.store(-1, std::memory_order_release);
     pid = -1;
     close_fd(input_fd);
     close_fd(output_fd);
@@ -378,7 +458,7 @@ private:
     while (offset < wire.size()) {
       pollfd descriptor{input_fd, POLLOUT, 0};
       if (::poll(&descriptor, 1, remaining_ms(deadline)) <= 0)
-        throw WorkerTransportError("Worker request timed out");
+        throw WorkerTransportError("Worker request timed out", true);
       if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))
         throw WorkerTransportError("Worker process closed its input");
       const auto written = ::write(input_fd, wire.data() + offset, wire.size() - offset);
@@ -425,7 +505,7 @@ private:
       pollfd descriptors[2] = {{output_fd, POLLIN, 0}, {error_fd, POLLIN, 0}};
       const auto count = ::poll(descriptors, error_fd >= 0 ? 2 : 1, remaining_ms(deadline));
       if (count == 0)
-        throw WorkerTransportError("Worker response timed out");
+        throw WorkerTransportError("Worker response timed out", true);
       if (count < 0) {
         if (errno == EINTR)
           continue;
@@ -528,15 +608,17 @@ private:
   }
 
   Json request_response_locked(const std::string &operation, const std::string &job_id,
-                               const std::string &external_job_id, const Json &payload) {
+                               const std::string &external_job_id, const Json &payload,
+                               std::uint64_t timeout_ms) {
     try {
-      return request_locked(operation, job_id, external_job_id, payload, config.request_timeout_ms);
+      return request_locked(operation, job_id, external_job_id, payload, timeout_ms);
     } catch (...) {
       // A protocol or pipe failure makes this child unusable. Never reuse it
       // for an ambiguous external submission.
       terminate_locked();
       metadata_.healthy = false;
       metadata_.status = "failed";
+      publish_metadata_locked();
       throw;
     }
   }
@@ -611,7 +693,8 @@ private:
   WorkerStatus status_operation(const std::string &operation, const std::string &external_job_id) {
     std::lock_guard lock(mutex);
     ensure_started_locked();
-    const auto response = request_response_locked(operation, "", external_job_id, Json::object());
+    const auto response = request_response_locked(operation, "", external_job_id, Json::object(),
+                                                  config.request_timeout_ms);
     try {
       validate_response_metadata(response);
       WorkerStatus result;
@@ -647,6 +730,9 @@ WorkerStatus ProcessWorkerTransport::result(const std::string &external_job_id) 
 }
 bool ProcessWorkerTransport::cancel(const std::string &external_job_id) {
   return impl_->cancel(external_job_id);
+}
+bool ProcessWorkerTransport::cancel_pending(const std::string &job_id) {
+  return impl_->cancel_pending(job_id);
 }
 void ProcessWorkerTransport::start() {
   impl_->start();

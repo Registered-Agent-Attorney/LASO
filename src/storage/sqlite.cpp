@@ -151,6 +151,11 @@ void SQLiteStorage::commit(const std::vector<Record> &records) {
             throw Error(ErrorCode::Storage, "Missing node work state");
           const auto old_work = Json::parse(reinterpret_cast<const char *>(stored)).get<NodeWork>();
           const auto new_work = r.value.get<NodeWork>();
+          if (terminal(old_work.state)) {
+            if (equivalent_terminal_node_work(old_work, new_work))
+              continue;
+            throw Error(ErrorCode::Conflict, "Terminal node work is immutable");
+          }
           if (!valid_node_work_transition(old_work.state, new_work.state))
             throw Error(ErrorCode::Conflict, "Invalid node work state transition");
         }

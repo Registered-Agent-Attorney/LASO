@@ -1,7 +1,9 @@
 // Deterministic app-server-shaped fixture for the optional Codex adapter tests.
 #include <cstdlib>
+#include <chrono>
 #include <iostream>
 #include <laso/core/types.hpp>
+#include <thread>
 
 using namespace laso;
 
@@ -59,6 +61,8 @@ int main(int argc, char **argv) {
       const auto params = request.value("params", Json::object());
       const auto input = params.value("input", Json::array());
       const auto prompt = input.empty() ? std::string{} : input.front().value("text", "");
+      if (mode == "quiet-over-one-minute")
+        std::this_thread::sleep_for(std::chrono::milliseconds(60050));
       if (prompt.find("request-permission") != std::string::npos) {
         send({{"jsonrpc", "2.0"},
               {"id", 99},

@@ -1,4 +1,4 @@
-# Distributed execution (Milestone 2)
+# Distributed execution (Milestones 2 and 3 foundation)
 
 LASO can optionally run more than one service process against the same
 PostgreSQL schema. Enable it explicitly with:
@@ -42,14 +42,32 @@ leases. The existing branch execution path performs input/output schema checks,
 policies, retries, provenance, and attempt persistence; the result is committed
 with the node fence before the controller resumes the join.
 
-Only deterministic local branch paths are distributed today: every node on the
-branch path must be a `function`, `validator`, or `router` until its join. A
-branch containing a tool, model, worker, subpipeline, approval, artifact-local,
-or other side-effecting/session-local node stays in the owning runtime. This
-boundary avoids pretending that a different process can resume a local process
-worker or repeat an external side effect safely. Per-process runtime limits apply
-to local work, while PostgreSQL node slots enforce the configured global and
-per-run limits across instances.
+Deterministic branch paths and explicitly supported worker branches can be
+distributed. A worker branch must contain only one compatible worker identity /
+capability requirement plus deterministic nodes until its join. Tools, models,
+subpipelines, approvals, artifact-local operations, and other side-effecting or
+session-local nodes stay in the owning runtime. This boundary avoids pretending
+that an arbitrary process can resume an external side effect safely.
+
+Each multi-instance service advertises a bounded, opaque capability document in
+`laso_instances`. It contains only a protocol version, supported worker IDs,
+capability labels, cancellation/recovery flags, and the fact that the scoped
+workspace manifest transport is supported. It does not contain hostnames,
+addresses, usernames, executable paths, plugin configuration, or environment
+values. A `NodeWork` record persists its required worker ID/capability, and the
+claiming instance checks its local worker health and capability before taking the
+lease. An unavailable capability therefore remains queued rather than being
+claimed and failed by an incompatible instance.
+
+For supported worker branches, the first M3 workspace transport is an inline,
+bounded manifest. It contains relative paths, byte content, sizes, and SHA-256
+hashes. Staging rejects absolute paths, traversal, duplicate paths, symlinks,
+oversized files, oversized workspaces, and hash mismatches. Staging is created
+under the local LASO data directory using the run/work/attempt identity. The
+provider receives an ephemeral local `project_dir`; that path is not used as
+portable workflow state. Returned workspace content is validated and retained
+as a per-branch manifest in the durable joined message. Larger repositories and
+object-store artifact exchange remain a follow-on transport milestone.
 
 Each claim records a durable work attempt ID. Lease takeover increments the
 claim-attempt counter and assigns a new attempt ID; ordinary node retries retain
@@ -95,8 +113,19 @@ inspection is available at `GET /api/v1/instances` and `laso instance list`.
   records; no arbitrary external source receives an exactly-once guarantee.
 - Native plugins and external workers remain privileged integrations and must
   still obey the existing policy, timeout, cancellation, and cleanup contracts.
-- Local filesystem artifacts and local workspaces are not replicated by this
-  feature. Distributed branch paths carry structured messages through durable
-  PostgreSQL records; adapters requiring host-local state remain owner-local.
+- SQLite remains single-instance and rejects `execution_mode: multi_instance`;
+  it is not a distributed conformance substitute.
+- Worker execution is at-least-once in the presence of lease expiry. A single
+  fenced completion may become authoritative, but LASO does not claim exactly
+  once execution or exactly-once external effects. Equivalent terminal
+  completion replay is harmless; a conflicting terminal replay is rejected.
+- A worker that loses its lease may continue running physically. Its later
+  completion cannot pass the PostgreSQL owner/fence predicate. A future worker
+  protocol must add explicit remote cancellation and lease-loss signalling; the
+  control plane cannot claim provider termination merely because a cancellation
+  request was recorded.
+- The inline manifest is a bounded first transport, not an unrestricted remote
+  filesystem. Credentials and arbitrary environment variables are never part of
+  the manifest or capability advertisement.
 - Do not use a mutable `latest` pipeline identity for historical work; pipeline
   revisions remain immutable `name@version` records.

@@ -76,6 +76,12 @@ WorkerJob WorkerManager::job(const std::string &id) const {
   return storage_.get(RecordKind::WorkerJob, id).get<WorkerJob>();
 }
 
+std::string WorkerManager::job_id_for(const std::string &idempotency_key) const {
+  if (idempotency_key.empty() || idempotency_key.size() > 512)
+    throw Error(ErrorCode::Validation, "Invalid worker idempotency key");
+  return durable_job_id(idempotency_key);
+}
+
 WorkerJob WorkerManager::refresh(const std::string &id) {
   auto value = job(id);
   if (worker_job_terminal(value.state) || value.external_job_id.empty())
@@ -97,6 +103,46 @@ Json WorkerManager::workers() const {
 
 Json WorkerManager::worker(const std::string &id) const {
   return registry_.get(id)->metadata();
+}
+
+bool WorkerManager::can_execute(const std::string &worker_id, const std::string &capability) const {
+  if (worker_id.empty() && capability.empty())
+    return true;
+  for (const auto &candidate : registry_.names()) {
+    if (!worker_id.empty() && candidate != worker_id)
+      continue;
+    const auto metadata = registry_.get(candidate)->metadata();
+    const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+    if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
+        (metadata.status != "healthy" && !recoverable))
+      continue;
+    if (!capability.empty() &&
+        std::find(metadata.capabilities.begin(), metadata.capabilities.end(), capability) ==
+            metadata.capabilities.end())
+      continue;
+    return true;
+  }
+  return false;
+}
+
+Json WorkerManager::distributed_capabilities() const {
+  Json result{{"protocol_version", 1}, {"workloads", Json::array()}};
+  for (const auto &candidate : registry_.names()) {
+    const auto metadata = registry_.get(candidate)->metadata();
+    const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+    if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
+        (metadata.status != "healthy" && !recoverable))
+      continue;
+    result["workloads"].push_back(
+        {{"worker_id", metadata.id},
+         {"capabilities", metadata.capabilities},
+         {"supports_recovery", metadata.supports_recovery},
+         {"supports_cancellation", metadata.supports_cancellation},
+         {"workspace_transport", true}});
+  }
+  if (result.dump().size() > 4096)
+    throw Error(ErrorCode::Configuration, "Worker capability advertisement is too large");
+  return result;
 }
 
 std::string WorkerManager::resolve_worker(const std::string &worker_id,
@@ -254,7 +300,36 @@ void WorkerManager::persist(WorkerJob &value) {
   storage_.commit({{RecordKind::WorkerJob, value.id, value.run_id, Json(value)}});
 }
 
+void WorkerManager::retire_superseded_distributed_jobs_locked() {
+  for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
+    auto value = record.get<WorkerJob>();
+    if (worker_job_terminal(value.state))
+      continue;
+    const auto work_id = value.request_metadata.value("node_work_id", std::string{});
+    const auto attempt_id = value.request_metadata.value("node_work_attempt_id", std::string{});
+    if (work_id.empty() || attempt_id.empty())
+      continue;
+    try {
+      const auto work = storage_.get(RecordKind::NodeWork, work_id).get<NodeWork>();
+      if (work.state == NodeWorkState::Running && work.attempt_id == attempt_id)
+        continue;
+      value.state = WorkerJobState::Failed;
+      value.failure_kind = WorkerFailureKind::Transport;
+      value.error = "Worker attempt was superseded or lost its node lease";
+      value.completed_at = timestamp();
+      persist(value);
+    } catch (const Error &) {
+      // A concurrently recovered node may disappear between the list and the
+      // lookup.  Leave that job for the normal durable recovery path.
+    }
+  }
+}
+
 WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
+  // An asynchronous submission remains in Submitting until the provider
+  // handle is available.  Do not call adapter->status() with an empty handle:
+  // process-backed transports serialize status with submit, so doing so would
+  // block the runtime/lease loop behind provider startup or execution.
   if (worker_job_terminal(value.state) || value.external_job_id.empty())
     return value;
   auto adapter = registry_.get(value.worker_id);
@@ -355,9 +430,22 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
       return *existing;
   }
 
-  const auto metadata = adapter->metadata();
-  if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "failed" ||
-      metadata.status == "unavailable")
+  auto metadata = adapter->metadata();
+  if (metadata.supports_recovery && !metadata.healthy && metadata.status != "disabled" &&
+      metadata.status != "unavailable") {
+    try {
+      // A supervised transport may have torn down its process group while a
+      // previous submission was timing out.  Re-establish ownership before
+      // checking availability for a retry; start() is serialized by the
+      // transport and is idempotent for healthy adapters.
+      adapter->start();
+      metadata = adapter->metadata();
+    } catch (...) {
+    }
+  }
+  const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+  if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "unavailable" ||
+      (!metadata.healthy && !recoverable))
     throw Error(ErrorCode::Capacity, "Worker is unavailable");
 
   if (existing.has_value()) {
@@ -405,14 +493,29 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
       persist(*existing);
       return *existing;
     } catch (const WorkerTransportError &error) {
-      std::lock_guard state_lock(state_mutex_);
-      existing = job(durable_id);
-      if (!worker_job_terminal(existing->state)) {
-        existing->state = WorkerJobState::Failed;
-        existing->failure_kind = WorkerFailureKind::Transport;
-        existing->error = bounded_error(error.what());
-        existing->completed_at = timestamp();
-        persist(*existing);
+      {
+        std::lock_guard state_lock(state_mutex_);
+        existing = job(durable_id);
+        if (!worker_job_terminal(existing->state)) {
+          if (!existing->cancellation_requested) {
+            existing->state = error.timed_out ? WorkerJobState::TimedOut : WorkerJobState::Failed;
+            existing->failure_kind = WorkerFailureKind::Transport;
+            existing->error = bounded_error(error.what());
+            existing->completed_at = timestamp();
+            persist(*existing);
+          }
+        }
+      }
+      if (existing->cancellation_requested && !worker_job_terminal(existing->state)) {
+        std::unique_lock wait_lock(state_mutex_);
+        state_changed_.wait_for(wait_lock, std::chrono::seconds(1), [&] {
+          try {
+            *existing = job(durable_id);
+            return worker_job_terminal(existing->state);
+          } catch (...) {
+            return false;
+          }
+        });
       }
       return *existing;
     } catch (...) {
@@ -432,6 +535,7 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
   WorkerJob created;
   {
     std::lock_guard state_lock(state_mutex_);
+    retire_superseded_distributed_jobs_locked();
     std::size_t active = 0, worker_active = 0;
     for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
       const auto stored = record.get<WorkerJob>();
@@ -456,8 +560,11 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
                                 {"capability", request.capability},
                                 {"deadline", request.deadline},
                                 {"artifact_ids", request.artifact_ids}};
-    if (request.metadata.is_object() && request.metadata.contains("classification"))
-      created.request_metadata["classification"] = request.metadata.at("classification");
+    if (request.metadata.is_object()) {
+      for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id"})
+        if (request.metadata.contains(key))
+          created.request_metadata[key] = request.metadata.at(key);
+    }
     if (!storage_.claim({RecordKind::WorkerJob, created.id, created.run_id, Json(created)}))
       return job(durable_id);
     created.state = WorkerJobState::Submitting;
@@ -499,18 +606,40 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
     }
     persist(created);
   } catch (const WorkerTransportError &error) {
-    std::lock_guard state_lock(state_mutex_);
-    created = job(created.id);
-    if (!worker_job_terminal(created.state)) {
-      created.state = WorkerJobState::Failed;
-      created.failure_kind = WorkerFailureKind::Transport;
-      created.error = bounded_error(error.what());
-      created.completed_at = timestamp();
-      log_diagnostic("worker.transport_failed",
-                     {{"worker_job_id", created.id}, {"worker_id", created.worker_id}});
-      persist(created);
+    {
+      std::lock_guard state_lock(state_mutex_);
+      created = job(created.id);
+      if (!worker_job_terminal(created.state)) {
+        if (!created.cancellation_requested) {
+          created.state = error.timed_out ? WorkerJobState::TimedOut : WorkerJobState::Failed;
+          created.failure_kind = WorkerFailureKind::Transport;
+          created.error = bounded_error(error.what());
+          created.completed_at = timestamp();
+          log_diagnostic("worker.transport_failed",
+                         {{"worker_job_id", created.id}, {"worker_id", created.worker_id}});
+          persist(created);
+        }
+      }
+    }
+    if (created.cancellation_requested && !worker_job_terminal(created.state)) {
+      std::unique_lock wait_lock(state_mutex_);
+      state_changed_.wait_for(wait_lock, std::chrono::seconds(1), [&] {
+        try {
+          created = job(created.id);
+          return worker_job_terminal(created.state);
+        } catch (...) {
+          return false;
+        }
+      });
     }
   } catch (const Error &error) {
+    if (error.code == ErrorCode::Storage) {
+      // Leave the durable submission recoverable. The runtime lease/recovery
+      // path will fence this attempt if the outage outlives its lease.
+      log_diagnostic("worker.submission_deferred_after_storage_error",
+                     {{"worker_job_id", created.id}, {"worker_id", created.worker_id}});
+      throw;
+    }
     std::lock_guard state_lock(state_mutex_);
     created = job(created.id);
     if (!worker_job_terminal(created.state)) {
@@ -540,10 +669,140 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
   return job(created.id);
 }
 
+WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
+  if (stopped_)
+    throw Error(ErrorCode::Conflict, "Worker manager is stopped");
+  if (request.idempotency_key.empty() || request.idempotency_key.size() > 512 ||
+      request.task_type.size() > 128 || request.capability.size() > 128 ||
+      request.instructions.size() > max_result_bytes ||
+      request.input.dump().size() > max_result_bytes ||
+      request.metadata.dump().size() > max_metadata_bytes ||
+      request.artifact_ids.size() > max_artifacts_)
+    throw Error(ErrorCode::Validation, "Worker request exceeds limit");
+  for (const auto &artifact : request.artifact_ids)
+    if (!bounded_identifier(artifact, 128))
+      throw Error(ErrorCode::Validation, "Invalid worker artifact reference");
+
+  std::lock_guard submit_lock(submit_mutex_);
+  const auto worker_id = resolve_worker(request.worker_id, request.capability);
+  const auto adapter = registry_.get(worker_id);
+  auto metadata = adapter->metadata();
+  if (metadata.supports_recovery && !metadata.healthy && metadata.status != "disabled" &&
+      metadata.status != "unavailable") {
+    try {
+      adapter->start();
+      metadata = adapter->metadata();
+    } catch (...) {
+    }
+  }
+  const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+  if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "unavailable" ||
+      (!metadata.healthy && !recoverable))
+    throw Error(ErrorCode::Capacity, "Worker is unavailable");
+
+  const auto durable_id = durable_job_id(request.idempotency_key);
+  WorkerJob created;
+  {
+    std::lock_guard state_lock(state_mutex_);
+    retire_superseded_distributed_jobs_locked();
+    try {
+      created = job(durable_id);
+      if (created.idempotency_key != request.idempotency_key)
+        throw Error(ErrorCode::Conflict, "Worker idempotency key collision");
+      if (created.worker_id != worker_id)
+        throw Error(ErrorCode::Conflict, "Worker idempotency key belongs to another worker");
+      if (worker_job_terminal(created.state) || !created.external_job_id.empty())
+        return created;
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::NotFound)
+        throw;
+      std::size_t active = 0, worker_active = 0;
+      for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
+        const auto stored = record.get<WorkerJob>();
+        if (worker_job_terminal(stored.state))
+          continue;
+        ++active;
+        if (stored.worker_id == worker_id)
+          ++worker_active;
+      }
+      if (active >= max_active_)
+        throw Error(ErrorCode::Capacity, "Worker job capacity is exhausted");
+      if (worker_active >= max_per_worker_)
+        throw Error(ErrorCode::Capacity, "Worker-specific job capacity is exhausted");
+
+      created.id = durable_id;
+      created.worker_id = worker_id;
+      created.run_id = request.run_id;
+      created.node_id = request.node_id;
+      created.attempt = request.attempt;
+      created.idempotency_key = request.idempotency_key;
+      created.request_metadata = {{"task_type", request.task_type},
+                                  {"capability", request.capability},
+                                  {"deadline", request.deadline},
+                                  {"artifact_ids", request.artifact_ids}};
+      if (request.metadata.is_object()) {
+        for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id"})
+          if (request.metadata.contains(key))
+            created.request_metadata[key] = request.metadata.at(key);
+      }
+      if (!storage_.claim({RecordKind::WorkerJob, created.id, created.run_id, Json(created)}))
+        return job(durable_id);
+      created.state = WorkerJobState::Submitting;
+      persist(created);
+    }
+  }
+
+  {
+    std::lock_guard async_lock(async_mutex_);
+    if (!async_submissions_.insert(created.id).second)
+      return created;
+    async_threads_.emplace_back([this, request, id = created.id](std::stop_token) {
+      try {
+        (void)submit(request);
+      } catch (const Error &error) {
+        if (error.code == ErrorCode::Storage) {
+          log_diagnostic("worker.submission_deferred_after_storage_error",
+                         {{"worker_job_id", id}, {"worker_id", request.worker_id}});
+        } else {
+        try {
+          std::lock_guard state_lock(state_mutex_);
+          auto failed = job(id);
+          if (!worker_job_terminal(failed.state)) {
+            failed.state = WorkerJobState::Failed;
+            failed.failure_kind = WorkerFailureKind::Job;
+            failed.error = bounded_error(error.what());
+            failed.completed_at = timestamp();
+            persist(failed);
+          }
+        } catch (...) {
+        }
+        }
+      } catch (...) {
+        try {
+          std::lock_guard state_lock(state_mutex_);
+          auto failed = job(id);
+          if (!worker_job_terminal(failed.state)) {
+            failed.state = WorkerJobState::Failed;
+            failed.failure_kind = WorkerFailureKind::Job;
+            failed.error = "Worker submission failed";
+            failed.completed_at = timestamp();
+            persist(failed);
+          }
+        } catch (...) {
+        }
+      }
+      std::lock_guard async_lock(async_mutex_);
+      async_submissions_.erase(id);
+    });
+  }
+  return created;
+}
+
 void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state,
                            const std::string &reason) {
   std::string worker_id;
   std::string external_job_id;
+  bool pending_submission = false;
   {
     std::lock_guard state_lock(state_mutex_);
     auto value = job(id);
@@ -552,24 +811,42 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
     value.cancellation_requested = true;
     value.cancellation_error = bounded_error(reason);
     if (value.external_job_id.empty()) {
-      if (requested_state == WorkerJobState::TimedOut) {
-        value.state = WorkerJobState::TimedOut;
-        value.completed_at = timestamp();
-      }
+      pending_submission = true;
+      worker_id = value.worker_id;
       persist(value);
-      return;
+    } else {
+      worker_id = value.worker_id;
+      external_job_id = value.external_job_id;
+      persist(value);
     }
-    worker_id = value.worker_id;
-    external_job_id = value.external_job_id;
-    persist(value);
   }
 
   bool acknowledged = false;
   std::string cancellation_error;
   try {
-    acknowledged = registry_.get(worker_id)->cancel(external_job_id);
+    const auto adapter = registry_.get(worker_id);
+    if (pending_submission) {
+      acknowledged = adapter->cancel_pending(id);
+      if (acknowledged) {
+        // cancel_pending may terminate a process group while the transport's
+        // submit call still owns its mutex.  Restarting inline would block the
+        // LASO execution/lease loop behind that in-flight call.  Queue the
+        // bounded restart instead; the next submission also performs the
+        // normal transport health check before it uses the adapter.
+        std::lock_guard async_lock(async_mutex_);
+        async_threads_.emplace_back([adapter](std::stop_token) {
+          try {
+            adapter->start();
+          } catch (...) {
+          }
+        });
+      }
+    } else {
+      acknowledged = adapter->cancel(external_job_id);
+    }
   } catch (...) {
-    cancellation_error = "Worker cancellation failed";
+    cancellation_error = pending_submission ? "Worker pending cancellation failed"
+                                             : "Worker cancellation failed";
   }
 
   std::lock_guard state_lock(state_mutex_);
@@ -593,8 +870,15 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
   }
   interaction_changed_.notify_all();
   if (requested_state == WorkerJobState::TimedOut) {
-    value.state = WorkerJobState::TimedOut;
-    value.completed_at = timestamp();
+    if (acknowledged) {
+      value.cancellation_acknowledged = true;
+      value.state = WorkerJobState::TimedOut;
+      value.completed_at = timestamp();
+    } else {
+      value.cancellation_error = cancellation_error.empty()
+                                     ? "Worker did not acknowledge timeout cancellation"
+                                     : cancellation_error;
+    }
   } else if (acknowledged) {
     value.cancellation_acknowledged = true;
     value.state = WorkerJobState::Cancelled;
@@ -604,6 +888,7 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
         cancellation_error.empty() ? "Worker did not acknowledge cancellation" : cancellation_error;
   }
   persist(value);
+  state_changed_.notify_all();
 }
 
 namespace {

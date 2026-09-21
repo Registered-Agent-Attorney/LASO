@@ -6,6 +6,7 @@
 #include <laso/schema/validator.hpp>
 #include <laso/storage/coordination.hpp>
 #include <laso/storage/storage.hpp>
+#include <laso/runtime/workspace.hpp>
 #include <laso/workers/manager.hpp>
 #include <memory>
 #include <mutex>
@@ -25,6 +26,7 @@ struct RuntimeDependencies {
   std::function<PipelineDefinition(const std::string &)> resolve_pipeline;
   Coordination *coordination = nullptr;
   std::string instance_id;
+  std::filesystem::path workspace_root;
 };
 class Runtime {
 public:
@@ -70,6 +72,8 @@ private:
   std::shared_ptr<asio::steady_timer> claim_timer_, lease_timer_;
   Task<void> claim_loop();
   Task<void> lease_loop();
+  Task<void> supervise_claim_loop();
+  Task<void> supervise_lease_loop();
   Task<void> execute_distributed_work(NodeWork work, LeaseRecord work_lease,
                                       std::optional<LeaseRecord> global_slot,
                                       std::optional<LeaseRecord> run_slot, std::stop_token stop);
@@ -90,6 +94,7 @@ private:
   bool approved(const Run &) const;
   void wait_approval(Run &, const NodeDefinition &, const std::string &reason);
   void reconcile_distributed_parallel(Run &, const PipelineDefinition &);
+  void reconcile_terminal_worker(const NodeWork &, const LeaseRecord &);
   bool distributed_parallel_ready(const Run &) const;
   void commit_node_owned(const std::vector<Record> &, const NodeWork &, const LeaseRecord &);
   bool advance(Run &, const PipelineDefinition &, const NodeDefinition &,

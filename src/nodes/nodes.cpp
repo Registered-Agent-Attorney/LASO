@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <laso/core/config.hpp>
 #include <laso/nodes/node.hpp>
 
 namespace laso {
@@ -41,19 +43,35 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
   request.task_type = task_type_;
   request.instructions = instructions_;
   request.idempotency_key = c.run_id + ":" + c.node_id + ":" + std::to_string(c.attempt);
+  if (!c.distributed_attempt_id.empty())
+    request.idempotency_key += ":" + c.distributed_attempt_id;
   request.deadline = timestamp();
   request.run_id = c.run_id;
   request.node_id = c.node_id;
   request.attempt = c.attempt;
+  const auto remaining =
+      std::chrono::duration_cast<Milliseconds>(c.deadline - std::chrono::steady_clock::now());
+  request.timeout_ms = static_cast<std::uint64_t>(std::max<std::int64_t>(remaining.count(), 1));
   request.input = input.payload;
   request.output_schema =
       output_schema_.empty() ? Json::object() : Json{{"reference", output_schema_}};
   request.metadata = input.metadata;
+  if (!c.distributed_work_id.empty())
+    request.metadata["node_work_id"] = c.distributed_work_id;
+  if (!c.distributed_attempt_id.empty())
+    request.metadata["node_work_attempt_id"] = c.distributed_attempt_id;
   WorkerJob current;
   try {
-    current = manager_->submit(request);
+    // Process-backed workers may block while their provider obtains an
+    // external handle.  Keep that wait off the LASO execution/lease loop so
+    // cancellation, renewal, and ownership fencing remain live.  The
+    // durable id is known before submission, which also lets cancellation
+    // interrupt an in-flight local process-group submission.
+    current.id = manager_->job_id_for(request.idempotency_key);
+    current = manager_->submit_async(request);
+    if (c.worker_job_started)
+      c.worker_job_started(current.id);
     for (;;) {
-      c.check();
       current = manager_->refresh(current.id);
       if (current.state == WorkerJobState::Completed) {
         auto message = input;
@@ -71,16 +89,28 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
         co_return NodeResult{std::move(message), {}};
       }
       if (current.state == WorkerJobState::Failed)
+        log_diagnostic("worker.node_terminal", {{"worker_job_id", current.id},
+                                                 {"state", current.state},
+                                                 {"worker_id", current.worker_id}});
+      if (current.state == WorkerJobState::Failed)
         throw Error(ErrorCode::Execution,
                     current.error.empty() ? "Worker job failed" : current.error,
                     {{"worker_job_id", current.id},
                      {"worker_id", current.worker_id},
                      {"external_job_id", current.external_job_id}});
       if (current.state == WorkerJobState::Cancelled)
+        log_diagnostic("worker.node_terminal", {{"worker_job_id", current.id},
+                                                 {"state", current.state},
+                                                 {"worker_id", current.worker_id}});
+      if (current.state == WorkerJobState::Cancelled)
         throw Error(ErrorCode::Cancellation, "Worker job was cancelled",
                     {{"worker_job_id", current.id},
                      {"worker_id", current.worker_id},
                      {"external_job_id", current.external_job_id}});
+      if (current.state == WorkerJobState::TimedOut)
+        log_diagnostic("worker.node_terminal", {{"worker_job_id", current.id},
+                                                 {"state", current.state},
+                                                 {"worker_id", current.worker_id}});
       if (current.state == WorkerJobState::TimedOut)
         throw Error(ErrorCode::Timeout, "Worker job exceeded its deadline",
                     {{"worker_job_id", current.id},
@@ -91,17 +121,25 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
                     {{"worker_job_id", current.id},
                      {"worker_id", current.worker_id},
                      {"external_job_id", current.external_job_id}});
+      c.check();
       co_await c.delay(Milliseconds{10});
     }
   } catch (const Error &error) {
+    log_diagnostic("worker.node_error", {{"worker_job_id", current.id},
+                                          {"error_code", error.code},
+                                          {"worker_id", current.worker_id}});
     if (error.code == ErrorCode::Cancellation || error.code == ErrorCode::Timeout) {
       try {
         if (!current.id.empty())
           manager_->cancel(current.id,
-                           error.code == ErrorCode::Timeout ? WorkerJobState::TimedOut
-                                                            : WorkerJobState::Cancelled,
+                            error.code == ErrorCode::Timeout ? WorkerJobState::TimedOut
+                                                             : WorkerJobState::Cancelled,
                            error.what());
+        log_diagnostic("worker.node_cancellation_processed",
+                       {{"worker_job_id", current.id}, {"worker_id", current.worker_id}});
       } catch (...) { // NOLINT(bugprone-empty-catch): preserve the original cancellation error.
+        log_diagnostic("worker.node_cancellation_failed",
+                       {{"worker_job_id", current.id}, {"worker_id", current.worker_id}});
       }
     }
     throw;

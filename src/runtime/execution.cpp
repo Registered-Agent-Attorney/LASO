@@ -4,6 +4,49 @@
 
 namespace laso {
 namespace {
+bool worker_requirement(const PipelineDefinition &pipeline, const ExecutionToken &token,
+                        std::string &worker_id, std::string &capability) {
+  std::vector<std::string> pending{token.node_id};
+  std::set<std::string> visited;
+  bool found = false;
+  while (!pending.empty()) {
+    const auto node_id = std::move(pending.back());
+    pending.pop_back();
+    if (!visited.insert(node_id).second)
+      continue;
+    const auto &node = pipeline.nodes.at(node_id);
+    if (node.type == "join")
+      continue;
+    if (node.type == "worker") {
+      if (found && (worker_id != node.binding || capability != node.capability))
+        return false;
+      worker_id = node.binding;
+      capability = node.capability;
+      found = true;
+    }
+    for (const auto &edge : pipeline.edges)
+      if (edge.from == node_id)
+        pending.push_back(edge.to);
+  }
+  return true;
+}
+
+void remove_ephemeral_workspace_paths(Json &value) {
+  if (value.is_array()) {
+    for (auto &item : value)
+      remove_ephemeral_workspace_paths(item);
+    return;
+  }
+  if (!value.is_object())
+    return;
+  for (const auto &key : {"project_dir", "workspace_path", "cwd"})
+    value.erase(key);
+  for (auto &[key, item] : value.items()) {
+    (void)key;
+    remove_ephemeral_workspace_paths(item);
+  }
+}
+
 std::string validation_detail(const Error &error) {
   if (error.code != ErrorCode::Validation || !error.details.is_object())
     return {};
@@ -97,6 +140,8 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
       }
       ExecutionContext context{branch.id, branch.pipeline_id, definition.id,
                                state->stop.get_token(), pipeline_deadline};
+      context.distributed_work_id = work_id;
+      context.distributed_attempt_id = work_attempt_id;
       context.check();
       const auto policy = permission(definition, branch);
       if (policy.decision == PolicyDecision::Deny)
@@ -133,6 +178,10 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           attempt.id = work_attempt_id;
         attempt.attempt = attempt_number;
         persist({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
+        context.worker_job_started = [&](const std::string &worker_job_id) {
+          attempt.worker_job_id = worker_job_id;
+          persist({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
+        };
         try {
           NodeResult result;
           if (definition.type == "subpipeline") {
@@ -221,7 +270,7 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                   .count();
           persist({{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)}});
-          if (attempt.state == NodeState::Cancelled || attempt.state == NodeState::TimedOut ||
+          if (attempt.state == NodeState::Cancelled ||
               attempt_number == definition.retry.max_attempts)
             throw;
           retry = true;
@@ -275,7 +324,19 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
     auto branch_state = std::make_shared<ParallelState>(1, work.steps);
     auto run_nodes = std::make_shared<AsyncLimiter>(config_.max_nodes_per_run);
     std::stop_callback parent_stop(stop, [branch_state] { branch_state->stop.request_stop(); });
-    co_await execute_branch(pipeline, std::move(work.token), branch_state, run_nodes,
+    auto token = std::move(work.token);
+    std::optional<std::filesystem::path> staged_workspace;
+    if (!work.required_worker_id.empty() || !work.required_capability.empty()) {
+      token.message.metadata.erase("project_dir");
+      if (token.message.metadata.contains("workspace_manifest")) {
+        staged_workspace = stage_workspace(token.message.metadata.at("workspace_manifest"),
+                                           deps_.workspace_root, work.run_id, work.id,
+                                           work.attempt_id);
+        token.message.metadata.erase("workspace_manifest");
+        token.message.metadata["project_dir"] = staged_workspace->string();
+      }
+    }
+    co_await execute_branch(pipeline, std::move(token), branch_state, run_nodes,
                             std::chrono::steady_clock::now() + pipeline.timeout.timeout,
                             run.subpipeline_depth, work_lease, work.id, work.attempt_id);
     NodeWork completed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
@@ -297,6 +358,11 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
       completed.result = *branch_state->outputs.front();
       completed.steps = branch_state->steps;
     }
+    if (staged_workspace)
+      completed.result->metadata["workspace_result_manifest"] =
+          workspace_manifest(*staged_workspace);
+    if (!work.required_worker_id.empty() || !work.required_capability.empty())
+      remove_ephemeral_workspace_paths(completed.result->metadata);
     completed.state = NodeWorkState::Completed;
     completed.owner_instance_id = work_lease.owner_instance;
     completed.fencing_token = work_lease.fencing_token;
@@ -305,6 +371,20 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
     commit_node_owned({{RecordKind::NodeWork, completed.id, completed.run_id, Json(completed)}},
                       completed, work_lease);
   } catch (const Error &error) {
+    if (error.code == ErrorCode::Storage) {
+      // A transient database failure is not a provider or workload failure.
+      // Leave the durable NodeWork attempt recoverable; the lease loop and a
+      // replacement owner will reconcile it after the current fence expires.
+      log_diagnostic("runtime.distributed_node_deferred_after_storage_error",
+                     { {"node_work_id", work.id},
+                       {"fencing_token", work_lease.fencing_token} });
+      co_return;
+    }
+    if (error.code == ErrorCode::Conflict)
+      log_diagnostic("runtime.distributed_node_commit_rejected",
+                     {{"node_work_id", work.id},
+                      {"fencing_token", work_lease.fencing_token},
+                      {"owner_instance", work_lease.owner_instance}});
     try {
       auto failed = deps_.storage.get(RecordKind::NodeWork, work.id).get<NodeWork>();
       failed.state =
@@ -352,7 +432,8 @@ Task<bool> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipelin
       const auto &node = pipeline.nodes.at(node_id);
       if (node.type == "join")
         continue;
-      if (node.type != "function" && node.type != "validator" && node.type != "router")
+      if (node.type != "function" && node.type != "validator" && node.type != "router" &&
+          node.type != "worker")
         return false;
       for (const auto &edge : pipeline.edges)
         if (edge.from == node_id)
@@ -375,6 +456,10 @@ Task<bool> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipelin
       work.index = static_cast<unsigned>(index);
       work.token = std::move(tokens[index]);
       work.steps = run.steps;
+      if (!worker_requirement(pipeline, work.token, work.required_worker_id,
+                              work.required_capability))
+        throw Error(ErrorCode::Execution,
+                    "Distributed branch requires incompatible worker capabilities");
       records.push_back({RecordKind::NodeWork, work.id, run.id, Json(work)});
     }
     run.pending_parallel_group = group;

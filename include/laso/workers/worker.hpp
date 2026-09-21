@@ -52,7 +52,9 @@ void from_json(const Json &, WorkerUsage &);
 
 class WorkerTransportError : public Error {
 public:
-  explicit WorkerTransportError(const std::string &message) : Error(ErrorCode::Plugin, message) {}
+  explicit WorkerTransportError(const std::string &message, bool timed_out = false)
+      : Error(ErrorCode::Plugin, message), timed_out(timed_out) {}
+  bool timed_out = false;
 };
 
 struct WorkerMetadata {
@@ -69,6 +71,7 @@ struct WorkerRequest {
   std::string job_id, worker_id, capability, task_type, instructions, idempotency_key, deadline,
       run_id, node_id;
   unsigned attempt = 1;
+  std::uint64_t timeout_ms = 0;
   Json input = Json::object(), output_schema = Json::object(), metadata = Json::object();
   std::vector<std::string> artifact_ids;
 };
@@ -165,6 +168,11 @@ public:
   virtual WorkerStatus status(const std::string &external_job_id) = 0;
   virtual WorkerStatus result(const std::string &external_job_id) = 0;
   virtual bool cancel(const std::string &external_job_id) = 0;
+  // A submission may still be synchronously waiting for its first external
+  // handle.  Local process transports can terminate that owned invocation;
+  // transports without this capability leave the request pending so the
+  // eventual provider outcome remains authoritative.
+  virtual bool cancel_pending(const std::string &) { return false; }
   // Optional for native adapters. Process transports use it to route bounded
   // worker-originated approval/permission/question requests to LASO.
   virtual void set_interaction_handler(WorkerInteractionHandler) {}
