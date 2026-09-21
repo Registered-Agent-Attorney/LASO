@@ -51,8 +51,11 @@ Service::Service(asio::io_context &io, Config config)
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
                config_.max_pending_scheduler_launches, 32),
+      worker_manager_(std::make_shared<WorkerManager>(*storage_, worker_registry_,
+                                                      config_.max_worker_jobs,
+                                                      config_.max_worker_jobs_per_worker)),
       plugins_(
-          tools_, providers_,
+          tools_, providers_, worker_registry_,
           [this](const std::string &source, const std::string &plugin, const std::string &component,
                  const std::string &schema, const std::string &event_json) {
             return ingress_.submit(source, plugin, component, schema, event_json);
@@ -71,6 +74,7 @@ Service::Service(asio::io_context &io, Config config)
           }),
       runtime_(io, config_,
                {*storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
+                worker_manager_,
                 [this](const std::string &reference) { return resolve_pipeline(reference); }}),
       artifacts_(config_.data_dir / "artifacts", *storage_),
       scheduler_(
@@ -96,14 +100,19 @@ Service::Service(asio::io_context &io, Config config)
                    std::make_shared<LocalOpenAICompatibleProvider>(config_.local_openai_endpoint));
   tools_.add("echo", std::make_shared<EchoTool>());
   register_functions(functions_);
-  plugins_.discover(config_.plugin_dirs, config_.event_sources);
+  plugins_.discover(config_.plugin_dirs, config_.event_sources, config_.worker_plugins);
   for (const auto &source : plugins_.event_sources())
     if (!source.value("event_schema", std::string{}).empty())
       schemas_.validate_declaration(source.at("event_schema").get<std::string>());
+  for (const auto &worker : plugins_.workers())
+    if (!worker.value("event_schema", std::string{}).empty())
+      schemas_.validate_declaration(worker.at("event_schema").get<std::string>());
   recover_history();
+  events_.subscribe(worker_manager_);
   events_.subscribe(scheduler_.event_subscriber());
   scheduler_.start();
   plugins_.start_event_sources();
+  plugins_.start_workers();
 }
 Service::~Service() noexcept {
   shutdown();
@@ -421,6 +430,22 @@ Json Service::event_source(const std::string &id) const {
 void Service::set_event_source_enabled(const std::string &id, bool enabled) {
   plugins_.set_event_source_enabled(id, enabled);
 }
+Json Service::workers() const {
+  return plugins_.workers();
+}
+Json Service::worker(const std::string &id) const {
+  return plugins_.worker(id);
+}
+std::vector<Json> Service::worker_jobs(const std::string &run_id, std::size_t limit,
+                                       std::size_t offset) const {
+  return worker_manager_->jobs(run_id, limit, offset);
+}
+Json Service::worker_job(const std::string &id) const {
+  return Json(worker_manager_->job(id));
+}
+void Service::cancel_worker_job(const std::string &id) {
+  worker_manager_->cancel(id, WorkerJobState::Cancelled, "Cancellation requested by operator");
+}
 Json Service::pipeline_record(const std::string &reference) const {
   const auto parsed = parse_pipeline_reference(reference);
   if (parsed.explicit_version) {
@@ -527,8 +552,10 @@ void Service::shutdown() {
   shutdown_ = true;
   ingress_.stop();
   plugins_.stop_event_sources();
+  worker_manager_->stop();
   scheduler_.stop();
   runtime_.shutdown();
+  plugins_.stop_workers();
 }
 void Service::recover_history() {
   for (std::size_t offset = 0;; offset += 1000) {

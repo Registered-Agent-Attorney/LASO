@@ -5,6 +5,7 @@
 #include <laso/nodes/node.hpp>
 #include <laso/schema/validator.hpp>
 #include <laso/storage/storage.hpp>
+#include <laso/workers/manager.hpp>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -19,6 +20,7 @@ struct RuntimeDependencies {
   NodeRegistry &nodes;
   Policy &policy;
   SchemaValidator &schemas;
+  std::shared_ptr<WorkerManager> workers;
   std::function<PipelineDefinition(const std::string &)> resolve_pipeline;
 };
 class Runtime {
@@ -53,7 +55,7 @@ private:
   Task<void> execute_parallel(Run &, const PipelineDefinition &, std::shared_ptr<AsyncLimiter>,
                               std::stop_token, std::chrono::steady_clock::time_point, unsigned);
   void schedule(Run run);
-  void cancel_locked(const std::string &, std::set<std::string> &);
+  void cancel_locked(const std::string &, std::set<std::string> &, std::vector<std::string> &);
   void transition(Run &, RunState, const std::string &event, std::vector<Record> records = {});
   void checkpoint(Run &, const std::string &event, std::vector<Record> records = {});
   std::unique_ptr<Node> make_node(const NodeDefinition &);

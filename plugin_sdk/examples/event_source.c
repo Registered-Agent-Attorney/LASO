@@ -48,7 +48,13 @@ static const laso_component component = {sizeof(laso_component),
                                          0,
                                          source_health,
                                          source_start,
-                                         source_stop};
+                                         source_stop,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0};
 
 const laso_plugin_descriptor *laso_plugin_query(void) {
   return &descriptor;

@@ -36,6 +36,13 @@ unvalidated. See [VALIDATION.md](VALIDATION.md) for the exact record.
   repositories. SQLite, PostgreSQL, and artifacts are not encrypted secret vaults.
 - Cancellation and deadlines are cooperative. A faulty native extension can block
   a worker, corrupt memory or crash the daemon. Out-of-process isolation is deferred.
+- External worker plugins are privileged in-process adapters, not distributed LASO
+  workers. Worker requests omit instructions and input from durable job metadata;
+  results, status events, and artifact references are bounded and treated as
+  untrusted. Worker callbacks cannot assign LASO source identity or trigger depth,
+  terminal jobs ignore late status events, and cancellation is reported as
+  acknowledged only when the adapter confirms it. Native worker plugins are not
+  sandboxed and must not receive production secrets through ordinary configuration.
 
 For a vulnerability, use the repository host's private vulnerability reporting
 feature when it is enabled, or contact the repository maintainer privately. Do not

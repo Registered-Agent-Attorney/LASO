@@ -30,7 +30,7 @@ tool/provider callbacks are synchronous, short and local. Calls to a component
 are guarded against concurrent entry; busy components fail explicitly and may
 use bounded pipeline retries.
 
-ABI v1 supports `TOOL`, `MODEL`, and `EVENT` components. Existing tool/model
+ABI v1 supports `TOOL`, `MODEL`, `EVENT`, and `WORKER` components. Existing tool/model
 components remain valid because the host reads only the known prefix required by
 their kind. Event components must provide the appended `event_start` and
 `event_stop` callbacks; `health` is optional. An event source receives the
@@ -67,3 +67,12 @@ event source library cannot be unloaded before its stop callback and accepted
 ingress work have drained. No hot unloading or isolation is advertised. Tests
 include valid load/invoke, event lifecycle and ingress, incompatible ABI, invalid
 file, symlink exclusion, duplicate delivery, and empty discovery paths.
+
+Worker components use the appended size-aware `worker_start`, `worker_stop`,
+`worker_submit`, `worker_status`, `worker_cancel`, and `worker_result` callbacks.
+The original tool/model prefix remains valid, so existing ABI-v1 tool and model
+plugins do not need recompilation. Worker callbacks receive borrowed bounded JSON
+and may emit events from plugin-owned threads until `worker_stop` returns. The
+host serializes calls per worker, retains the shared library until shutdown, and
+translates callback failures into bounded LASO errors. Worker event-source
+identity is assigned by LASO and cannot be supplied by the plugin payload.

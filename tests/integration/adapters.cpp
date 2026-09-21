@@ -4,6 +4,7 @@
 #include <boost/beast.hpp>
 #include <fstream>
 #include <laso/api/api.hpp>
+#include <laso/workers/worker.hpp>
 #include <thread>
 
 using namespace laso;
@@ -48,7 +49,8 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
                                   RecordKind::ScheduleOccurrence,
                                   RecordKind::TriggerDelivery,
                                   RecordKind::EventSource,
-                                  RecordKind::ExternalEventClaim};
+                                  RecordKind::ExternalEventClaim,
+                                  RecordKind::WorkerJob};
     std::vector<Record> records;
     for (std::size_t i = 0; i < kinds.size(); ++i)
       records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});
@@ -269,6 +271,74 @@ TEST(Storage, ConformanceSerializesConcurrentExternalEventClaims) {
     claimers.clear();
     EXPECT_EQ(winners, 1U);
     EXPECT_EQ(s->list(RecordKind::Event).size(), 1U);
+  });
+}
+
+TEST(Storage, ConformancePersistsWorkerJobLifecycleAndRejectsInvalidUpdates) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    WorkerJob job;
+    job.id = "worker-job-1";
+    job.worker_id = "offline";
+    job.run_id = "run-1";
+    job.node_id = "work";
+    job.idempotency_key = "run-1:work:1";
+    s->commit({{RecordKind::WorkerJob, job.id, job.run_id, Json(job)}});
+
+    job.state = WorkerJobState::Submitting;
+    s->commit({{RecordKind::WorkerJob, job.id, job.run_id, Json(job)}});
+    job.state = WorkerJobState::Queued;
+    s->commit({{RecordKind::WorkerJob, job.id, job.run_id, Json(job)}});
+    job.state = WorkerJobState::Running;
+    job.external_job_id = "external-1";
+    s->commit({{RecordKind::WorkerJob, job.id, job.run_id, Json(job)}});
+    job.state = WorkerJobState::Completed;
+    job.result = Json{{"ok", true}};
+    job.completed_at = timestamp();
+    s->commit({{RecordKind::WorkerJob, job.id, job.run_id, Json(job)}});
+    EXPECT_EQ(s->get(RecordKind::WorkerJob, job.id).template get<WorkerJob>().result.at("ok"),
+              true);
+
+    auto late = job;
+    late.state = WorkerJobState::Failed;
+    EXPECT_THROW(s->commit({{RecordKind::WorkerJob, late.id, late.run_id, Json(late)}}), Error);
+
+    WorkerJob invalid;
+    invalid.id = "worker-job-invalid";
+    invalid.worker_id = "offline";
+    invalid.run_id = "run-1";
+    invalid.node_id = "work";
+    invalid.idempotency_key = "run-1:work:2";
+    invalid.state = WorkerJobState::Created;
+    s->commit({{RecordKind::WorkerJob, invalid.id, invalid.run_id, Json(invalid)}});
+    invalid.state = WorkerJobState::Completed;
+    EXPECT_THROW(s->commit({{RecordKind::WorkerJob, invalid.id, invalid.run_id, Json(invalid)}}),
+                 Error);
+
+    WorkerJob retry = invalid;
+    retry.id = "worker-job-retry";
+    retry.state = WorkerJobState::Created;
+    retry.attempt = 2;
+    retry.idempotency_key = "run-1:work:2";
+    s->commit({{RecordKind::WorkerJob, retry.id, retry.run_id, Json(retry)}});
+    EXPECT_EQ(s->list(RecordKind::WorkerJob, "run-1").size(), 3U);
+  });
+}
+
+TEST(Storage, ConformanceClaimsWorkerJobIdentityOnce) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto s = backend.open(dir.path / "state.db");
+    WorkerJob job;
+    job.id = "worker-claim";
+    job.worker_id = "offline";
+    job.run_id = "run-claim";
+    job.node_id = "work";
+    job.idempotency_key = "run-claim:work:1";
+    EXPECT_TRUE(s->claim({RecordKind::WorkerJob, job.id, job.run_id, Json(job)}));
+    EXPECT_FALSE(s->claim({RecordKind::WorkerJob, job.id, job.run_id, Json(job)}));
+    EXPECT_EQ(s->list(RecordKind::WorkerJob, job.run_id).size(), 1U);
   });
 }
 

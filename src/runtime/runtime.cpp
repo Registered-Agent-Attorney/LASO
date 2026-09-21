@@ -115,7 +115,7 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
   r.message.payload = std::move(input);
   if (!r.parent_message_id.empty())
     r.message.provenance.push_back(
-        {r.parent_node_id, "", "", "", "", r.parent_message_id, "", timestamp()});
+        {r.parent_node_id, "", "", "", "", r.parent_message_id, "", timestamp(), ""});
   checkpoint(r, "run.created");
   auto id = r.id;
   schedule(std::move(r));
@@ -170,11 +170,28 @@ void Runtime::resume(const std::string &id) {
   schedule(std::move(r));
 }
 void Runtime::cancel(const std::string &id) {
-  std::lock_guard lock(mutex_);
   std::set<std::string> visited;
-  cancel_locked(id, visited);
+  std::vector<std::string> worker_jobs;
+  {
+    std::lock_guard lock(mutex_);
+    cancel_locked(id, visited, worker_jobs);
+  }
+  // Adapter callbacks may emit events synchronously.  Never invoke native
+  // worker code while the runtime mutex is held, or an event-triggered
+  // callback could re-enter Runtime and deadlock.
+  if (deps_.workers)
+    for (const auto &worker_job_id : worker_jobs) {
+      try {
+        deps_.workers->cancel(worker_job_id, WorkerJobState::Cancelled,
+                              "LASO run cancellation requested");
+      } catch (const Error &) {
+        log_diagnostic("worker.cancellation_persist_failed",
+                       {{"worker_job_id", worker_job_id}, {"run_id", id}});
+      }
+    }
 }
-void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visited) {
+void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visited,
+                            std::vector<std::string> &worker_jobs) {
   if (!visited.insert(id).second)
     throw Error(ErrorCode::Conflict, "Run cancellation cycle detected");
   auto r = deps_.storage.get(RecordKind::Run, id).get<Run>();
@@ -205,7 +222,14 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
   for (const auto &child_id : children) {
     auto child = deps_.storage.get(RecordKind::Run, child_id).get<Run>();
     if (!terminal(child.state))
-      cancel_locked(child.id, visited);
+      cancel_locked(child.id, visited, worker_jobs);
+  }
+  if (deps_.workers) {
+    for (const auto &record : deps_.storage.list(RecordKind::WorkerJob, id, 10000, 0)) {
+      const auto worker_job = record.get<WorkerJob>();
+      if (!worker_job_terminal(worker_job.state))
+        worker_jobs.push_back(worker_job.id);
+    }
   }
   auto found = active_.find(id);
   if (found != active_.end()) {

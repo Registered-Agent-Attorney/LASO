@@ -175,7 +175,7 @@ Task<void> Runtime::execute_branch(const PipelineDefinition &pipeline, Execution
           branch.message.node_id = definition.id;
           branch.message.time = timestamp();
           branch.message.provenance.push_back(
-              {definition.id, "", "", "", "", parent, "", timestamp()});
+              {definition.id, "", "", "", "", parent, "", timestamp(), ""});
           deps_.storage.commit(
               {{RecordKind::Attempt, attempt.id, branch.id, Json(attempt)},
                {RecordKind::Message, branch.message.id, branch.id, Json(branch.message)}});
@@ -308,6 +308,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
       } else if (definition.type == "tool") {
         r.tool = definition.binding;
         r.plugin = deps_.tools.get(definition.binding)->metadata().plugin;
+      } else if (definition.type == "worker" && deps_.workers) {
+        r.worker = deps_.workers->resolve_worker(definition.binding, definition.capability);
       }
       context.deadline =
           std::min(deadline, std::chrono::steady_clock::now() + definition.timeout.timeout);
@@ -346,6 +348,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
                            deps_.providers.get(config_.models.at(definition.binding).provider)
                                ->metadata()
                                .timeout);
+        if (definition.type == "worker")
+          transition(r, RunState::WaitingWorker, "worker.submitting");
         NodeExecution attempt;
         attempt.run_id = r.id;
         attempt.node_id = definition.id;
@@ -454,8 +458,15 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
             throw Error(ErrorCode::Execution, "Node result exceeds 1 MiB");
         } catch (const Error &e) {
           failure = e.code;
+          if (definition.type == "worker") {
+            attempt.worker_job_id = e.details.value("worker_job_id", std::string{});
+            attempt.worker_id = e.details.value("worker_id", std::string{});
+            attempt.external_job_id = e.details.value("external_job_id", std::string{});
+          }
           if (e.code == ErrorCode::Validation || definition.type == "subpipeline")
             failure_detail = validation_detail(e);
+          if (definition.type == "worker" && failure_detail.empty())
+            failure_detail = e.what();
           if (failure_detail.empty() && definition.type == "subpipeline")
             failure_detail = e.what();
         } catch (...) {
@@ -465,10 +476,15 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
         attempt.duration_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                 .count();
-        if (r.state == RunState::WaitingTool || r.state == RunState::WaitingModel)
+        if (r.state == RunState::WaitingTool || r.state == RunState::WaitingModel ||
+            r.state == RunState::WaitingWorker)
           transition(r, RunState::Running,
-                     failure ? (definition.type == "tool" ? "tool.failed" : "model.failed")
-                             : (definition.type == "tool" ? "tool.completed" : "model.completed"));
+                     failure ? (definition.type == "tool"     ? "tool.failed"
+                                : definition.type == "worker" ? "worker.failed"
+                                                              : "model.failed")
+                             : (definition.type == "tool"     ? "tool.completed"
+                                : definition.type == "worker" ? "worker.completed"
+                                                              : "model.completed"));
         if (failure) {
           attempt.state = *failure == ErrorCode::Timeout        ? NodeState::TimedOut
                           : *failure == ErrorCode::Cancellation ? NodeState::Cancelled
@@ -488,6 +504,12 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
           continue;
         }
         attempt.state = NodeState::Completed;
+        if (definition.type == "worker") {
+          attempt.worker_job_id = result.message.metadata.value("worker_job_id", std::string{});
+          attempt.worker_id = result.message.metadata.value("worker_id", std::string{});
+          attempt.external_job_id = result.message.metadata.value("external_job_id", std::string{});
+          r.worker_job_id = attempt.worker_job_id;
+        }
         ++r.steps;
         ++r.node_visits[definition.id];
         auto parent_message = r.message.id;
@@ -498,7 +520,7 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
         r.message.node_id = definition.id;
         r.message.time = timestamp();
         r.message.provenance.push_back(
-            {definition.id, "", "", "", "", parent_message, "", timestamp()});
+            {definition.id, "", "", "", "", parent_message, "", timestamp(), ""});
         if (r.message.provenance.size() > 256)
           r.message.provenance.erase(r.message.provenance.begin(),
                                      r.message.provenance.end() - 256);

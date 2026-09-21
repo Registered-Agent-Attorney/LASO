@@ -110,3 +110,13 @@ payload schemas, durably claims external IDs, and publishes ordinary Events only
 after persistence. Plugin shutdown drains ingress before library unload. Event
 sources never create runs directly, so existing trigger, policy, provenance,
 concurrency, and recovery paths remain authoritative. See [event sources](event-sources.md).
+
+## External workers
+
+Worker plugins extend the same native C ABI with size-aware submit/status/result/
+cancel callbacks. `WorkerNode` creates a durable `WorkerJob`, submits through the
+configured adapter, and waits by observing the durable record while status events
+arrive through EventIngress. Completion becomes a normal node message, so the
+existing schema, policy, retry, deadline, cancellation, provenance, and storage
+paths remain authoritative. Worker adapters are privileged in-process code and
+are not distributed LASO workers; see [worker adapters](workers.md).

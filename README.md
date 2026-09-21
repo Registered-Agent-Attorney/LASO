@@ -63,7 +63,8 @@ The default build has no PostgreSQL development-library requirement. Produced
 binaries are `build/bin/laso`, `build/bin/laso-server`, and
 `build/laso_tests`. Example C plugins are
 `build/plugins/liblaso_example_tool.so` and
-`build/plugins/liblaso_example_model_provider.so`. Core, runtime, storage factory,
+`build/plugins/liblaso_example_model_provider.so`; the offline worker example is
+`build/worker-plugins/liblaso_example_worker.so`. Core, runtime, storage factory,
 SQLite, optional PostgreSQL, plugin loader, application, API, and CLI are separate
 library targets. Installation currently
 installs the executables, public headers, C SDK header, and example configuration;
@@ -137,12 +138,15 @@ LASO_PLUGIN_DIR=build/plugins ./build/bin/laso --config examples/plugin-model/co
 Plugins are loaded with `dlopen`/`dlsym`, only from configured directories.
 The SDK uses a versioned C ABI, explicit structure sizes, borrowed inputs,
 host-owned output callbacks, and no STL objects or exceptions across the boundary.
-Tool, model-provider, and event-source components are operational. Model providers
+Tool, model-provider, event-source, and generic external-worker components are
+operational. Model providers
 are resolved through the existing provider registry, so built-in mock and local
 providers remain available; other component kinds have reserved IDs and return
 `LASO_UNSUPPORTED`. Event
 sources use the ABI lifecycle suffix and a bounded thread-safe host callback to
-submit canonical events; they never create runs directly.
+submit canonical events; they never create runs directly. Worker adapters submit
+durable jobs and report status through the same event ingress path; they never
+create pipeline runs directly.
 
 **Loading a native LASO plugin grants that plugin code execution inside the LASO
 process.** Metadata validation does not isolate native code. See the
@@ -164,6 +168,7 @@ process.** Metadata validation does not isolate native code. See the
 | `composition` | Offline versioned child pipeline and A → B → C composition |
 | `scheduling` | Offline schedule and event-trigger definitions for a deterministic pipeline |
 | `event-source` | Offline native event-source plugin → durable event trigger → pipeline |
+| `worker-adapter` | Offline worker plugin → durable worker job → status event → validated output |
 | `local-openai` | Optional loopback-only OpenAI-compatible local model call |
 
 For an optional loopback-only OpenAI-compatible local model service, see
@@ -225,7 +230,8 @@ daemon in the foreground as an unprivileged service account.
   interval, UTC five-field cron, and internal-event triggers launch normal runs;
   misfire, overlap, delivery-depth, and pending-work bounds are explicit. There
   are no vendor-specific external adapters, distributed workers, or exactly-once
-  claims. Generic configured event-source plugins can ingress validated durable
-  events; supplied external IDs deduplicate within the selected storage database.
+  claims. Generic configured event-source and worker plugins can ingress validated
+  events or submit durable external jobs; supplied external IDs deduplicate within
+  the selected storage database. See [worker adapters](docs/workers.md).
 
 Licensed under Apache License 2.0.

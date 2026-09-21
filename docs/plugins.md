@@ -4,12 +4,17 @@ Core has separate provider, tool, storage, event, scheduler, identity, artifact 
 node interfaces. Native application code can inject these interfaces directly.
 Dynamic plugins use the versioned C SDK rather than the compiler-dependent C++ ABI.
 
-The working plugin kinds are deterministic tools, model providers, and event
-sources. Tools/providers use bounded synchronous calls. Event sources use the
+The working plugin kinds are deterministic tools, model providers, event sources,
+and external workers. Tools/providers use bounded synchronous calls. Event sources use the
 same ABI with lifecycle callbacks and a host-owned event submission callback;
 they never create runs directly. Other component kinds remain reserved explicitly
 and are rejected as unsupported. Native plugins are trusted in-process code and
 are not sandboxed.
+
+Workers use lifecycle callbacks plus submit/status/result/cancel callbacks. A
+worker submission creates a durable `WorkerJob`; worker status events return via
+the same bounded event ingress path used by event-source plugins. See
+[worker adapters](workers.md).
 
 The `examples/plugin-model/config.yaml` file maps the example logical model to
 the provider plugin. Run it from the repository root after building the example
