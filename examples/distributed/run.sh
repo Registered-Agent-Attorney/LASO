@@ -50,7 +50,8 @@ render "$source_dir/examples/distributed/owner.yaml.in" "$root/owner.yaml"
 render "$source_dir/examples/distributed/worker.yaml.in" "$root/worker.yaml"
 
 start() {
-  local config=$1 port=$2 name=$3 pid_var="${name}_pid"
+  local config=$1 port=$2 name=$3
+  local pid_var="${name}_pid"
   "$build_dir/bin/laso-server" --config "$config" --host 127.0.0.1 --port "$port" \
     >"$root/$name.stdout" 2>"$root/$name.stderr" &
   printf -v "$pid_var" '%s' "$!"
