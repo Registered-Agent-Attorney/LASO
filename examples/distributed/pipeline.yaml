@@ -2,6 +2,11 @@ laso: '1'
 name: distributed-reference
 version: 1
 nodes:
+  input:
+    type: input
+  fork:
+    type: parallel
+    join: join
   work:
     type: worker
     worker: reference
@@ -15,9 +20,15 @@ nodes:
   rejected:
     type: function
     function: identity
+  join:
+    type: join
+  output:
+    type: output
 edges:
-  - {from: input, to: work}
+  - {from: input, to: fork}
+  - {from: fork, to: work}
   - {from: work, to: verify}
-  - {from: verify, condition: accepted, to: output}
+  - {from: verify, condition: accepted, to: join}
   - {from: verify, condition: rejected, to: rejected}
-  - {from: rejected, to: output}
+  - {from: rejected, to: join}
+  - {from: join, to: output}
