@@ -35,8 +35,7 @@ int main() {
   expect_throw([] { (void)saturating_sum(1, 2, 4, 3); }, "reversed bounds are rejected");
 
   expect(slugify("Hello, LASO World!") == "hello-laso-world", "slugifies words");
-  expect(slugify("  repeated---separators  ") == "repeated-separators",
-         "collapses separators");
+  expect(slugify("  repeated---separators  ") == "repeated-separators", "collapses separators");
   expect(slugify("Already-Plain") == "already-plain", "normalizes case");
   return EXIT_SUCCESS;
 }
