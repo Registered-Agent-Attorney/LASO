@@ -90,6 +90,7 @@ for _ in $(seq 1 300); do
   fi
   if [[ "$state" == "Failed" || "$state" == "Cancelled" || "$state" == "TimedOut" ]]; then
     echo "distributed reference run reached $state" >&2
+    jq -c '{id, state, active_node, error, worker, worker_job_id}' <<<"$run" >&2
     exit 1
   fi
   sleep 0.1
