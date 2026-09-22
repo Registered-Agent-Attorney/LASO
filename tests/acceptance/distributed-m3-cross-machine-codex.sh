@@ -77,6 +77,7 @@ remote_server_pid=
 remote_b_root=
 remote_b_server_pid=
 remote_db_interrupt_pid=
+artifact_tunnel_pid=
 run_root=$(mktemp -d)
 owner_pid=
 cleanup() {
@@ -96,6 +97,7 @@ cleanup() {
   if [[ -n "${remote_server_pid:-}" ]]; then remote_stop_process_tree "$remote_server_pid"; fi
   if [[ -n "${remote_b_server_pid:-}" ]]; then remote_stop_process_tree "$remote_b_server_pid"; fi
   if [[ -n "${remote_db_interrupt_pid:-}" ]]; then kill "$remote_db_interrupt_pid" 2>/dev/null || true; wait "$remote_db_interrupt_pid" 2>/dev/null || true; fi
+  if [[ -n "${artifact_tunnel_pid:-}" ]]; then kill "$artifact_tunnel_pid" 2>/dev/null || true; wait "$artifact_tunnel_pid" 2>/dev/null || true; fi
   if [[ -n "${remote_b_root:-}" ]]; then remote_has "rm -rf -- '$remote_b_root'" || true; fi
   remote_has "rm -rf -- '$remote_root'" || true
   rm -rf -- "$run_root"
@@ -108,11 +110,17 @@ schema="laso_m3_cross_$(printf '%s' "$RANDOM$RANDOM" | tr -cd '[:alnum:]')"
 owner_data="$run_root/owner"
 owner_port=$((34000 + ((BASHPID + RANDOM) % 1000)))
 remote_port=$((35000 + ((BASHPID + RANDOM) % 2000)))
+owner_artifact_port=$((37000 + ((BASHPID + RANDOM) % 1000)))
+remote_artifact_port=$((owner_artifact_port + 1))
+artifact_token="synthetic-m3-artifact-token"
 mkdir -p "$owner_data/distributed-workspaces"
 
 sed -e "s|@DATA_DIR@|$(escape_sed "$owner_data")|g" \
     -e "s|@POSTGRES_DSN@|$(escape_sed "$owner_dsn")|g" \
     -e "s|@POSTGRES_SCHEMA@|$(escape_sed "$schema")|g" \
+    -e "s|@ARTIFACT_SERVICE_PORT@|$owner_artifact_port|g" \
+    -e "s|@ARTIFACT_SERVICE_URL@||g" \
+    -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
     "$source_dir/tests/acceptance/distributed-m3-cross-machine-worker-config.yaml.in" |
   sed '/^process_workers:/,$d' > "$run_root/owner.yaml"
 
@@ -136,6 +144,8 @@ remote_template="$run_root/worker-template.yaml"
 sed -e "s|@DATA_DIR@|$(escape_sed "$remote_data")|g" \
     -e "s|@POSTGRES_DSN@|$(escape_sed "$remote_connection_dsn")|g" \
     -e "s|@POSTGRES_SCHEMA@|$(escape_sed "$schema")|g" \
+    -e "s|@ARTIFACT_SERVICE_URL@|http://127.0.0.1:$remote_artifact_port|g" \
+    -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
     -e "s|@CODEX_WORKER@|$(escape_sed "$remote_build/bin/laso-codex-worker")|g" \
     -e "s|@CODEX_BIN@|$(escape_sed "$remote_codex_bin")|g" \
     -e "s|@WORKSPACE_ROOT@|$(escape_sed "$remote_worker_root")|g" \
@@ -152,6 +162,25 @@ for _ in $(seq 1 300); do
   sleep 0.1
 done
 curl -fsS "$base/health" >/dev/null || { echo "owner health check failed" >&2; exit 1; }
+
+# The worker's artifact URL is loopback-local on the remote host. Carry it
+# over a scoped reverse SSH tunnel so PostgreSQL coordination and object
+# transport remain private to the two test instances.
+ssh -N "${ssh_options[@]}" -o ExitOnForwardFailure=yes \
+  -R "127.0.0.1:${remote_artifact_port}:127.0.0.1:${owner_artifact_port}" "$target" \
+  >"$run_root/artifact-tunnel.stdout" 2>"$run_root/artifact-tunnel.stderr" &
+artifact_tunnel_pid=$!
+for _ in $(seq 1 100); do
+  kill -0 "$artifact_tunnel_pid" 2>/dev/null || {
+    echo "artifact reverse tunnel failed during startup" >&2
+    cat "$run_root/artifact-tunnel.stderr" >&2 || true
+    exit 1
+  }
+  response_code=$(remote_has "curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $artifact_token' -I 'http://127.0.0.1:$remote_artifact_port/api/v1/artifacts/invalid-id'" 2>/dev/null || true)
+  [[ "$response_code" == 400 ]] && break
+  sleep 0.1
+done
+[[ "${response_code:-}" == 400 ]] || { echo "artifact reverse tunnel health check failed" >&2; exit 1; }
 
 # The remote DSN is passed to the remote shell only for this disposable test.
 # It is never echoed, logged, or copied into the repository.
@@ -189,6 +218,8 @@ if [[ "$scenario" == "stale-worker" ]]; then
   sed -e "s|@DATA_DIR@|$(escape_sed "$remote_b_data")|g" \
       -e "s|@POSTGRES_DSN@|$(escape_sed "$remote_dsn")|g" \
       -e "s|@POSTGRES_SCHEMA@|$(escape_sed "$schema")|g" \
+      -e "s|@ARTIFACT_SERVICE_URL@|http://127.0.0.1:$remote_artifact_port|g" \
+      -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
       -e "s|@CODEX_WORKER@|$(escape_sed "$remote_build/bin/laso-codex-worker")|g" \
       -e "s|@CODEX_BIN@|$(escape_sed "$remote_codex_bin")|g" \
       -e "s|@WORKSPACE_ROOT@|$(escape_sed "$remote_b_worker_root")|g" \
@@ -416,23 +447,52 @@ for iteration in $(seq 1 "$runs"); do
   jq -c '.message.metadata.workspace_result_manifests[0]' <<<"$run" > "$run_root/result-manifest.json"
   jq -e '.work_id != "" and .attempt_id != "" and (.manifest.files | length) > 0' \
     "$run_root/result-manifest.json" >/dev/null
-  python3 - "$run_root/result-manifest.json" "$run_root/accepted-$iteration" <<'PY'
-import hashlib, json, pathlib, sys
+  python3 - "$run_root/result-manifest.json" "$run_root/accepted-$iteration" \
+    "http://127.0.0.1:$owner_artifact_port" "$artifact_token" <<'PY'
+import hashlib, json, pathlib, sys, urllib.request
 value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 root = pathlib.Path(sys.argv[2])
+artifact_base = sys.argv[3].rstrip("/")
+artifact_token = sys.argv[4]
 root.mkdir(parents=True, exist_ok=True)
+provenance = value["manifest"].get("provenance", {})
+if not all(provenance.get(key) for key in ("run_id", "node_work_id", "attempt_id", "worker_id")):
+    raise SystemExit("owner artifact provenance is incomplete")
+if not isinstance(provenance.get("fencing_token"), int) or provenance["fencing_token"] <= 0:
+    raise SystemExit("owner artifact provenance fence is invalid")
 seen = set()
 for item in value["manifest"]["files"]:
     rel = pathlib.PurePosixPath(item["path"])
     if rel.is_absolute() or ".." in rel.parts or "\\" in item["path"] or str(rel) in seen:
         raise SystemExit("invalid owner artifact path")
     seen.add(str(rel))
-    data = bytes(item["data"])
-    if len(data) != item["size"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
-        raise SystemExit("owner artifact integrity mismatch")
     destination = root.joinpath(*rel.parts)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(data)
+    if "data" in item:
+        data = bytes(item["data"])
+        if len(data) != item["size"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
+            raise SystemExit("owner artifact integrity mismatch")
+        destination.write_bytes(data)
+        continue
+    object_id = item.get("object_id", "")
+    if not object_id.startswith("sha256:"):
+        raise SystemExit("owner artifact missing content-addressed object")
+    request = urllib.request.Request(
+        f"{artifact_base}/api/v1/artifacts/{object_id}",
+        headers={"Authorization": f"Bearer {artifact_token}"},
+    )
+    digest = hashlib.sha256()
+    size = 0
+    with urllib.request.urlopen(request, timeout=30) as response, destination.open("wb") as output:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+            output.write(chunk)
+    if size != item["size"] or digest.hexdigest() != item["sha256"]:
+        raise SystemExit("owner artifact integrity mismatch")
 PY
   cmake -S "$run_root/accepted-$iteration" -B "$run_root/accepted-$iteration/build" -G Ninja -DCMAKE_BUILD_TYPE=Debug >/dev/null
   cmake --build "$run_root/accepted-$iteration/build" >/dev/null

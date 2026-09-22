@@ -25,6 +25,7 @@ struct RuntimeDependencies {
   std::shared_ptr<WorkerManager> workers;
   std::function<PipelineDefinition(const std::string &)> resolve_pipeline;
   Coordination *coordination = nullptr;
+  ArtifactStore *artifacts = nullptr;
   std::string instance_id;
   std::filesystem::path workspace_root;
 };

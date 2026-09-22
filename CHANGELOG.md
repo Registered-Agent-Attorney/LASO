@@ -12,6 +12,18 @@
 
 ## Unreleased
 
+- Added durable content-addressed artifact transport for distributed workspaces
+  and returned results. Files stream through atomic filesystem objects, can be
+  materialized through an authenticated object-only gateway when instances do
+  not share a filesystem root, and retain run/NodeWork/attempt/worker/fence
+  provenance. Added integrity and conservative GC operator commands plus large
+  generated-file and gateway regression coverage. PostgreSQL stores metadata and
+  references only; at-least-once attempts with one authoritative fenced
+  completion remain the guarantee. Artifact transport is implemented and
+  substantially validated; artifact-specific cross-machine chaos testing
+  remains in progress. See `VALIDATION.md` for completed evidence and the
+  explicit follow-up checklist.
+
 - Added opt-in PostgreSQL node-work distribution for deterministic parallel
   branches. Durable fenced `NodeWork` records, bounded global/per-run node slots,
   crash takeover, stale-result rejection, retry attempt identity, cross-instance

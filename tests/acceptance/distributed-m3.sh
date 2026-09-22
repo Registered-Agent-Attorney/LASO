@@ -42,10 +42,12 @@ trap cleanup EXIT
 # the C++ PostgreSQL integration helpers remain the authoritative schema-cleanup
 # path for automated backend tests.
 schema="laso_m3_$(printf '%s' "$RANDOM$RANDOM" | tr -cd '[:alnum:]')"
+artifact_port=$((36000 + (BASHPID % 1000)))
+artifact_token="synthetic-m3-artifact-token"
 mkdir -p "$run_root/workspaces" "$run_root/owner" "$run_root/worker"
 escape_sed() { printf '%s' "$1" | sed 's/[&|]/\\&/g'; }
 render_config() {
-  local out=$1 data=$2 port=$3 opencode_port=$4 role=$5
+  local out=$1 data=$2 port=$3 opencode_port=$4 role=$5 artifact_service_port=$6 artifact_service_url=$7
   local rendered="$run_root/rendered-$role.yaml"
   mkdir -p "$data/distributed-workspaces"
   sed -e "s|@DATA_DIR@|$(escape_sed "$data")|g" \
@@ -59,6 +61,9 @@ render_config() {
       -e "s|@OPENCODE_PORT@|$(escape_sed "$opencode_port")|g" \
       -e "s|@OPENCODE_DATA@|$(escape_sed "$run_root/opencode-data-$port")|g" \
       -e "s|@OPENCODE_CONFIG@|$(escape_sed "$run_root/opencode-config-$port")|g" \
+      -e "s|@ARTIFACT_SERVICE_PORT@|$artifact_service_port|g" \
+      -e "s|@ARTIFACT_SERVICE_URL@|$(escape_sed "$artifact_service_url")|g" \
+      -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
       "$source_dir/tests/acceptance/distributed-m3-config.yaml.in" > "$rendered"
   if [[ "$role" == "owner" ]]; then
     sed '/^process_workers:/,$d' "$rendered" > "$out"
@@ -68,8 +73,8 @@ render_config() {
 }
 port_a=$((30000 + (BASHPID % 1000)))
 port_b=$((31000 + (BASHPID % 1000)))
-render_config "$run_root/owner.yaml" "$run_root/owner" "$port_a" "$((32000 + BASHPID % 1000))" owner
-render_config "$run_root/worker.yaml" "$run_root/worker" "$port_b" "$((33000 + BASHPID % 1000))" worker
+render_config "$run_root/owner.yaml" "$run_root/owner" "$port_a" "$((32000 + BASHPID % 1000))" owner "$artifact_port" ""
+render_config "$run_root/worker.yaml" "$run_root/worker" "$port_b" "$((33000 + BASHPID % 1000))" worker 0 "http://127.0.0.1:$artifact_port"
 base_a="http://127.0.0.1:$port_a/api/v1"
 base_b="http://127.0.0.1:$port_b/api/v1"
 start_instance() {

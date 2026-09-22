@@ -59,6 +59,18 @@ std::unique_ptr<Coordination> make_coordination(const Config &config,
               "multi_instance execution requires PostgreSQL support at build time");
 #endif
 }
+
+std::unique_ptr<ArtifactStore> make_artifact_store(const Config &config, Storage &storage) {
+  const auto root =
+      config.artifact_root.empty() ? config.data_dir / "artifacts" : config.artifact_root;
+  const ArtifactStoreLimits limits{config.max_artifact_bytes, config.max_artifact_temp_bytes,
+                                   config.artifact_cleanup_grace_seconds};
+  if (!config.artifact_service_url.empty())
+    return std::make_unique<RemoteArtifactStore>(config.artifact_service_url,
+                                                 config.artifact_service_token, root / "cache",
+                                                 storage, limits);
+  return std::make_unique<LocalArtifactStore>(root, storage, limits);
+}
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), instance_id_(generate_service_instance_id()),
@@ -95,12 +107,13 @@ Service::Service(asio::io_context &io, Config config)
               throw;
             }
           }),
+      artifacts_(make_artifact_store(config_, *storage_)),
       runtime_(io, config_,
                {*storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
                 worker_manager_,
                 [this](const std::string &reference) { return resolve_pipeline(reference); },
-                coordination_.get(), instance_id_, config_.data_dir / "distributed-workspaces"}),
-      artifacts_(config_.data_dir / "artifacts", *storage_),
+                coordination_.get(), artifacts_.get(), instance_id_,
+                config_.data_dir / "distributed-workspaces"}),
       scheduler_(
           io, *storage_,
           [this](const LaunchRequest &request) {
@@ -654,6 +667,9 @@ Json operator_artifact_summary(const Json &value) {
                  {"name", artifact.name},
                  {"media_type", artifact.media_type},
                  {"created_at", artifact.created_at},
+                 {"object_id", artifact.object_id},
+                 {"sha256", artifact.sha256},
+                 {"size", artifact.size},
                  {"location_present", !artifact.location.empty()}};
   // Only expose integrity/provenance keys; arbitrary metadata may contain
   // paths or provider-specific content and is deliberately not dumped.
@@ -700,6 +716,27 @@ std::vector<Json> Service::inspect_node_works(const std::string &run_id) const {
 }
 Json Service::inspect_node_work(const std::string &id) const {
   return operator_node_work_summary(storage_->get(RecordKind::NodeWork, id).get<NodeWork>());
+}
+std::vector<Json> Service::inspect_artifacts(const std::string &run_id) const {
+  std::vector<Json> result;
+  for (const auto &value : storage_->list(RecordKind::Artifact, run_id, 10000, 0))
+    result.push_back(operator_artifact_summary(value));
+  return result;
+}
+Json Service::artifact_integrity() const {
+  const auto report = artifacts_->integrity();
+  Json errors = Json::array();
+  for (const auto &error : report.errors)
+    errors.push_back(error);
+  return {{"root", artifacts_->root().filename().string()},
+          {"objects", report.objects},
+          {"verified", report.verified},
+          {"invalid", report.invalid},
+          {"temporary", report.temporary},
+          {"errors", std::move(errors)}};
+}
+Json Service::artifact_gc(bool dry_run, std::uint64_t grace_seconds) {
+  return artifacts_->collect_garbage(dry_run, grace_seconds);
 }
 std::vector<Json> Service::inspect_worker_jobs(const std::string &run_id) const {
   std::vector<Json> result;

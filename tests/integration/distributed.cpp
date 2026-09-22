@@ -2,6 +2,8 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <fstream>
+#include <laso/runtime/workspace.hpp>
 #include <set>
 #include <sys/wait.h>
 #include <thread>
@@ -563,8 +565,23 @@ TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
   const auto current = second->acquire("node:" + work.id, 5000);
   ASSERT_TRUE(current);
   EXPECT_GT(current->fencing_token, old->fencing_token);
-  work.state = NodeWorkState::Completed;
+  TemporaryDirectory artifact_directory;
+  LocalArtifactStore artifact_store(artifact_directory.path / "artifacts", *storage);
+  const auto workspace_root = artifact_directory.path / "workspace";
+  std::filesystem::create_directories(workspace_root);
+  std::ofstream(workspace_root / "result.txt") << "stale result\n";
+  Artifact artifact_metadata;
+  artifact_metadata.run_id = work.run_id;
+  artifact_metadata.node_id = work.node_id;
+  artifact_metadata.name = "result.txt";
+  const auto uploaded = artifact_store.put_file(artifact_metadata, workspace_root / "result.txt");
+  const auto stale_manifest =
+      workspace_manifest(workspace_root, artifact_store, WorkspaceManifestLimits{}, work.run_id,
+                         work.id, "stale-attempt", old->owner_instance, old->fencing_token);
   work.result = Message{};
+  work.result->metadata["workspace_result_manifest"] = stale_manifest;
+  EXPECT_TRUE(artifact_store.exists(uploaded.object_id));
+  work.state = NodeWorkState::Completed;
   EXPECT_THROW(storage->commit_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}},
                                      "node:" + work.id, old->owner_instance, old->fencing_token),
                Error);

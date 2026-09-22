@@ -113,6 +113,9 @@ through registries; no shell command interpretation occurs. See
 ./build/bin/laso run inspect RUN_ID
 ./build/bin/laso node-work list --run-id RUN_ID
 ./build/bin/laso instance list
+./build/bin/laso artifact verify
+./build/bin/laso artifact list --run-id RUN_ID
+./build/bin/laso artifact gc
 ```
 
 The approval example exits with `WaitingApproval`. A later CLI process opens the
@@ -123,6 +126,8 @@ the daemon is running, use its API. Stop it before using local CLI database comm
 `laso health` checks local storage initialization; use HTTP health to probe the daemon.
 [Configuration reference](docs/configuration.md) explains storage, deadlines,
 worker capabilities, budgets, cancellation, and security-sensitive values.
+The [artifact-store guide](docs/artifacts.md) explains content-addressed
+streaming, integrity checks, materialization, and safe cleanup.
 
 ## API
 

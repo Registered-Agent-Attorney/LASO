@@ -199,6 +199,21 @@ void Runtime::reconcile_distributed_parallel(Run &r, const PipelineDefinition &)
     if (work.result->metadata.contains("workspace_result_manifest")) {
       const auto &manifest = work.result->metadata.at("workspace_result_manifest");
       validate_workspace_manifest(manifest);
+      if (manifest.value("version", 1U) == 2U) {
+        if (!deps_.artifacts)
+          throw Error(ErrorCode::Storage, "Object-backed workspace requires an artifact store");
+        const auto provenance = manifest.value("provenance", Json::object());
+        if (!provenance.is_object() || provenance.value("run_id", std::string{}) != work.run_id ||
+            provenance.value("node_work_id", std::string{}) != work.id ||
+            provenance.value("attempt_id", std::string{}) != work.attempt_id ||
+            provenance.value("fencing_token", std::uint64_t{0}) != work.fencing_token)
+          throw Error(ErrorCode::Conflict,
+                      "Workspace artifact provenance does not match its fence");
+        for (const auto &entry : manifest.at("files"))
+          deps_.artifacts->verify(entry.at("object_id").get<std::string>(),
+                                  entry.at("sha256").get<std::string>(),
+                                  entry.at("size").get<std::uint64_t>());
+      }
       workspace_results.push_back(
           {{"work_id", work.id}, {"attempt_id", work.attempt_id}, {"manifest", manifest}});
     }

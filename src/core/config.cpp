@@ -36,15 +36,27 @@ void Config::validate() {
     throw Error(ErrorCode::Configuration, "Invalid coordination mode");
   if (db_path.empty())
     db_path = data_dir / "laso.db";
-  if (api_port == 0 || api_port > 65535 || workers == 0 || workers > 64 || max_runs == 0 ||
-      max_runs > 1024 || max_nodes == 0 || max_nodes > 4096 || max_nodes_per_run == 0 ||
-      max_nodes_per_run > max_nodes || max_models == 0 || max_models > 1024 || max_tools == 0 ||
-      max_tools > 1024 || max_subpipeline_depth == 0 || max_subpipeline_depth > 64 ||
-      max_pending_scheduler_launches == 0 || max_pending_scheduler_launches > 4096 ||
-      max_event_trigger_depth == 0 || max_event_trigger_depth > 64 ||
-      max_event_trigger_deliveries == 0 || max_event_trigger_deliveries > 100000 ||
-      max_worker_jobs == 0 || max_worker_jobs > 4096 || max_worker_jobs_per_worker == 0 ||
-      max_worker_jobs_per_worker > max_worker_jobs ||
+  if (artifact_root.empty())
+    artifact_root = data_dir / "artifacts";
+  if (artifact_service_token.size() > 4096 ||
+      (!artifact_service_url.empty() && artifact_service_token.empty()) ||
+      (artifact_service_port != 0 && artifact_service_token.empty()) ||
+      (!artifact_service_url.empty() && artifact_service_port != 0))
+    throw Error(ErrorCode::Configuration, "Invalid artifact service configuration");
+  if (max_artifact_bytes == 0 || max_artifact_bytes > (std::uint64_t{4} << 40) ||
+      max_artifact_temp_bytes < max_artifact_bytes ||
+      max_artifact_temp_bytes > (std::uint64_t{8} << 40) || artifact_cleanup_grace_seconds == 0 ||
+      artifact_cleanup_grace_seconds > 30 * 86400)
+    throw Error(ErrorCode::Configuration, "Invalid artifact storage limit");
+  if (api_port == 0 || api_port > 65535 || artifact_service_port > 65535 || workers == 0 ||
+      workers > 64 || max_runs == 0 || max_runs > 1024 || max_nodes == 0 || max_nodes > 4096 ||
+      max_nodes_per_run == 0 || max_nodes_per_run > max_nodes || max_models == 0 ||
+      max_models > 1024 || max_tools == 0 || max_tools > 1024 || max_subpipeline_depth == 0 ||
+      max_subpipeline_depth > 64 || max_pending_scheduler_launches == 0 ||
+      max_pending_scheduler_launches > 4096 || max_event_trigger_depth == 0 ||
+      max_event_trigger_depth > 64 || max_event_trigger_deliveries == 0 ||
+      max_event_trigger_deliveries > 100000 || max_worker_jobs == 0 || max_worker_jobs > 4096 ||
+      max_worker_jobs_per_worker == 0 || max_worker_jobs_per_worker > max_worker_jobs ||
       max_worker_wall_time_ms > 1000000000000000ULL ||
       max_worker_tokens_per_run > 1000000000000000ULL ||
       !std::isfinite(max_worker_cost_units_per_run) || max_worker_cost_units_per_run < 0 ||
@@ -58,8 +70,11 @@ void Config::validate() {
       claim_batch_size == 0 || claim_batch_size > 1024 || max_pending_runs == 0 ||
       max_pending_runs > 100000)
     throw Error(ErrorCode::Configuration, "Invalid port or concurrency limit");
-  if (api_host != "127.0.0.1" && api_host != "::1" && !allow_remote_api)
+  if ((api_host != "127.0.0.1" && api_host != "::1") && !allow_remote_api)
     throw Error(ErrorCode::Configuration, "Non-loopback API requires allow_remote_api=true");
+  if (artifact_service_host != "127.0.0.1" && artifact_service_host != "::1" && !allow_remote_api)
+    throw Error(ErrorCode::Configuration,
+                "Non-loopback artifact service requires allow_remote_api=true");
   if (log_level != "debug" && log_level != "info" && log_level != "warn" && log_level != "error")
     throw Error(ErrorCode::Configuration, "Invalid log level");
   if (event_sources.size() > 64)
@@ -305,6 +320,11 @@ Config load_config(const std::filesystem::path &supplied,
   }
   for (auto name : {"DATA_DIR",
                     "DB_PATH",
+                    "ARTIFACT_ROOT",
+                    "ARTIFACT_SERVICE_URL",
+                    "ARTIFACT_SERVICE_TOKEN",
+                    "ARTIFACT_SERVICE_HOST",
+                    "ARTIFACT_SERVICE_PORT",
                     "STORAGE_BACKEND",
                     "POSTGRES_DSN",
                     "POSTGRES_SCHEMA",
@@ -337,6 +357,9 @@ Config load_config(const std::filesystem::path &supplied,
                     "MAX_WORKER_WALL_TIME_MS",
                     "MAX_WORKER_TOKENS_PER_RUN",
                     "MAX_WORKER_COST_UNITS_PER_RUN",
+                    "MAX_ARTIFACT_BYTES",
+                    "MAX_ARTIFACT_TEMP_BYTES",
+                    "ARTIFACT_CLEANUP_GRACE_SECONDS",
                     "JSON_LOGS",
                     "ALLOW_NETWORK",
                     "ALLOW_REMOTE_API",
@@ -394,6 +417,16 @@ Config load_config(const std::filesystem::path &supplied,
   for (const auto &[k, v] : values) {
     if (k == "data_dir")
       c.data_dir = v;
+    else if (k == "artifact_root")
+      c.artifact_root = v;
+    else if (k == "artifact_service_url")
+      c.artifact_service_url = v;
+    else if (k == "artifact_service_token")
+      c.artifact_service_token = v;
+    else if (k == "artifact_service_host")
+      c.artifact_service_host = v;
+    else if (k == "artifact_service_port")
+      c.artifact_service_port = integer(v);
     else if (k == "storage_backend")
       c.storage_backend = v;
     else if (k == "postgres_dsn")
@@ -416,6 +449,12 @@ Config load_config(const std::filesystem::path &supplied,
       c.coordination_heartbeat_interval_ms = uint64(v);
     else if (k == "db_path")
       c.db_path = v;
+    else if (k == "max_artifact_bytes")
+      c.max_artifact_bytes = uint64(v);
+    else if (k == "max_artifact_temp_bytes")
+      c.max_artifact_temp_bytes = uint64(v);
+    else if (k == "artifact_cleanup_grace_seconds")
+      c.artifact_cleanup_grace_seconds = uint64(v);
     else if (k == "plugin_dir")
       c.plugin_dirs = {std::filesystem::path(v)};
     else if (k == "api_host")

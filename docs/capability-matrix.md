@@ -12,11 +12,12 @@ successful local unit test does not imply support in every backend mode.
 | Distributed `NodeWork` | Not supported | Available but single-instance | Supported with capability-filtered claims |
 | Remote agent workers | Not supported | Not required | Supported for bounded worker workloads |
 | Worker leasing/fencing | Not applicable | Available but single-instance | Supported; stale completion is rejected |
-| Workspace manifest transport | Not supported | Available for local validation | Supported with bounded manifests and SHA-256 validation |
-| Large artifact transport | Not supported | Not supported | Not supported in RC1 |
+| Workspace manifest transport | Not supported | Available for local validation | Supported with bounded inline or content-addressed manifests and SHA-256 validation |
+| Large artifact transport | Not supported | Supported through the local content-addressed store | Supported when participating instances use the same trusted reachable artifact root; no public artifact service is provided |
 | Arbitrary remote tools | Not supported | Not supported | Not supported |
 
 LASO provides at-least-once attempt semantics with one authoritative fenced
 completion. It does not claim exactly-once execution. Remote side effects,
-general remote shell access, cluster scheduling, and large-object transfer are
-outside this release candidate.
+general remote shell access, and cluster scheduling remain outside this release
+candidate. Artifact transfer is limited to bounded, content-addressed objects
+on a trusted configured store; arbitrary remote filesystem access is not enabled.

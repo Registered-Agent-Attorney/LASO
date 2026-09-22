@@ -7,8 +7,10 @@ shape can be placed on separate machines; only the PostgreSQL connection and
 explicitly staged workspace need to be reachable by both instances.
 
 The pipeline requires the `deterministic` capability, creates a durable worker
-job, passes a bounded workspace-manifest-shaped input, validates the worker
-result with a deterministic validator, and reaches the output boundary.
+job, stages a bounded content-addressed workspace through the artifact gateway,
+has the worker create a deterministic 2 MiB result object, validates the worker
+result with a deterministic validator, and downloads/verifies the returned
+artifact from the owner before reaching the output boundary.
 
 ## Run it
 
@@ -32,7 +34,9 @@ The script starts both instances on loopback for a reproducible smoke test.
 For a two-machine run, render `owner.yaml.in` on the owner and `worker.yaml.in`
 on the worker. Keep the worker's `data_dir` and process-worker roots local to
 the worker. Do not share host absolute paths as workflow state and do not
-expose PostgreSQL publicly; use a private network or an authenticated tunnel.
+expose PostgreSQL or the artifact gateway publicly; use a private network or
+authenticated tunnels. The worker's artifact URL must reach only the owner's
+authenticated object gateway.
 
 ## Inspect and recover
 

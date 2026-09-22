@@ -481,9 +481,35 @@ inline void from_json(const Json &j, Event &e) {
   e.metadata = j.value("metadata", Json::object());
 }
 struct Artifact {
-  std::string id = uuid(), run_id, node_id, name, media_type, location, created_at = timestamp();
+  std::string id = uuid(), run_id, node_id, name, media_type, location, object_id, sha256,
+              created_at = timestamp();
+  std::uint64_t size = 0;
   Json metadata = Json::object();
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Artifact, id, run_id, node_id, name, media_type, location,
-                                   created_at, metadata)
+inline void to_json(Json &j, const Artifact &a) {
+  j = {{"id", a.id},
+       {"run_id", a.run_id},
+       {"node_id", a.node_id},
+       {"name", a.name},
+       {"media_type", a.media_type},
+       {"location", a.location},
+       {"object_id", a.object_id},
+       {"sha256", a.sha256},
+       {"size", a.size},
+       {"created_at", a.created_at},
+       {"metadata", a.metadata}};
+}
+inline void from_json(const Json &j, Artifact &a) {
+  a.id = j.value("id", uuid());
+  a.run_id = j.value("run_id", std::string{});
+  a.node_id = j.value("node_id", std::string{});
+  a.name = j.value("name", std::string{});
+  a.media_type = j.value("media_type", std::string{});
+  a.location = j.value("location", std::string{});
+  a.object_id = j.value("object_id", std::string{});
+  a.sha256 = j.value("sha256", std::string{});
+  a.size = j.value("size", std::uint64_t{0});
+  a.created_at = j.value("created_at", timestamp());
+  a.metadata = j.value("metadata", Json::object());
+}
 } // namespace laso

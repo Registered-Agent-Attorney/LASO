@@ -40,6 +40,9 @@ public:
   Json inspect_run(const std::string &id) const;
   std::vector<Json> inspect_node_works(const std::string &run_id = "") const;
   Json inspect_node_work(const std::string &id) const;
+  std::vector<Json> inspect_artifacts(const std::string &run_id = "") const;
+  Json artifact_integrity() const;
+  Json artifact_gc(bool dry_run, std::uint64_t grace_seconds = 0);
   std::vector<Json> inspect_worker_jobs(const std::string &run_id = "") const;
   Json inspect_worker_job(const std::string &id) const;
   Json get(RecordKind kind, const std::string &id) const {
@@ -85,7 +88,7 @@ public:
     return events_;
   }
   ArtifactStore &artifacts() {
-    return artifacts_;
+    return *artifacts_;
   }
   EventIngress &event_ingress() {
     return ingress_;
@@ -114,8 +117,8 @@ private:
   std::shared_ptr<WorkerManager> worker_manager_;
   PluginLoader plugins_;
   std::vector<std::shared_ptr<ProcessWorkerTransport>> process_workers_;
+  std::unique_ptr<ArtifactStore> artifacts_;
   Runtime runtime_;
-  LocalArtifactStore artifacts_;
   LocalScheduler scheduler_;
   bool shutdown_ = false;
   Json pipeline_record(const std::string &reference) const;

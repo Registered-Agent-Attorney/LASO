@@ -4,6 +4,8 @@
 #include <boost/beast.hpp>
 #include <fstream>
 #include <laso/api/api.hpp>
+#include <laso/artifacts/artifacts.hpp>
+#include <laso/artifacts/server.hpp>
 #include <laso/runtime/workspace.hpp>
 #include <laso/workers/worker.hpp>
 #include <thread>
@@ -568,9 +570,128 @@ TEST(Artifacts, IgnoresUntrustedNamesForPath) {
   a.run_id = "../../outside";
   std::string data = "example";
   auto saved = artifacts.put(a, std::as_bytes(std::span(data.data(), data.size())));
-  EXPECT_EQ(std::filesystem::path(saved.location).parent_path(), dir.path / "artifacts");
-  EXPECT_TRUE(std::filesystem::exists(saved.location));
+  EXPECT_TRUE(saved.location.empty());
+  ASSERT_TRUE(saved.object_id.starts_with("sha256:"));
+  EXPECT_TRUE(artifacts.exists(saved.object_id));
+  EXPECT_NO_THROW(artifacts.verify(saved.object_id, saved.sha256, saved.size));
   EXPECT_EQ(storage->get(RecordKind::Artifact, saved.id).at("name"), "../../outside");
+}
+TEST(Artifacts, ContentAddressedObjectsStreamAndMaterialize) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  ArtifactStoreLimits limits;
+  limits.max_object_bytes = 2 * 1024 * 1024;
+  limits.max_temp_bytes = 4 * 1024 * 1024;
+  LocalArtifactStore artifacts(dir.path / "artifacts", *storage, limits);
+  const auto source = dir.path / "source.bin";
+  {
+    std::ofstream stream(source, std::ios::binary);
+    for (unsigned i = 0; i < 128; ++i) {
+      const std::string block(8192, static_cast<char>(i));
+      stream.write(block.data(), block.size());
+    }
+  }
+  Artifact metadata;
+  metadata.run_id = "run";
+  metadata.node_id = "node";
+  metadata.name = "result.bin";
+  const auto saved = artifacts.put_file(metadata, source);
+  EXPECT_EQ(saved.size, std::filesystem::file_size(source));
+  EXPECT_TRUE(artifacts.exists(saved.object_id));
+  EXPECT_NO_THROW(artifacts.verify(saved.object_id, saved.sha256, saved.size));
+  const auto destination = dir.path / "materialized" / "result.bin";
+  EXPECT_NO_THROW(artifacts.materialize(saved.object_id, destination, saved.sha256, saved.size));
+  EXPECT_EQ(std::filesystem::file_size(destination), std::filesystem::file_size(source));
+  EXPECT_EQ(read_document(destination), read_document(source));
+  const auto duplicate = artifacts.put_file(metadata, source);
+  EXPECT_EQ(duplicate.object_id, saved.object_id);
+  const auto report = artifacts.integrity();
+  EXPECT_EQ(report.invalid, 0U);
+  EXPECT_GE(report.verified, 1U);
+}
+TEST(Artifacts, GarbageCollectionHandlesFreshStore) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  LocalArtifactStore artifacts(dir.path / "artifacts", *storage);
+  const auto report = artifacts.collect_garbage(true);
+  EXPECT_EQ(report.at("dry_run"), true);
+  EXPECT_EQ(report.at("live_objects"), 0U);
+  EXPECT_EQ(report.at("removed"), 0U);
+}
+TEST(Artifacts, ObjectBackedWorkspaceStagesWithIntegrity) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  LocalArtifactStore artifacts(dir.path / "artifacts", *storage);
+  std::filesystem::create_directories(dir.path / "workspace" / "src");
+  std::ofstream(dir.path / "workspace" / "src" / "main.cpp") << "int main() { return 0; }\n";
+  const auto manifest =
+      workspace_manifest(dir.path / "workspace", artifacts, WorkspaceManifestLimits{}, "run-1",
+                         "work-1", "attempt-1", "worker-1", 7);
+  ASSERT_EQ(manifest.at("version"), 2);
+  EXPECT_EQ(manifest.at("provenance").at("run_id"), "run-1");
+  EXPECT_EQ(manifest.at("provenance").at("node_work_id"), "work-1");
+  EXPECT_EQ(manifest.at("provenance").at("attempt_id"), "attempt-1");
+  EXPECT_EQ(manifest.at("provenance").at("worker_id"), "worker-1");
+  EXPECT_EQ(manifest.at("provenance").at("fencing_token"), 7);
+  const auto staged = stage_workspace(manifest, dir.path / "staging", "run", "work", "attempt",
+                                      WorkspaceManifestLimits{}, &artifacts);
+  EXPECT_EQ(read_document(staged / "src" / "main.cpp"), "int main() { return 0; }\n");
+  auto corrupted = manifest;
+  corrupted["files"][0]["sha256"] = std::string(64, '0');
+  EXPECT_THROW(stage_workspace(corrupted, dir.path / "staging", "run", "work", "bad",
+                               WorkspaceManifestLimits{}, &artifacts),
+               Error);
+}
+TEST(Artifacts, InlineWorkspaceManifestUsesStandardSha256) {
+  TemporaryDirectory dir;
+  std::ofstream(dir.path / "input.txt") << "abc";
+  const auto manifest = workspace_manifest(dir.path);
+  ASSERT_EQ(manifest.at("files").size(), 1U);
+  EXPECT_EQ(manifest.at("files")[0].at("sha256"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_EQ(manifest.at("files")[0].at("size"), 3U);
+  EXPECT_EQ(sha256_file(dir.path / "input.txt").first,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  const std::array<unsigned char, 3> bytes{'a', 'b', 'c'};
+  EXPECT_EQ(sha256_bytes(bytes), sha256_file(dir.path / "input.txt").first);
+}
+TEST(Artifacts, AuthenticatedRemoteGatewayStreamsAndMaterializesLargeObject) {
+  TemporaryDirectory dir;
+  auto owner_storage = make_storage(dir.path / "owner.db");
+  auto worker_storage = make_storage(dir.path / "worker.db");
+  LocalArtifactStore owner_store(dir.path / "owner-artifacts", *owner_storage,
+                                 {64U * 1024U * 1024U, 128U * 1024U * 1024U, 3600});
+  asio::io_context gateway_io;
+  ArtifactHttpServer gateway(gateway_io, owner_store, "127.0.0.1", 0, "synthetic-artifact-token",
+                             64U * 1024U * 1024U);
+  gateway.start();
+  RemoteArtifactStore remote("http://127.0.0.1:" + std::to_string(gateway.port()),
+                             "synthetic-artifact-token", dir.path / "worker-cache", *worker_storage,
+                             {64U * 1024U * 1024U, 128U * 1024U * 1024U, 3600});
+  const auto source = dir.path / "large.bin";
+  {
+    std::ofstream output(source, std::ios::binary);
+    for (std::size_t index = 0; index < 16U * 1024U * 1024U; ++index)
+      output.put(static_cast<char>((index * 31U + 7U) & 0xffU));
+  }
+  Artifact metadata;
+  metadata.run_id = "run-remote";
+  metadata.node_id = "node-remote";
+  metadata.name = "large.bin";
+  metadata.media_type = "application/octet-stream";
+  metadata.metadata = Json{{"purpose", "remote-test"}};
+  const auto saved = remote.put_file(metadata, source);
+  EXPECT_TRUE(owner_store.exists(saved.object_id));
+  EXPECT_NO_THROW(remote.verify(saved.object_id, saved.sha256, saved.size));
+  const auto materialized = dir.path / "materialized.bin";
+  EXPECT_NO_THROW(remote.materialize(saved.object_id, materialized, saved.sha256, saved.size));
+  EXPECT_EQ(sha256_file(materialized), sha256_file(source));
+
+  RemoteArtifactStore unauthorized("http://127.0.0.1:" + std::to_string(gateway.port()),
+                                   "wrong-token", dir.path / "unauthorized-cache", *worker_storage,
+                                   {64U * 1024U * 1024U, 128U * 1024U * 1024U, 3600});
+  EXPECT_THROW(unauthorized.verify(saved.object_id), Error);
+  gateway.stop();
 }
 TEST(Plugins, DiscoversLoadsInvokesAndUnloadsExample) {
   TemporaryDirectory dir;

@@ -458,3 +458,49 @@ at least once and may be duplicated after failure or lease expiry, while only a
 valid current fence can commit one authoritative result. LASO does not claim
 exactly-once execution. SQLite remains explicitly single-instance, and remote
 execution remains limited to the supported agent/worker path.
+
+## M3.6 artifact transport status — partially validated
+
+Artifact transport is implemented and substantially validated. Artifact-specific
+cross-machine chaos testing remains in progress. The results below are the
+existing acceptance evidence; they are not a claim that the remaining chaos
+scenarios passed.
+
+| Artifact validation | Result |
+|---|---|
+| 64 MiB object-backed cross-machine transfer | **PASS** |
+| Approximate materialization peak RSS for the 64 MiB object | **~13 MiB** |
+| Deterministic cross-machine object-backed runs | **PASS: 3/3** |
+| OpenCode 1.18.29 object-backed runs | **PASS: 3/3** |
+| Clean-clone SQLite artifact workflow, including generated 64 MiB put/download/hash verification, listing, integrity, and GC dry-run | **PASS** |
+| Clean-clone PostgreSQL distributed artifact example | **PASS: `state=Completed`, `remote_artifact=owner_verified`** |
+| PostgreSQL Debug matrix | **PASS: 233 total; 228 passed, 0 failed, 5 expected skips** |
+| Focused PostgreSQL matrix | **PASS: 44/44** |
+| Artifact-focused tests | **PASS: 6/6** |
+| SQLite Debug matrix | **PASS: 202 total; 198 passed, 0 failed, 4 expected skips** |
+| Release matrix | **PASS: 202 total; 198 passed, 0 failed, 4 expected skips** |
+| ASan/UBSan equivalent matrix | **PASS; expected PostgreSQL skips; no actionable sanitizer failures reported** |
+
+The following artifact-specific acceptance work remains open:
+
+- [ ] Worker death after artifact materialization
+- [ ] Worker death during output upload
+- [ ] Worker death after publication/pre-completion
+- [ ] Network-separated stale artifact completion
+- [ ] Artifact-stage PostgreSQL interruption
+- [ ] Full owner-restart artifact recovery
+- [ ] Diagnose remote worker health/heartbeat stall
+
+In the latest closure attempt, the remote worker stopped advancing its health/
+heartbeat and did not claim queued work, so the requested artifact chaos barriers
+were not reached. The root cause is not yet established; it has not been
+classified as a LASO, network, or environment defect. These cases remain
+follow-up validation, not passed tests. The earlier distributed-runtime
+cancellation, lease, owner recovery, and database interruption results above
+refer to that runtime acceptance scope and do not substitute for these
+artifact-specific scenarios.
+
+The artifact gateway currently uses a deployment-local bearer token. SQLite
+remains single-instance; S3 storage and arbitrary remote side-effecting tools
+are not implemented. LASO provides at-least-once attempt semantics with one
+authoritative fenced completion, not exactly-once execution.

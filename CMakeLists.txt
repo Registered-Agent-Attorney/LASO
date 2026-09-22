@@ -104,7 +104,7 @@ target_link_libraries(laso_application PUBLIC laso_runtime laso_storage laso_plu
 if(LASO_ENABLE_POSTGRES)
   target_compile_definitions(laso_application PRIVATE LASO_HAS_POSTGRES=1)
 endif()
-add_library(laso_api src/api/api.cpp src/api/server.cpp)
+add_library(laso_api src/api/api.cpp src/api/server.cpp src/api/artifact_server.cpp)
 laso_target(laso_api)
 target_link_libraries(laso_api PUBLIC laso_application)
 add_library(laso_cli src/cli/cli.cpp)

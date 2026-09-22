@@ -65,6 +65,9 @@ laso worker-job inspect ID
 laso worker-job cancel ID
 laso node-work list [--run-id ID]
 laso node-work show ID
+laso artifact list [--run-id ID]
+laso artifact verify
+laso artifact gc [--execute] [--grace-seconds N]
 laso instance list
 ```
 

@@ -15,6 +15,10 @@ max_worker_jobs: 4
 max_worker_jobs_per_worker: 1
 api_host: 127.0.0.1
 api_port: @WORKER_PORT@
+artifact_service_host: 127.0.0.1
+artifact_service_port: 0
+artifact_service_url: "@ARTIFACT_SERVICE_URL@"
+artifact_service_token: "@ARTIFACT_SERVICE_TOKEN@"
 log_level: warn
 json_logs: true
 allow_network: false
@@ -22,7 +26,7 @@ allow_remote_api: false
 process_workers:
   reference:
     executable: @WORKER_HOST@
-    args: [--mode, success]
+    args: [--mode, artifact]
     environment_allowlist: [PATH]
     startup_timeout_ms: 5000
     request_timeout_ms: 5000

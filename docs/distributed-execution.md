@@ -59,15 +59,20 @@ claiming instance checks its local worker health and capability before taking th
 lease. An unavailable capability therefore remains queued rather than being
 claimed and failed by an incompatible instance.
 
-For supported worker branches, the first M3 workspace transport is an inline,
-bounded manifest. It contains relative paths, byte content, sizes, and SHA-256
-hashes. Staging rejects absolute paths, traversal, duplicate paths, symlinks,
-oversized files, oversized workspaces, and hash mismatches. Staging is created
-under the local LASO data directory using the run/work/attempt identity. The
-provider receives an ephemeral local `project_dir`; that path is not used as
-portable workflow state. Returned workspace content is validated and retained
-as a per-branch manifest in the durable joined message. Larger repositories and
-object-store artifact exchange remain a follow-on transport milestone.
+For supported worker branches, small legacy inputs may use an inline bounded
+manifest. The durable transport uses a version-2 content-addressed manifest:
+relative paths point to immutable SHA-256 objects, so repository-scale files
+are streamed instead of embedded in PostgreSQL or NDJSON messages. Instances
+may use a protected shared `artifact_root`; where that is unavailable, the
+artifact-store owner can expose the authenticated object-only gateway described
+in [the artifact-store guide](artifacts.md). Neither mode exposes arbitrary
+host paths. Staging rejects absolute paths, traversal, duplicate paths,
+symlinks, oversized files, oversized workspaces, and hash mismatches. Staging
+is created under the local LASO data directory using the run/work/attempt
+identity. The provider receives an ephemeral local `project_dir`; that path is
+not used as portable workflow state. Returned workspace manifests include
+attempt/fence provenance and are re-verified by the owner before they are
+retained in the durable joined message.
 
 Each claim records a durable work attempt ID. Lease takeover increments the
 claim-attempt counter and assigns a new attempt ID; ordinary node retries retain
@@ -124,8 +129,11 @@ inspection is available at `GET /api/v1/instances` and `laso instance list`.
   protocol must add explicit remote cancellation and lease-loss signalling; the
   control plane cannot claim provider termination merely because a cancellation
   request was recorded.
-- The inline manifest is a bounded first transport, not an unrestricted remote
-  filesystem. Credentials and arbitrary environment variables are never part of
-  the manifest or capability advertisement.
+- The object-backed manifest is a bounded trusted-store transport, not an
+  unrestricted remote filesystem. Participating instances use either a
+  protected reachable artifact root or the authenticated object-only gateway;
+  the gateway does not expose directory listings or arbitrary paths.
+  Credentials and arbitrary environment variables are never part of the
+  manifest or capability advertisement.
 - Do not use a mutable `latest` pipeline identity for historical work; pipeline
   revisions remain immutable `name@version` records.

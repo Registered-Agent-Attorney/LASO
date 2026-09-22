@@ -4,6 +4,35 @@
 
 namespace laso {
 namespace {
+Json object_workspace_manifest(const Json &manifest, ArtifactStore &store,
+                               const std::string &run_id, const std::string &node_id) {
+  if (manifest.value("version", 1U) != 1U)
+    return manifest;
+  WorkspaceManifestLimits limits;
+  validate_workspace_manifest(manifest, limits);
+  Json result{{"version", 2}, {"storage", "content-addressed"}, {"files", Json::array()}};
+  for (const auto &entry : manifest.at("files")) {
+    const auto data = entry.at("data").get<std::vector<unsigned char>>();
+    std::vector<std::byte> bytes;
+    bytes.reserve(data.size());
+    for (const auto value : data)
+      bytes.push_back(static_cast<std::byte>(value));
+    Artifact artifact;
+    artifact.run_id = run_id;
+    artifact.node_id = node_id;
+    artifact.name = entry.at("path").get<std::string>();
+    artifact.media_type = "application/octet-stream";
+    artifact.metadata = Json{{"purpose", "workspace-input"}};
+    const auto saved = store.put(std::move(artifact), bytes);
+    result["files"].push_back({{"path", entry.at("path")},
+                               {"object_id", saved.object_id},
+                               {"sha256", saved.sha256},
+                               {"size", saved.size}});
+  }
+  validate_workspace_manifest(result, limits);
+  return result;
+}
+
 bool worker_requirement(const PipelineDefinition &pipeline, const ExecutionToken &token,
                         std::string &worker_id, std::string &capability) {
   std::vector<std::string> pending{token.node_id};
@@ -329,9 +358,9 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
     if (!work.required_worker_id.empty() || !work.required_capability.empty()) {
       token.message.metadata.erase("project_dir");
       if (token.message.metadata.contains("workspace_manifest")) {
-        staged_workspace =
-            stage_workspace(token.message.metadata.at("workspace_manifest"), deps_.workspace_root,
-                            work.run_id, work.id, work.attempt_id);
+        staged_workspace = stage_workspace(
+            token.message.metadata.at("workspace_manifest"), deps_.workspace_root, work.run_id,
+            work.id, work.attempt_id, WorkspaceManifestLimits{}, deps_.artifacts);
         token.message.metadata.erase("workspace_manifest");
         token.message.metadata["project_dir"] = staged_workspace->string();
       }
@@ -360,7 +389,11 @@ Task<void> Runtime::execute_distributed_work(NodeWork work, LeaseRecord work_lea
     }
     if (staged_workspace)
       completed.result->metadata["workspace_result_manifest"] =
-          workspace_manifest(*staged_workspace);
+          deps_.artifacts
+              ? workspace_manifest(*staged_workspace, *deps_.artifacts, WorkspaceManifestLimits{},
+                                   work.run_id, work.id, work.attempt_id, work_lease.owner_instance,
+                                   work_lease.fencing_token)
+              : workspace_manifest(*staged_workspace);
     if (!work.required_worker_id.empty() || !work.required_capability.empty())
       remove_ephemeral_workspace_paths(completed.result->metadata);
     completed.state = NodeWorkState::Completed;
@@ -455,6 +488,10 @@ Task<bool> Runtime::execute_parallel(Run &run, const PipelineDefinition &pipelin
       work.index = static_cast<unsigned>(index);
       work.token = std::move(tokens[index]);
       work.steps = run.steps;
+      if (deps_.artifacts && work.token.message.metadata.contains("workspace_manifest"))
+        work.token.message.metadata["workspace_manifest"] =
+            object_workspace_manifest(work.token.message.metadata.at("workspace_manifest"),
+                                      *deps_.artifacts, run.id, work.id);
       if (!worker_requirement(pipeline, work.token, work.required_worker_id,
                               work.required_capability))
         throw Error(ErrorCode::Execution,

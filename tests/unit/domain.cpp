@@ -104,6 +104,35 @@ TEST(Configuration, ParsesWorkerBudgets) {
   EXPECT_EQ(c.max_worker_tokens_per_run, 500000U);
   EXPECT_DOUBLE_EQ(c.max_worker_cost_units_per_run, 2.5);
 }
+TEST(Configuration, ParsesArtifactStoreSettings) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "laso.yaml";
+  std::ofstream(path) << "artifact_root: /var/tmp/laso-artifacts\n"
+                         "max_artifact_bytes: 1048576\n"
+                         "max_artifact_temp_bytes: 2097152\n"
+                         "artifact_cleanup_grace_seconds: 7200\n";
+  const auto c = load_config(path);
+  EXPECT_EQ(c.artifact_root, "/var/tmp/laso-artifacts");
+  EXPECT_EQ(c.max_artifact_bytes, 1048576U);
+  EXPECT_EQ(c.max_artifact_temp_bytes, 2097152U);
+  EXPECT_EQ(c.artifact_cleanup_grace_seconds, 7200U);
+}
+TEST(Configuration, ParsesAuthenticatedArtifactGatewaySettings) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "laso.yaml";
+  std::ofstream(path) << "artifact_service_host: 127.0.0.1\n"
+                         "artifact_service_port: 9090\n"
+                         "artifact_service_token: synthetic-token\n";
+  const auto c = load_config(path);
+  EXPECT_EQ(c.artifact_service_host, "127.0.0.1");
+  EXPECT_EQ(c.artifact_service_port, 9090U);
+  EXPECT_EQ(c.artifact_service_token, "synthetic-token");
+  std::ofstream(path) << "artifact_service_url: http://127.0.0.1:9090\n"
+                         "artifact_service_token: synthetic-token\n";
+  const auto worker = load_config(path);
+  EXPECT_EQ(worker.artifact_service_url, "http://127.0.0.1:9090");
+  EXPECT_EQ(worker.artifact_service_token, "synthetic-token");
+}
 TEST(Pipeline, RejectsUnboundedCycle) {
   auto yaml = fixture("bounded-loop");
   auto position = yaml.find(", max_iterations: 2}");

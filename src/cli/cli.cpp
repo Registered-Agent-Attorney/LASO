@@ -113,6 +113,17 @@ int cli_main(int argc, char **argv) {
   node_work_list->add_option("--run-id", node_work_run_id);
   auto *node_work_show = node_work->add_subcommand("show");
   node_work_show->add_option("id", target)->required();
+  auto *artifact = app.add_subcommand("artifact", "Inspect and maintain durable artifact objects");
+  artifact->require_subcommand(1);
+  auto *artifact_list = artifact->add_subcommand("list");
+  std::string artifact_run_id;
+  artifact_list->add_option("--run-id", artifact_run_id);
+  auto *artifact_verify = artifact->add_subcommand("verify");
+  auto *artifact_gc = artifact->add_subcommand("gc");
+  bool artifact_execute = false;
+  std::uint64_t artifact_grace_seconds = 0;
+  artifact_gc->add_flag("--execute", artifact_execute, "Delete only unreferenced, aged objects");
+  artifact_gc->add_option("--grace-seconds", artifact_grace_seconds);
   auto *instance = app.add_subcommand("instance");
   instance->require_subcommand(1);
   auto *instance_list = instance->add_subcommand("list");
@@ -254,6 +265,12 @@ int cli_main(int argc, char **argv) {
       result = service.inspect_node_works(node_work_run_id);
     else if (*node_work_show)
       result = service.inspect_node_work(target);
+    else if (*artifact_list)
+      result = service.inspect_artifacts(artifact_run_id);
+    else if (*artifact_verify)
+      result = service.artifact_integrity();
+    else if (*artifact_gc)
+      result = service.artifact_gc(!artifact_execute, artifact_grace_seconds);
     else if (*instance_list)
       result = service.instances();
     if (run_executor) {

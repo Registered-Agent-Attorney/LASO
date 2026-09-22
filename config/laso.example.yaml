@@ -1,4 +1,17 @@
 data_dir: .laso
+artifact_root: .laso/artifacts
+# Object-backed workspaces and results are streamed through this store. Keep
+# limits bounded and use a trusted shared root only for multi-instance mode.
+max_artifact_bytes: 268435456
+max_artifact_temp_bytes: 536870912
+artifact_cleanup_grace_seconds: 3600
+# Optional authenticated gateway for remote workers. The owner enables the
+# listener; a remote worker sets artifact_service_url instead. Keep the token
+# in an environment variable or a protected deployment-local file.
+# artifact_service_host: 127.0.0.1
+# artifact_service_port: 0
+# artifact_service_url: "http://127.0.0.1:9090"
+# artifact_service_token: "<random-deployment-token>"
 # SQLite is the default embedded backend. PostgreSQL is optional:
 # storage_backend: postgres
 # postgres_dsn: "host=127.0.0.1 port=5432 dbname=laso user=laso"

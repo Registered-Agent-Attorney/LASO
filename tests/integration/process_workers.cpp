@@ -112,6 +112,23 @@ TEST(ProcessWorker, UsageIsOptionalAndPropagatedWhenReported) {
   EXPECT_EQ(result.usage.output_tokens, std::optional<std::uint64_t>(2));
 }
 
+TEST(ProcessWorker, DeterministicArtifactModeWritesOnlyIntoProvidedWorkspace) {
+  TemporaryDirectory dir;
+  auto config = worker_config("artifact", 3000);
+  ProcessWorkerTransport transport("process", std::move(config));
+  ASSERT_NO_THROW(transport.start());
+  auto artifact_request = request();
+  artifact_request.metadata = {{"project_dir", dir.path.string()}};
+  const auto result = transport.submit(artifact_request);
+  ASSERT_EQ(result.state, WorkerJobState::Completed);
+  EXPECT_EQ(result.result.at("artifact_path"), "result/artifact.bin");
+  EXPECT_EQ(result.result.at("artifact_size"), 2 * 1024 * 1024);
+  const auto output = dir.path / "result" / "artifact.bin";
+  EXPECT_TRUE(std::filesystem::is_regular_file(output));
+  EXPECT_EQ(std::filesystem::file_size(output), 2 * 1024 * 1024);
+  EXPECT_FALSE(std::filesystem::exists(dir.path.parent_path() / "artifact.bin"));
+}
+
 TEST(ProcessWorker, ExplicitEnvironmentOverridesParentWithoutImplicitInheritance) {
   struct EnvironmentGuard {
     ~EnvironmentGuard() {

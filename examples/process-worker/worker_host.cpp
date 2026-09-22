@@ -1,5 +1,8 @@
+#include <array>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <laso/workers/process_protocol.hpp>
 #include <laso/workers/worker.hpp>
@@ -82,6 +85,30 @@ Json terminal_result(const std::string &mode) {
   }
   return result;
 }
+
+void write_deterministic_artifact(const Json &request) {
+  const auto project_dir = request.value("payload", Json::object())
+                               .value("metadata", Json::object())
+                               .value("project_dir", std::string{});
+  if (project_dir.empty())
+    throw std::runtime_error("artifact mode requires a staged project directory");
+  const std::filesystem::path output =
+      std::filesystem::path(project_dir) / "result" / "artifact.bin";
+  std::error_code error;
+  std::filesystem::create_directories(output.parent_path(), error);
+  if (error)
+    throw std::runtime_error("unable to create artifact output directory");
+  std::ofstream stream(output, std::ios::binary | std::ios::trunc);
+  if (!stream)
+    throw std::runtime_error("unable to create artifact output");
+  std::array<char, 64 * 1024> chunk{};
+  chunk.fill('A');
+  constexpr std::size_t artifact_bytes = 2 * 1024 * 1024;
+  for (std::size_t written = 0; written < artifact_bytes; written += chunk.size())
+    stream.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+  if (!stream)
+    throw std::runtime_error("unable to write artifact output");
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -143,6 +170,8 @@ int main(int argc, char **argv) {
       } else if (mode == "delay" || mode == "cancel") {
         response(request, {{"ok", true}, {"state", "Queued"}, {"external_job_id", external}});
       } else {
+        if (mode == "artifact")
+          write_deterministic_artifact(request);
         if ((mode == "interaction" || mode == "permission" || mode == "question") &&
             !interaction(job_id, external, mode == "question" ? "question" : "permission")) {
           response(request, {{"ok", true},
@@ -157,6 +186,10 @@ int main(int argc, char **argv) {
                   {"state", "Completed"},
                   {"external_job_id", external},
                   {"payload", terminal_result(mode)}};
+        if (mode == "artifact")
+          body["payload"]["artifact_path"] = "result/artifact.bin";
+        if (mode == "artifact")
+          body["payload"]["artifact_size"] = 2 * 1024 * 1024;
         if (mode != "no-usage")
           body["usage"] = usage(mode);
         response(request, body);

@@ -15,6 +15,10 @@ coordination:
   heartbeat_interval_ms: 150
 api_host: 127.0.0.1
 api_port: 0
+artifact_service_host: 127.0.0.1
+artifact_service_port: @ARTIFACT_SERVICE_PORT@
+artifact_service_url: "@ARTIFACT_SERVICE_URL@"
+artifact_service_token: "@ARTIFACT_SERVICE_TOKEN@"
 log_level: warn
 json_logs: true
 allow_network: false

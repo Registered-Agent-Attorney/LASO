@@ -2,6 +2,8 @@
 #include <csignal>
 #include <iostream>
 #include <laso/api/api.hpp>
+#include <laso/artifacts/server.hpp>
+#include <memory>
 #include <sys/stat.h>
 
 int main(int argc, char **argv) {
@@ -30,12 +32,23 @@ int main(int argc, char **argv) {
     laso::Api api(service, identity);
     laso::HttpServer server(executor.context(), api, config.api_host,
                             static_cast<unsigned short>(config.api_port));
+    std::unique_ptr<laso::ArtifactHttpServer> artifact_server;
+    if (config.artifact_service_port != 0) {
+      artifact_server = std::make_unique<laso::ArtifactHttpServer>(
+          executor.context(), service.artifacts(), config.artifact_service_host,
+          static_cast<unsigned short>(config.artifact_service_port), config.artifact_service_token,
+          config.max_artifact_bytes);
+    }
     laso::asio::signal_set signals(executor.context(), SIGINT, SIGTERM);
     signals.async_wait([&](const boost::system::error_code &, int) {
+      if (artifact_server)
+        artifact_server->stop();
       server.stop();
       service.shutdown();
     });
     server.start();
+    if (artifact_server)
+      artifact_server->start();
     executor.start();
     executor.join();
     return 0;

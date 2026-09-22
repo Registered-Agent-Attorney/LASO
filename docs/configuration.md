@@ -12,8 +12,16 @@ credentials and binds the development API to loopback.
 
 | Field | Default | Meaning |
 |---|---:|---|
-| `data_dir` | `.laso` | Runtime state and local artifacts. Keep it inside a dedicated service-owned directory. |
+| `data_dir` | `.laso` | Runtime state and the default local artifact-store parent. Keep it inside a dedicated service-owned directory. |
 | `db_path` | `data_dir/laso.db` | SQLite database path when SQLite is selected. |
+| `artifact_root` | `data_dir/artifacts` | Content-addressed object store root. In multi-instance mode this must be a trusted shared/reachable filesystem root for every participating instance. |
+| `max_artifact_bytes` | `268435456` | Maximum size of one streamed artifact object. |
+| `max_artifact_temp_bytes` | `536870912` | Maximum configured temporary upload budget; incomplete uploads are private and reaped after the cleanup grace period. |
+| `artifact_cleanup_grace_seconds` | `3600` | Age before unreferenced objects or temporary uploads are eligible for cleanup. |
+| `artifact_service_host` | `127.0.0.1` | Bind address for the optional authenticated streaming artifact gateway. |
+| `artifact_service_port` | `0` | Gateway port on the artifact-store owner; `0` disables the gateway. |
+| `artifact_service_url` | empty | `http://host:port` endpoint used by a remote worker to fetch/upload objects. |
+| `artifact_service_token` | empty | Required bearer token for the gateway. Treat it as a secret and prefer `LASO_ARTIFACT_SERVICE_TOKEN`. |
 | `storage_backend` | `sqlite` | `sqlite` or `postgres`. PostgreSQL requires a PostgreSQL-enabled build. |
 | `postgres_dsn` | empty | PostgreSQL connection string. Treat it as a secret when it contains credentials. |
 | `postgres_schema` | `public` | Dedicated schema for this LASO deployment. |
@@ -26,6 +34,15 @@ credentials and binds the development API to loopback.
 SQLite is deliberately single-instance. Do not run multiple LASO processes
 against the same SQLite state. PostgreSQL multi-instance mode uses database
 leases and fencing; it permits at-least-once attempts, not exactly-once work.
+
+Artifact objects are immutable SHA-256-addressed files. The artifact store
+streams files through bounded temporary files and verifies the digest and byte
+count before materialization. A multi-instance deployment may either give each
+instance the same trusted `artifact_root` or use the optional authenticated
+object-only gateway. The gateway exposes no directory listing or arbitrary path
+access and must remain loopback/private unless an authenticated deployment
+explicitly permits a remote bind. Do not put credentials, provider
+environments, or arbitrary host paths in manifests.
 
 ## Concurrency, deadlines, and budgets
 

@@ -15,6 +15,9 @@ max_worker_jobs: 4
 max_worker_jobs_per_worker: 1
 api_host: 127.0.0.1
 api_port: @OWNER_PORT@
+artifact_service_host: 127.0.0.1
+artifact_service_port: @ARTIFACT_SERVICE_PORT@
+artifact_service_token: "@ARTIFACT_SERVICE_TOKEN@"
 log_level: warn
 json_logs: true
 allow_network: false
