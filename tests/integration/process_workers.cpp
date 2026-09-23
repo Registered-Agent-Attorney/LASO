@@ -7,15 +7,28 @@
 #include <laso/api/api.hpp>
 #include <laso/workers/process_transport.hpp>
 #include <thread>
+#include <unistd.h>
+#include <vector>
 
 using namespace laso;
 using namespace laso::test;
 
 namespace {
-ProcessWorkerConfig worker_config(const std::string &mode, std::uint64_t timeout = 500) {
+std::string worker_owner_token() {
+  static std::atomic<unsigned> next = 0;
+  return "laso-process-test-" + std::to_string(::getpid()) + "-" +
+         std::to_string(next.fetch_add(1, std::memory_order_relaxed));
+}
+
+ProcessWorkerConfig worker_config(const std::string &mode, std::uint64_t timeout = 500,
+                                  const std::string &owner_token = {}) {
   ProcessWorkerConfig result;
   result.executable = LASO_PROCESS_WORKER_HOST;
   result.args = {"--mode", mode};
+  if (!owner_token.empty()) {
+    result.args.emplace_back("--laso-test-owner-token");
+    result.args.push_back(owner_token);
+  }
   result.startup_timeout_ms = timeout;
   result.request_timeout_ms = timeout;
   return result;
@@ -34,7 +47,9 @@ WorkerRequest request(const std::string &worker = "process") {
   return result;
 }
 
-bool reference_host_running() {
+// Match a unique token passed only to this test's child. A basename-wide /proc
+// scan can mistake a sibling CTest process for this transport's worker.
+bool reference_host_running(const std::string &owner_token) {
   const std::filesystem::path proc("/proc");
   std::error_code error;
   for (const auto &entry : std::filesystem::directory_iterator(proc, error)) {
@@ -44,10 +59,40 @@ bool reference_host_running() {
     if (name.empty() || !std::all_of(name.begin(), name.end(), ::isdigit))
       continue;
     std::ifstream command(entry.path() / "cmdline", std::ios::binary);
-    std::string first;
-    std::getline(command, first, '\0');
-    if (first == LASO_PROCESS_WORKER_HOST)
+    std::vector<std::string> arguments;
+    std::string argument;
+    while (std::getline(command, argument, '\0'))
+      arguments.push_back(std::move(argument));
+    if (arguments.empty() || arguments.front() != LASO_PROCESS_WORKER_HOST)
+      continue;
+    for (std::size_t index = 1; index + 1 < arguments.size(); ++index)
+      if (arguments[index] == "--laso-test-owner-token" && arguments[index + 1] == owner_token) {
+        return true;
+      }
+  }
+  return false;
+}
+
+bool wait_for_reference_host(const std::string &owner_token, bool expected_running,
+                             std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (reference_host_running(owner_token) == expected_running)
       return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return reference_host_running(owner_token) == expected_running;
+}
+
+bool cancel_when_submit_is_active(ProcessWorkerTransport &transport, const std::string &job_id,
+                                  std::chrono::milliseconds timeout) {
+  // start() creates an idle child before submit begins, so process existence is
+  // not evidence that cancel_pending() can succeed. Wait on its actual contract.
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (transport.cancel_pending(job_id))
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   return false;
 }
@@ -169,8 +214,11 @@ TEST(ProcessWorker, MalformedOversizedExitAndHangAreBoundedFailures) {
 }
 
 TEST(ProcessWorker, RequestTimeoutTerminatesOwnedProcessGroup) {
-  auto config = worker_config("delay-ms", 5000);
+  const auto owner_token = worker_owner_token();
+  auto config = worker_config("delay-ms", 5000, owner_token);
   config.args = {"--mode", "delay-ms", "--delay-ms", "5000"};
+  config.args.emplace_back("--laso-test-owner-token");
+  config.args.push_back(owner_token);
   ProcessWorkerTransport transport("process", std::move(config));
   ASSERT_NO_THROW(transport.start());
   auto timed = request();
@@ -182,11 +230,12 @@ TEST(ProcessWorker, RequestTimeoutTerminatesOwnedProcessGroup) {
     EXPECT_TRUE(error.timed_out);
   }
   EXPECT_FALSE(transport.metadata().healthy);
-  EXPECT_FALSE(reference_host_running());
+  EXPECT_TRUE(wait_for_reference_host(owner_token, false));
 }
 
 TEST(ProcessWorker, PendingCancellationTerminatesAndRestartsOwnedProcessGroup) {
-  ProcessWorkerTransport transport("process", worker_config("hang", 5000));
+  const auto owner_token = worker_owner_token();
+  ProcessWorkerTransport transport("process", worker_config("hang", 5000, owner_token));
   ASSERT_NO_THROW(transport.start());
   std::promise<void> finished;
   auto future = finished.get_future();
@@ -197,15 +246,38 @@ TEST(ProcessWorker, PendingCancellationTerminatesAndRestartsOwnedProcessGroup) {
     }
     finished.set_value();
   });
-  for (unsigned attempt = 0; attempt < 100 && !reference_host_running(); ++attempt)
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  EXPECT_TRUE(transport.cancel_pending("job-process-1"));
+  const auto cancelled =
+      cancel_when_submit_is_active(transport, "job-process-1", std::chrono::seconds(2));
+  if (!cancelled) {
+    (void)future.wait_for(std::chrono::seconds(6));
+    submitter.join();
+    FAIL() << "submit never became cancellable before its bounded request deadline";
+    return;
+  }
   EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   submitter.join();
-  EXPECT_FALSE(reference_host_running());
+  EXPECT_TRUE(wait_for_reference_host(owner_token, false));
   EXPECT_NO_THROW(transport.start());
+  EXPECT_TRUE(wait_for_reference_host(owner_token, true));
   transport.stop();
-  EXPECT_FALSE(reference_host_running());
+  EXPECT_TRUE(wait_for_reference_host(owner_token, false));
+}
+
+TEST(ProcessWorker, ConcurrentTransportsAreObservedByTheirOwnTestIdentity) {
+  const auto first_token = worker_owner_token();
+  const auto second_token = worker_owner_token();
+  ProcessWorkerTransport first("process-first", worker_config("success", 500, first_token));
+  ProcessWorkerTransport second("process-second", worker_config("success", 500, second_token));
+  first.start();
+  second.start();
+  ASSERT_TRUE(wait_for_reference_host(first_token, true));
+  ASSERT_TRUE(wait_for_reference_host(second_token, true));
+
+  first.stop();
+  EXPECT_TRUE(wait_for_reference_host(first_token, false));
+  EXPECT_TRUE(wait_for_reference_host(second_token, true));
+  second.stop();
+  EXPECT_TRUE(wait_for_reference_host(second_token, false));
 }
 
 TEST(ProcessWorker, CooperativeCancellationIsAcknowledged) {
@@ -250,15 +322,16 @@ TEST(ProcessWorker, ConfigurationUsesExplicitExecutableAndEnvironmentBoundary) {
 }
 
 TEST(ProcessWorker, ShutdownDoesNotLeaveReferenceChildRunning) {
-  EXPECT_FALSE(reference_host_running());
+  const auto owner_token = worker_owner_token();
+  EXPECT_TRUE(wait_for_reference_host(owner_token, false));
   {
-    ProcessWorkerTransport transport("process", worker_config("success"));
+    ProcessWorkerTransport transport("process", worker_config("success", 500, owner_token));
     transport.start();
-    EXPECT_TRUE(reference_host_running());
+    EXPECT_TRUE(wait_for_reference_host(owner_token, true));
     transport.stop();
-    EXPECT_FALSE(reference_host_running());
+    EXPECT_TRUE(wait_for_reference_host(owner_token, false));
   }
-  EXPECT_FALSE(reference_host_running());
+  EXPECT_FALSE(reference_host_running(owner_token));
 }
 
 TEST(ProcessWorker, ServiceExecutesPipelineThroughSeparateProcess) {

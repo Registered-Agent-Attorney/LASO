@@ -3,6 +3,7 @@
 #include <chrono>
 #include <csignal>
 #include <fstream>
+#include <iostream>
 #include <laso/runtime/workspace.hpp>
 #include <set>
 #include <sys/wait.h>
@@ -96,6 +97,147 @@ edges:
   EXPECT_FALSE(result.owner_instance_id.empty());
   EXPECT_EQ(result.pipeline_version, 1U);
   EXPECT_EQ(result.message.payload, Json({{"value", "shared"}}));
+}
+
+TEST(DistributedExecution, ShortLeaseRenewsDuringLongAsyncWork) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  TemporaryDirectory first_data;
+  TemporaryDirectory second_data;
+  Config first = config(first_data.path);
+  first.storage_backend = "postgres";
+  first.postgres_dsn = database.dsn;
+  first.postgres_schema = database.schema;
+  first.execution_mode = "multi_instance";
+  first.max_runs = 2;
+  first.max_nodes = 4;
+  first.max_nodes_per_run = 2;
+  first.coordination_lease_ttl_ms = 3000;
+  first.coordination_heartbeat_interval_ms = 500;
+  first.validate();
+  auto second = first;
+  second.data_dir = second_data.path;
+  second.db_path.clear();
+
+  Executor first_executor(first.workers), second_executor(second.workers);
+  Service first_service(first_executor.context(), first);
+  Service second_service(second_executor.context(), second);
+  const auto probe_origin = std::chrono::steady_clock::now();
+  std::atomic<std::int64_t> action_started_ms{-1};
+  std::atomic<std::int64_t> action_finished_ms{-1};
+  auto hold =
+      std::make_shared<Function>([&](ExecutionContext &context, const Json &input) -> Task<Json> {
+        action_started_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - probe_origin)
+                                    .count(),
+                                std::memory_order_relaxed);
+        co_await context.delay(Milliseconds{7000});
+        action_finished_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - probe_origin)
+                                     .count(),
+                                 std::memory_order_relaxed);
+        co_return input;
+      });
+  first_service.functions().add("distributed_short_lease_hold", hold);
+  second_service.functions().add("distributed_short_lease_hold", hold);
+  first_service.register_pipeline(R"yaml(
+laso: '1'
+name: distributed-short-lease
+version: 1
+nodes:
+  input: {type: input}
+  fork: {type: parallel, join: join}
+  hold: {type: function, function: distributed_short_lease_hold}
+  quick: {type: function, function: identity}
+  join: {type: join}
+  output: {type: output}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: hold}
+  - {from: fork, to: quick}
+  - {from: hold, to: join}
+  - {from: quick, to: join}
+  - {from: join, to: output}
+)yaml");
+
+  first_executor.start();
+  second_executor.start();
+  const auto run_id = first_service.start("distributed-short-lease@1", Json{{"value", "held"}});
+  const auto started = std::chrono::steady_clock::now();
+  std::vector<std::chrono::steady_clock::time_point> observed_renewals;
+  std::string observed_work_id;
+  std::string previous_heartbeat;
+  auto claim_observed_at = std::chrono::steady_clock::time_point{};
+  std::int64_t initial_expiry_margin_ms = -1;
+  laso::Run result;
+  pqxx::connection monitor(database.dsn);
+  const auto deadline = started + std::chrono::seconds(20);
+  while (std::chrono::steady_clock::now() < deadline) {
+    result = first_service.get(RecordKind::Run, run_id).get<laso::Run>();
+    for (const auto &value : first_service.list(RecordKind::NodeWork, run_id)) {
+      const auto work = value.get<NodeWork>();
+      if (work.state != NodeWorkState::Running || work.node_id != "hold")
+        continue;
+      observed_work_id = work.id;
+      pqxx::read_transaction transaction(monitor);
+      const auto row = transaction.exec_params(
+          "SELECT heartbeat_at::text, floor(extract(epoch from (expires_at - "
+          "clock_timestamp())) * 1000)::bigint FROM \"" +
+              database.schema + "\".laso_coordination_leases WHERE resource_key = $1",
+          "node:" + work.id);
+      if (!row.empty()) {
+        const auto heartbeat = row.front()[0].as<std::string>();
+        if (previous_heartbeat.empty()) {
+          previous_heartbeat = heartbeat;
+          claim_observed_at = std::chrono::steady_clock::now();
+          initial_expiry_margin_ms = row.front()[1].as<std::int64_t>();
+        } else if (heartbeat != previous_heartbeat) {
+          observed_renewals.push_back(std::chrono::steady_clock::now());
+          previous_heartbeat = heartbeat;
+        }
+      }
+    }
+    if (terminal(result.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  const auto work = first_service.list(RecordKind::NodeWork, run_id);
+  first_service.shutdown();
+  second_service.shutdown();
+  first_executor.join();
+  second_executor.join();
+
+  ASSERT_EQ(result.state, RunState::Completed) << result.error;
+  ASSERT_EQ(work.size(), 2U);
+  for (const auto &value : work) {
+    const auto node_work = value.get<NodeWork>();
+    EXPECT_EQ(node_work.state, NodeWorkState::Completed) << node_work.error;
+    EXPECT_EQ(node_work.attempt, 1U) << "work was reclaimed despite the live owner";
+  }
+  EXPECT_GT(elapsed, std::chrono::seconds(3));
+  ASSERT_GE(observed_renewals.size(), 4U) << "no sustained database lease renewals observed";
+  for (std::size_t index = 1; index < observed_renewals.size(); ++index)
+    EXPECT_LT(observed_renewals[index] - observed_renewals[index - 1],
+              std::chrono::milliseconds(2500));
+  EXPECT_FALSE(observed_work_id.empty());
+  ASSERT_NE(claim_observed_at, std::chrono::steady_clock::time_point{});
+  std::chrono::milliseconds max_renewal_gap{};
+  for (std::size_t index = 1; index < observed_renewals.size(); ++index)
+    max_renewal_gap =
+        std::max(max_renewal_gap, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      observed_renewals[index] - observed_renewals[index - 1]));
+  std::cout
+      << "[lease-probe] claim_observed_ms="
+      << std::chrono::duration_cast<std::chrono::milliseconds>(claim_observed_at - started).count()
+      << " initial_expiry_margin_ms=" << initial_expiry_margin_ms
+      << " action_start_ms=" << action_started_ms.load(std::memory_order_relaxed)
+      << " action_end_ms=" << action_finished_ms.load(std::memory_order_relaxed)
+      << " completion_elapsed_ms="
+      << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+      << " observed_renewals=" << observed_renewals.size()
+      << " max_observed_renewal_gap_ms=" << max_renewal_gap.count() << '\n';
 }
 
 TEST(DistributedExecution, SubpipelineReleasesParentOwnershipWhileChildRuns) {
