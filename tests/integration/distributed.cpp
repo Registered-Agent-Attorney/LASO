@@ -223,6 +223,9 @@ edges:
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   ASSERT_EQ(result.state, RunState::WaitingApproval);
+  for (unsigned attempt = 0; attempt < 300 && !first_service.runtime().idle(); ++attempt)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  ASSERT_TRUE(first_service.runtime().idle()) << "approval checkpoint did not settle";
   const auto approvals = first_service.list(RecordKind::Approval, run_id);
   ASSERT_EQ(approvals.size(), 1U);
   first_service.runtime().decide(approvals.front().get<Approval>().id, true, "tester", "");
