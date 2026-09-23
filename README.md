@@ -129,6 +129,10 @@ the daemon is running, use its API. Stop it before using local CLI database comm
 worker capabilities, budgets, cancellation, and security-sensitive values.
 The [artifact-store guide](docs/artifacts.md) explains content-addressed
 streaming, integrity checks, materialization, and safe cleanup.
+The local filesystem backend remains the default. The optional S3-compatible
+backend is described in the [artifact guide](docs/artifacts.md) and
+[configuration reference](docs/configuration.md); M4.1 validation status is
+tracked in [the roadmap](docs/roadmap.md) and [validation record](VALIDATION.md).
 
 ## API
 
@@ -252,6 +256,10 @@ scope and remaining limitations in `VALIDATION.md`.
 - Linux builds, tests, sanitizer builds, the Debian container path, and a native
   dedicated-account systemd service lifecycle have documented validation. These
   results do not by themselves establish general production readiness.
+- M3.6 cross-machine artifact transport and its worker-loss, fencing, database
+  interruption, owner-recovery, and integrity acceptance are closed; see
+  `VALIDATION.md`. M4.1 adds an opt-in S3-compatible store. Remote S3 garbage
+  collection is intentionally not supported in this milestone.
 - SQLite remains one-process only. PostgreSQL supports an explicit multi-instance
   execution mode with bounded run claims, database-time leases, heartbeats,
   fencing tokens, crash takeover, and durable deterministic branch work. A run

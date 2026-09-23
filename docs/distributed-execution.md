@@ -63,7 +63,8 @@ For supported worker branches, small legacy inputs may use an inline bounded
 manifest. The durable transport uses a version-2 content-addressed manifest:
 relative paths point to immutable SHA-256 objects, so repository-scale files
 are streamed instead of embedded in PostgreSQL or NDJSON messages. Instances
-may use a protected shared `artifact_root`; where that is unavailable, the
+may use a protected shared `artifact_root`; where that is unavailable, they can
+use the optional S3-compatible backend for direct shared object access or the
 artifact-store owner can expose the authenticated object-only gateway described
 in [the artifact-store guide](artifacts.md). Neither mode exposes arbitrary
 host paths. Staging rejects absolute paths, traversal, duplicate paths,

@@ -540,9 +540,9 @@ completion; it does not claim exactly-once execution.
 
 ### Historical partial-validation record
 
-The following table and checklist describe the earlier acceptance point before
-the final VM-based chaos pass. They are retained for audit history, not as the
-current milestone status.
+At that earlier acceptance checkpoint, the following table and checklist
+described the then-incomplete state before the final VM-based chaos pass. They
+are retained for audit history, not as the current milestone status.
 
 Artifact transport is implemented and substantially validated. Artifact-specific
 cross-machine chaos testing remains in progress. The results below are the

@@ -133,6 +133,41 @@ TEST(Configuration, ParsesAuthenticatedArtifactGatewaySettings) {
   EXPECT_EQ(worker.artifact_service_url, "http://127.0.0.1:9090");
   EXPECT_EQ(worker.artifact_service_token, "synthetic-token");
 }
+TEST(Configuration, S3ArtifactBackendIsOptionalAndExplicit) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "laso.yaml";
+  std::ofstream(path) << "artifact_backend: s3\n"
+                         "artifact_s3_endpoint: http://127.0.0.1:9000\n"
+                         "artifact_s3_bucket: laso-test-bucket\n"
+                         "artifact_s3_prefix: artifact-test\n"
+                         "artifact_s3_path_style: true\n"
+                         "artifact_s3_allow_http: true\n";
+#ifdef LASO_HAS_S3
+  const auto config = load_config(path);
+  EXPECT_EQ(config.artifact_backend, "s3");
+  EXPECT_EQ(config.artifact_s3_bucket, "laso-test-bucket");
+  EXPECT_EQ(config.artifact_s3_prefix, "artifact-test");
+  EXPECT_TRUE(config.artifact_s3_path_style);
+  EXPECT_TRUE(config.artifact_s3_allow_http);
+#else
+  EXPECT_THROW(load_config(path), Error);
+#endif
+}
+TEST(Configuration, RejectsS3NamespaceEscapeAndUntrustedPlainHttp) {
+#ifdef LASO_HAS_S3
+  Config config;
+  config.artifact_backend = "s3";
+  config.artifact_s3_bucket = "laso-test-bucket";
+  config.artifact_s3_prefix = "../outside";
+  EXPECT_THROW(config.validate(), Error);
+  config.artifact_s3_prefix = "artifact-test";
+  config.artifact_s3_endpoint = "http://object-store.invalid:9000";
+  config.artifact_s3_allow_http = true;
+  EXPECT_THROW(config.validate(), Error);
+#else
+  GTEST_SKIP() << "S3 configuration validation is available only in an S3 build";
+#endif
+}
 TEST(Pipeline, RejectsUnboundedCycle) {
   auto yaml = fixture("bounded-loop");
   auto position = yaml.find(", max_iterations: 2}");

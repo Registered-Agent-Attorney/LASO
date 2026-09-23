@@ -65,6 +65,25 @@ std::unique_ptr<ArtifactStore> make_artifact_store(const Config &config, Storage
       config.artifact_root.empty() ? config.data_dir / "artifacts" : config.artifact_root;
   const ArtifactStoreLimits limits{config.max_artifact_bytes, config.max_artifact_temp_bytes,
                                    config.artifact_cleanup_grace_seconds};
+  if (config.artifact_backend == "s3") {
+#ifdef LASO_HAS_S3
+    return std::make_unique<S3ArtifactStore>(
+        S3ArtifactStoreConfig{config.artifact_s3_endpoint,
+                              config.artifact_s3_bucket,
+                              config.artifact_s3_region,
+                              config.artifact_s3_prefix,
+                              root / "scratch",
+                              config.artifact_s3_connect_timeout_ms,
+                              config.artifact_s3_request_timeout_ms,
+                              config.artifact_s3_max_retries,
+                              config.artifact_s3_path_style,
+                              config.artifact_s3_allow_http},
+        storage, limits);
+#else
+    throw Error(ErrorCode::Configuration,
+                "S3 artifact storage requires a build with LASO_ENABLE_S3=ON");
+#endif
+  }
   if (!config.artifact_service_url.empty())
     return std::make_unique<RemoteArtifactStore>(config.artifact_service_url,
                                                  config.artifact_service_token, root / "cache",

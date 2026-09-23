@@ -1,5 +1,7 @@
 data_dir: .laso
 artifact_root: .laso/artifacts
+# Local filesystem storage is the default and requires no cloud account.
+artifact_backend: filesystem
 # Object-backed workspaces and results are streamed through this store. Keep
 # limits bounded and use a trusted shared root only for multi-instance mode.
 max_artifact_bytes: 268435456
@@ -12,6 +14,21 @@ artifact_cleanup_grace_seconds: 3600
 # artifact_service_port: 0
 # artifact_service_url: "http://127.0.0.1:9090"
 # artifact_service_token: "<random-deployment-token>"
+# Optional S3-compatible backend (requires a LASO_ENABLE_S3=ON build).
+# Owners and workers access the same bucket directly. Credentials are read by
+# the AWS SDK credential provider chain, not from this YAML file.
+# artifact_backend: s3
+# artifact_s3_endpoint: "https://object-store.example.invalid"
+# artifact_s3_bucket: laso-test-bucket
+# artifact_s3_region: us-east-1
+# artifact_s3_prefix: artifact-test
+# artifact_s3_path_style: true
+# artifact_s3_connect_timeout_ms: 3000
+# artifact_s3_request_timeout_ms: 30000
+# artifact_s3_max_retries: 2
+# For isolated loopback MinIO tests only:
+# artifact_s3_endpoint: "http://127.0.0.1:9000"
+# artifact_s3_allow_http: true
 # SQLite is the default embedded backend. PostgreSQL is optional:
 # storage_backend: postgres
 # postgres_dsn: "host=127.0.0.1 port=5432 dbname=laso user=laso"
