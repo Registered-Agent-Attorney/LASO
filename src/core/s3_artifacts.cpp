@@ -240,8 +240,7 @@ struct S3ArtifactStore::Impl {
     model::GetObjectRequest request;
     request.SetBucket(config.bucket);
     request.SetKey(key(object_id));
-    const auto path = destination;
-    request.SetResponseStreamFactory([path]() -> Aws::IOStream * {
+    request.SetResponseStreamFactory([path = destination]() -> Aws::IOStream * {
       return Aws::New<Aws::FStream>("LASO-S3", path.c_str(),
                                     std::ios_base::out | std::ios_base::binary |
                                         std::ios_base::trunc);
@@ -374,7 +373,7 @@ Artifact S3ArtifactStore::put_file(Artifact metadata, const std::filesystem::pat
     throw Error(ErrorCode::Storage, "Unable to create staged S3 artifact");
   }
   try {
-    std::array<unsigned char, 1024 * 1024> buffer{};
+    std::array<unsigned char, std::size_t{1024} * 1024> buffer{};
     std::uint64_t total = 0;
     for (;;) {
       const auto read_size = read(input, buffer.data(), buffer.size());
