@@ -1,8 +1,60 @@
 # Validation record
 
-Snapshot validated: 2026-09-18. Source review and packaging were performed in a
-development environment. Native validation used an isolated Ubuntu 24.04.5 LTS
-(x86-64) environment.
+## Latest systemd deployment validation (2026-09-23)
+
+This section records the deployment-hardening work from the current source tree;
+the older dated matrices below are retained as historical snapshots. Validation
+used Linux x86-64, systemd 255, GCC 13.3.0, CMake 3.28.3, and Ninja. Debug,
+Release, sanitizer, and PostgreSQL builds all configured, built, and staged
+installed binaries, headers, example configuration, documentation, and the
+generated systemd unit under isolated install prefixes. `systemd-analyze verify`
+accepted the generated unit. The unit embeds the configured install prefix and
+does not refer to the source/build tree.
+
+| Check | Result |
+|---|---|
+| GCC Debug CTest (SQLite default) | **PASS: 202 scheduled; 198 passed, 4 skipped** (three PostgreSQL-only tests and the PostgreSQL backend-not-built guard) |
+| GCC Release CTest (SQLite default) | **PASS: 202 scheduled; 198 passed, 4 skipped** (same expected PostgreSQL-disabled cases) |
+| ASan + UBSan CTest (SQLite default, leak detection enabled) | **PASS: 202 scheduled; 198 passed, 4 skipped** (same expected PostgreSQL-disabled cases) |
+| PostgreSQL-enabled GCC Debug CTest | **PASS serial run: 220 scheduled; 219 passed, 1 skipped** (cross-machine M3 acceptance requires a separate remote setup) |
+| PostgreSQL CTest parallel diagnostic run | **Not supported with the shared single-owner test database:** overlapping test processes were rejected by the intentional PostgreSQL database ownership lock (`PostgreSQL database is owned by another LASO process`). Two of the four initial parallel failures reproduced with this explicit cause; the full serial suite passed. Parallel result is not claimed as passing.** |
+| Unit installation and syntax | **PASS:** `cmake --install` into isolated prefixes; expected executables/config/docs/unit present; `systemd-analyze verify` passed |
+| Native systemd user-service acceptance, SQLite | **PASS:** health, durable approval recovery across SIGTERM and SIGKILL restart, exactly-once completion event, SIGINT, repeated lifecycle, configuration failures, worker-child cleanup |
+| Native systemd user-service acceptance, PostgreSQL | **PASS:** same lifecycle and durable recovery checks against a unique temporary schema, removed after service shutdown |
+| Dedicated system account and system-unit sandbox | **PASS:** installed system unit ran with the dedicated unprivileged account/group; observed process credentials matched the unit and had no extra supplementary groups. `StateDirectory` was created with restrictive ownership/mode; SQLite state remained writable across restart. The service mount namespace exposed configuration/system paths read-only while allowing its state path. A write probe outside state failed with `Read-only file system`. |
+| System-manager startup, health, stop, restart | **PASS:** installed `laso.service` reached active/running; health and version endpoints responded only while running. `systemctl stop` returned success without forced SIGKILL, the endpoint stopped responding, and a subsequent start/restart returned healthy. |
+| Durable run across system-service restart | **PASS:** an approval-waiting run retained the same durable identity and state over graceful restart, then completed once after approval. Completion event count was one; forced daemon termination/restart did not duplicate the terminal completion. |
+| Abnormal daemon death and restart policy | **PASS:** controlled SIGKILL incremented the systemd restart counter and `Restart=on-failure` restored health after the configured delay. A malformed-config failure burst reached systemd's configured start-rate limit; valid configuration was restored and the service recovered. Deliberate stop did not trigger a restart. |
+| System-manager configuration failures | **PASS:** the installed unit failed without a health response for missing, malformed, unreadable, invalid-storage, unavailable-plugin-directory, and unwritable-state configurations. Diagnostics were bounded and did not include configuration contents or failing filesystem paths. The unwritable-state case was denied by the systemd read-only filesystem boundary. |
+| Journald and child cleanup | **PASS:** system-manager journal inspection covered startup, graceful stop, abnormal restart, recovery, and configuration failures; no credentials/DSNs were found. Raw journal output was not added to the repository. The reference worker child exited on both graceful stop and forced daemon death; no LASO/reference-worker process remained after cleanup. |
+| Child-process/orphan check | **PASS:** acceptance observed worker-host termination on restart/stop and no LASO/reference worker processes remained afterward |
+
+The rootless acceptance procedure is `tests/acceptance/systemd-lifecycle.sh`. Run
+`--preflight <installed-unit>` for non-mutating systemd/unit checks; run
+`--user <install-prefix> <source-tree>` for the rootless user-service lifecycle.
+For PostgreSQL, set `LASO_SYSTEMD_ACCEPTANCE_POSTGRES_DSN` to a disposable test
+database DSN and use `--user-postgres`; the harness creates and drops only its
+unique test schema. These modes do not install users/groups or alter system
+services. The system-manager configuration-failure checks are
+available as `tests/acceptance/systemd-system-config-failures.sh`. They require
+an explicitly disposable `/etc/laso/laso.yaml` containing the marker
+`# LASO_SYSTEMD_ACCEPTANCE_FIXTURE`, the installed `laso.service`, and root
+privileges. Run only on a test installation: the harness temporarily replaces
+that marked configuration and adds a runtime-only `Restart=no` drop-in, then
+restores the configuration/unit behavior and restarts LASO on exit. It does not
+create or remove the service account, installed unit, or durable state.
+
+Native system-manager acceptance was completed on Linux x86-64 with systemd
+255. The persistent system installation used SQLite; PostgreSQL lifecycle
+coverage remains the separate rootless user-service run above. The system
+service was not enabled at boot as part of this validation. These results
+validate the tested installation/lifecycle paths and are not a general
+production-readiness claim.
+
+The build/test matrix recorded below contains historical snapshots from earlier
+stages. Current privileged systemd lifecycle results are listed in the table
+above; installation and durable test state remain local to the validation
+environment and were not copied into this repository.
 
 ## Implemented
 
@@ -107,11 +159,10 @@ empty in the v0.1 baseline. They include enum-size suggestions, explicit handlin
 of ignored networking return values and exception boundaries, integer widening,
 and small copy/allocation opportunities. The configured CI command exits zero.
 
-## Requires further Linux validation
+## Other remaining validation items
 
 | Check | Status |
 |---|---|
-| Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
 | GitHub Actions execution | **PASS: public workflow 35380101673; GCC, Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL jobs succeeded** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 
