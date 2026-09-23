@@ -242,15 +242,16 @@ docker compose -f deploy/docker/compose.yaml up --build
 The Compose example deliberately uses Linux host networking with the API on host
 loopback. Persistent data lives in a named volume. The installed systemd unit runs
 the daemon in the foreground as an unprivileged `laso` service account and uses a
-systemd-managed state directory. Full system-account/service validation is
-reported separately from rootless user-service acceptance.
+systemd-managed state directory. Dedicated-account system-service installation,
+filesystem restrictions, startup/health, stop/restart, and durable recovery have
+been exercised separately from rootless user-service acceptance; see the exact
+scope and remaining limitations in `VALIDATION.md`.
 
 ## Current limitations and deferred work
 
-- Linux builds, tests, sanitizer builds, and the Debian container path are
-  covered by the documented validation paths. Systemd unit installation and
-  rootless user-service lifecycle have a bounded acceptance procedure; full
-  dedicated-account system-service validation remains deployment-dependent.
+- Linux builds, tests, sanitizer builds, the Debian container path, and a native
+  dedicated-account systemd service lifecycle have documented validation. These
+  results do not by themselves establish general production readiness.
 - SQLite remains one-process only. PostgreSQL supports an explicit multi-instance
   execution mode with bounded run claims, database-time leases, heartbeats,
   fencing tokens, crash takeover, and durable deterministic branch work. A run

@@ -80,10 +80,23 @@ prerequisite and unit checks. Its opt-in `--user` mode exercises a real transien
 systemd user service without root, but does not validate the dedicated system
 account or system-unit filesystem sandbox. Set
 `LASO_SYSTEMD_ACCEPTANCE_POSTGRES_DSN` and use `--user-postgres` to run the same
-recovery checks against a disposable database schema. Full system-unit validation uses the
-installed `laso.service` and the explicit operator commands above; it requires
-root privileges and is not simulated by the user-mode harness. Trusted plugin
-locations must remain readable within the unit's filesystem restrictions.
+recovery checks against a disposable database schema. Dedicated-account
+system-unit validation uses the installed `laso.service`; it requires root
+privileges and is not simulated by the user-mode harness. For controlled
+configuration-failure checks on a disposable test installation, mark its
+`/etc/laso/laso.yaml` with `# LASO_SYSTEMD_ACCEPTANCE_FIXTURE`, stop the service,
+then run:
+
+```sh
+sudo env LASO_SYSTEMD_ALLOW_SYSTEM_MUTATION=1 \
+  tests/acceptance/systemd-system-config-failures.sh
+```
+
+The harness refuses
+unmarked configuration, temporarily installs a runtime-only `Restart=no`
+drop-in, and restores the marked config and service behavior on exit. Review
+`VALIDATION.md` for tested system-manager scope. Trusted plugin locations must
+remain readable within the unit's filesystem restrictions.
 
 ## Containers and Debian validation
 
