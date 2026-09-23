@@ -46,21 +46,19 @@ void Config::validate() {
                 "S3 artifact storage requires a build with LASO_ENABLE_S3=ON");
 #else
     if (artifact_s3_bucket.size() < 3 || artifact_s3_bucket.size() > 63 ||
-        !std::regex_match(artifact_s3_bucket,
-                          std::regex("[a-z0-9][a-z0-9.-]*[a-z0-9]")) ||
-        artifact_s3_bucket.find("..") != std::string::npos ||
-        artifact_s3_region.empty() || artifact_s3_region.size() > 128 ||
-        artifact_s3_prefix.empty() || artifact_s3_prefix.size() > 256 ||
-        artifact_s3_prefix.front() == '/' || artifact_s3_prefix.back() == '/' ||
-        artifact_s3_prefix.find("..") != std::string::npos ||
+        !std::regex_match(artifact_s3_bucket, std::regex("[a-z0-9][a-z0-9.-]*[a-z0-9]")) ||
+        artifact_s3_bucket.find("..") != std::string::npos || artifact_s3_region.empty() ||
+        artifact_s3_region.size() > 128 || artifact_s3_prefix.empty() ||
+        artifact_s3_prefix.size() > 256 || artifact_s3_prefix.front() == '/' ||
+        artifact_s3_prefix.back() == '/' || artifact_s3_prefix.find("..") != std::string::npos ||
         artifact_s3_prefix.find("//") != std::string::npos ||
         std::regex_search(artifact_s3_prefix, std::regex("(^|/)\\.(?:/|$)")) ||
         !std::regex_match(artifact_s3_prefix, std::regex("[A-Za-z0-9._/-]+")) ||
         artifact_s3_connect_timeout_ms == 0 || artifact_s3_connect_timeout_ms > 120000 ||
         artifact_s3_request_timeout_ms == 0 || artifact_s3_request_timeout_ms > 600000 ||
         artifact_s3_max_retries > 5 || max_artifact_bytes > 5'000'000'000ULL ||
-        !artifact_service_url.empty() ||
-        artifact_service_port != 0 || !artifact_service_token.empty())
+        !artifact_service_url.empty() || artifact_service_port != 0 ||
+        !artifact_service_token.empty())
       throw Error(ErrorCode::Configuration, "Invalid S3 artifact storage configuration");
     if (!artifact_s3_endpoint.empty()) {
       static const std::regex endpoint_pattern(
@@ -92,8 +90,7 @@ void Config::validate() {
              artifact_s3_region != "us-east-1" || artifact_s3_prefix != "laso" ||
              artifact_s3_connect_timeout_ms != 3000 || artifact_s3_request_timeout_ms != 30000 ||
              artifact_s3_max_retries != 2) {
-    throw Error(ErrorCode::Configuration,
-                "S3 options require artifact_backend: s3");
+    throw Error(ErrorCode::Configuration, "S3 options require artifact_backend: s3");
   }
   if (artifact_service_token.size() > 4096 ||
       (!artifact_service_url.empty() && artifact_service_token.empty()) ||

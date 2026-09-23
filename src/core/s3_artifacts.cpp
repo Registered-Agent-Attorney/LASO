@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <aws/core/Aws.h>
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
@@ -6,8 +8,6 @@
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
-#include <algorithm>
-#include <array>
 #include <cerrno>
 #include <fcntl.h>
 #include <fstream>
@@ -27,8 +27,12 @@ namespace model = Aws::S3::Model;
 
 class AwsRuntime {
 public:
-  AwsRuntime() { Aws::InitAPI(options_); }
-  ~AwsRuntime() { Aws::ShutdownAPI(options_); }
+  AwsRuntime() {
+    Aws::InitAPI(options_);
+  }
+  ~AwsRuntime() {
+    Aws::ShutdownAPI(options_);
+  }
   AwsRuntime(const AwsRuntime &) = delete;
   AwsRuntime &operator=(const AwsRuntime &) = delete;
 
@@ -44,8 +48,7 @@ std::shared_ptr<AwsRuntime> aws_runtime() {
 std::string validate_object_id(const std::string &object_id) {
   constexpr std::string_view prefix = "sha256:";
   const auto hex = object_id.starts_with(prefix) ? object_id.substr(prefix.size()) : object_id;
-  if (hex.size() != 64 ||
-      !std::all_of(hex.begin(), hex.end(), [](unsigned char value) {
+  if (hex.size() != 64 || !std::all_of(hex.begin(), hex.end(), [](unsigned char value) {
         return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
       }))
     throw Error(ErrorCode::Validation, "Invalid artifact object identifier");
@@ -73,8 +76,8 @@ public:
       throw Error(ErrorCode::Storage, "Unable to create S3 artifact staging directory");
     for (unsigned attempt = 0; attempt < 8; ++attempt) {
       path_ = directory / ("s3-" + uuid());
-      const auto fd = open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                           0600);
+      const auto fd =
+          open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
       if (fd >= 0) {
         close(fd);
         return;
@@ -92,8 +95,12 @@ public:
   }
   TemporaryFile(const TemporaryFile &) = delete;
   TemporaryFile &operator=(const TemporaryFile &) = delete;
-  const std::filesystem::path &path() const { return path_; }
-  void keep() { keep_ = true; }
+  const std::filesystem::path &path() const {
+    return path_;
+  }
+  void keep() {
+    keep_ = true;
+  }
 
 private:
   std::filesystem::path path_;
@@ -117,15 +124,15 @@ struct S3ArtifactStore::Impl {
       : config(std::move(store_config)), storage(store), limits(store_limits),
         scratch_root(std::move(config.scratch_root)), runtime(aws_runtime()) {
     if (config.bucket.empty() || config.region.empty() || config.prefix.empty() ||
-        config.prefix.size() > 256 || config.region.size() > 128 ||
-        limits.max_object_bytes == 0 || limits.max_temp_bytes < limits.max_object_bytes ||
-        limits.max_object_bytes > 5'000'000'000ULL ||
-        config.connect_timeout_ms == 0 || config.connect_timeout_ms > 120000 ||
-        config.request_timeout_ms == 0 || config.request_timeout_ms > 600000 ||
-        config.max_retries > 5)
+        config.prefix.size() > 256 || config.region.size() > 128 || limits.max_object_bytes == 0 ||
+        limits.max_temp_bytes < limits.max_object_bytes ||
+        limits.max_object_bytes > 5'000'000'000ULL || config.connect_timeout_ms == 0 ||
+        config.connect_timeout_ms > 120000 || config.request_timeout_ms == 0 ||
+        config.request_timeout_ms > 600000 || config.max_retries > 5)
       throw Error(ErrorCode::Configuration, "Invalid S3 artifact store settings");
     if (config.prefix.front() == '/' || config.prefix.back() == '/' ||
-        config.prefix.find("..") != std::string::npos || config.prefix.find("//") != std::string::npos ||
+        config.prefix.find("..") != std::string::npos ||
+        config.prefix.find("//") != std::string::npos ||
         !std::all_of(config.prefix.begin(), config.prefix.end(), [](unsigned char value) {
           return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
                  (value >= '0' && value <= '9') || value == '.' || value == '_' || value == '-' ||
@@ -134,9 +141,8 @@ struct S3ArtifactStore::Impl {
       throw Error(ErrorCode::Configuration, "Invalid S3 artifact namespace");
     for (std::size_t begin = 0; begin < config.prefix.size();) {
       const auto end = config.prefix.find('/', begin);
-      const auto segment = config.prefix.substr(begin, end == std::string::npos
-                                                           ? std::string::npos
-                                                           : end - begin);
+      const auto segment =
+          config.prefix.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
       if (segment == "." || segment == "..")
         throw Error(ErrorCode::Configuration, "Invalid S3 artifact namespace");
       if (end == std::string::npos)
@@ -144,10 +150,12 @@ struct S3ArtifactStore::Impl {
       begin = end + 1;
     }
     if (config.bucket.size() < 3 || config.bucket.size() > 63 ||
-        !std::all_of(config.bucket.begin(), config.bucket.end(), [](unsigned char value) {
-          return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') ||
-                 value == '.' || value == '-';
-        }) || config.bucket.front() == '.' || config.bucket.front() == '-' ||
+        !std::all_of(config.bucket.begin(), config.bucket.end(),
+                     [](unsigned char value) {
+                       return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') ||
+                              value == '.' || value == '-';
+                     }) ||
+        config.bucket.front() == '.' || config.bucket.front() == '-' ||
         config.bucket.back() == '.' || config.bucket.back() == '-' ||
         config.bucket.find("..") != std::string::npos)
       throw Error(ErrorCode::Configuration, "Invalid S3 bucket name");
@@ -164,8 +172,7 @@ struct S3ArtifactStore::Impl {
       }
       if (match[1] == "http") {
         const auto host = match[2].str();
-        if (!config.allow_http ||
-            (host != "localhost" && host != "127.0.0.1" && host != "[::1]"))
+        if (!config.allow_http || (host != "localhost" && host != "127.0.0.1" && host != "[::1]"))
           throw Error(ErrorCode::Configuration,
                       "Plain HTTP S3 endpoints are allowed only for explicit loopback tests");
       } else if (config.allow_http) {
@@ -191,8 +198,8 @@ struct S3ArtifactStore::Impl {
     s3::S3ClientConfiguration client_config;
     client_config.region = config.region;
     client_config.endpointOverride = config.endpoint;
-    client_config.scheme = config.endpoint.starts_with("http://") ? Aws::Http::Scheme::HTTP
-                                                                    : Aws::Http::Scheme::HTTPS;
+    client_config.scheme =
+        config.endpoint.starts_with("http://") ? Aws::Http::Scheme::HTTP : Aws::Http::Scheme::HTTPS;
     client_config.verifySSL = true;
     client_config.connectTimeoutMs = static_cast<long>(config.connect_timeout_ms);
     client_config.requestTimeoutMs = static_cast<long>(config.request_timeout_ms);
@@ -252,7 +259,7 @@ struct S3ArtifactStore::Impl {
   }
 
   void download_verified(const std::string &object_id, const std::filesystem::path &path,
-                        const std::string &expected_sha256, std::uint64_t expected_size) const {
+                         const std::string &expected_sha256, std::uint64_t expected_size) const {
     const auto hex = validate_object_id(object_id);
     if (!expected_sha256.empty() && validate_object_id(expected_sha256) != hex)
       throw Error(ErrorCode::Conflict, "Artifact object identity does not match expected digest");
@@ -292,8 +299,8 @@ struct S3ArtifactStore::Impl {
       request.SetContentType("application/octet-stream");
       request.AddMetadata("laso-sha256", digest);
       request.AddMetadata("laso-size", std::to_string(size));
-      auto body = Aws::MakeShared<Aws::FStream>(
-          "LASO-S3", staged.c_str(), std::ios_base::in | std::ios_base::binary);
+      auto body = Aws::MakeShared<Aws::FStream>("LASO-S3", staged.c_str(),
+                                                std::ios_base::in | std::ios_base::binary);
       if (!body->is_open())
         throw Error(ErrorCode::Storage, "Unable to open staged S3 artifact");
       request.SetBody(body);
@@ -414,8 +421,8 @@ void S3ArtifactStore::materialize(const std::string &object_id,
                                   const std::string &expected_sha256,
                                   std::uint64_t expected_size) const {
   std::error_code error;
-  const auto parent = destination.parent_path().empty() ? std::filesystem::path{"."}
-                                                        : destination.parent_path();
+  const auto parent =
+      destination.parent_path().empty() ? std::filesystem::path{"."} : destination.parent_path();
   std::filesystem::create_directories(parent, error);
   if (error)
     throw Error(ErrorCode::Storage, "Unable to create artifact destination");
@@ -468,9 +475,12 @@ ArtifactIntegrityReport S3ArtifactStore::integrity() const {
 }
 
 Json S3ArtifactStore::collect_garbage(bool, std::uint64_t) {
-  throw Error(ErrorCode::Configuration,
-              "S3 artifact garbage collection is disabled; remote object deletion is not supported");
+  throw Error(
+      ErrorCode::Configuration,
+      "S3 artifact garbage collection is disabled; remote object deletion is not supported");
 }
 
-const std::filesystem::path &S3ArtifactStore::root() const { return impl_->scratch_root; }
+const std::filesystem::path &S3ArtifactStore::root() const {
+  return impl_->scratch_root;
+}
 } // namespace laso

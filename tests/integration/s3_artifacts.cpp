@@ -1,11 +1,11 @@
 #include "../support.hpp"
+#include <array>
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/memory/stl/AWSStreamFwd.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/CreateBucketRequest.h>
 #include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
-#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
@@ -79,8 +79,7 @@ void ensure_bucket(const S3ArtifactStoreConfig &config) {
                              : Aws::Http::Scheme::HTTPS;
   client_config.connectTimeoutMs = static_cast<long>(config.connect_timeout_ms);
   client_config.requestTimeoutMs = static_cast<long>(config.request_timeout_ms);
-  Aws::S3::S3Client client(client_config,
-                           Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+  Aws::S3::S3Client client(client_config, Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
                            config.path_style);
   Aws::S3::Model::HeadBucketRequest head;
   head.SetBucket(config.bucket);
@@ -227,8 +226,8 @@ TEST(S3Artifacts, DetectsContentCorruptionAtPublishedObjectKey) {
   client_config.scheme = Aws::Http::Scheme::HTTP;
   client_config.connectTimeoutMs = 500;
   client_config.requestTimeoutMs = 5000;
-  Aws::S3::S3Client client(client_config,
-                           Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, true);
+  Aws::S3::S3Client client(client_config, Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+                           true);
   const auto digest = artifact.sha256;
   Aws::S3::Model::PutObjectRequest request;
   request.SetBucket(config->bucket);

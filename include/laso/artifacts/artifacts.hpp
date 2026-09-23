@@ -122,8 +122,7 @@ struct S3ArtifactStoreConfig {
 // namespace. The scratch root is local staging only; object bytes live in S3.
 class S3ArtifactStore final : public ArtifactStore {
 public:
-  S3ArtifactStore(S3ArtifactStoreConfig config, Storage &storage,
-                  ArtifactStoreLimits limits = {});
+  S3ArtifactStore(S3ArtifactStoreConfig config, Storage &storage, ArtifactStoreLimits limits = {});
   ~S3ArtifactStore() override;
   S3ArtifactStore(const S3ArtifactStore &) = delete;
   S3ArtifactStore &operator=(const S3ArtifactStore &) = delete;

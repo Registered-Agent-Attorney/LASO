@@ -31,7 +31,7 @@ struct Config {
   std::string postgres_dsn, postgres_schema = "public";
   std::string artifact_backend = "filesystem";
   std::string artifact_s3_endpoint, artifact_s3_bucket, artifact_s3_region = "us-east-1",
-      artifact_s3_prefix = "laso";
+                                                        artifact_s3_prefix = "laso";
   std::string artifact_service_url, artifact_service_token;
   std::string execution_mode = "single";
   std::string coordination_mode = "single_owner";
