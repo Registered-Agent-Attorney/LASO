@@ -10,6 +10,7 @@
 #include <array>
 #include <cerrno>
 #include <fcntl.h>
+#include <fstream>
 #include <laso/artifacts/artifacts.hpp>
 #include <laso/core/types.hpp>
 #include <memory>
@@ -233,7 +234,7 @@ struct S3ArtifactStore::Impl {
     request.SetBucket(config.bucket);
     request.SetKey(key(object_id));
     const auto path = destination;
-    request.SetResponseStreamFactory([path]() {
+    request.SetResponseStreamFactory([path]() -> Aws::IOStream * {
       return Aws::New<Aws::FStream>("LASO-S3", path.c_str(),
                                     std::ios_base::out | std::ios_base::binary |
                                         std::ios_base::trunc);
