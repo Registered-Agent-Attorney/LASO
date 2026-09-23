@@ -1,10 +1,12 @@
 #include <CLI/CLI.hpp>
+#include <boost/system/system_error.hpp>
 #include <csignal>
 #include <iostream>
 #include <laso/api/api.hpp>
 #include <laso/artifacts/server.hpp>
 #include <memory>
 #include <sys/stat.h>
+#include <system_error>
 
 int main(int argc, char **argv) {
   CLI::App app{"LASO server"};
@@ -54,6 +56,15 @@ int main(int argc, char **argv) {
     return 0;
   } catch (const laso::Error &e) {
     std::cerr << e.what() << '\n';
+    return 1;
+  } catch (const std::system_error &e) {
+    // Report the portable code message without echoing the failing path.
+    std::cerr << "LASO server initialization failed: " << e.code().message() << '\n';
+    return 1;
+  } catch (const boost::system::system_error &e) {
+    // Report only the portable error-category message: diagnostic text must
+    // not echo configuration, paths, environment values, or database details.
+    std::cerr << "LASO server initialization failed: " << e.code().message() << '\n';
     return 1;
   } catch (...) {
     std::cerr << "LASO server initialization failed\n";

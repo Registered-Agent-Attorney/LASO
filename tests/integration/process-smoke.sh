@@ -51,6 +51,41 @@ start_server() {
 base="http://127.0.0.1:$port/api/v1"
 start_server
 curl -fsS "$base/version" | jq -e '.version == "0.1.0-rc.1"'
+cat > "$temp/occupied-port.yaml" <<EOF
+data_dir: "$temp/occupied-port-state"
+db_path: "$temp/occupied-port-state/laso.db"
+api_host: 127.0.0.1
+api_port: $port
+EOF
+if env -u LASO_DATA_DIR "$build/bin/laso-server" --config "$temp/occupied-port.yaml" \
+  >"$temp/occupied-port.log" 2>&1; then
+  echo "second server unexpectedly bound an occupied listener" >&2
+  exit 1
+fi
+grep -Fq "Address already in use" "$temp/occupied-port.log" || {
+  echo "occupied-listener startup failure omitted its safe diagnostic" >&2
+  exit 1
+}
+printf 'not a directory\n' > "$temp/not-a-directory"
+cat > "$temp/invalid-state-path.yaml" <<EOF
+data_dir: "$temp/not-a-directory"
+db_path: "$temp/not-a-directory/laso.db"
+api_host: 127.0.0.1
+api_port: $((port + 1))
+EOF
+if env -u LASO_DATA_DIR "$build/bin/laso-server" --config "$temp/invalid-state-path.yaml" \
+  >"$temp/invalid-state-path.log" 2>&1; then
+  echo "server unexpectedly initialized under a non-directory state path" >&2
+  exit 1
+fi
+grep -Fq "LASO server initialization failed:" "$temp/invalid-state-path.log" || {
+  echo "filesystem startup failure omitted its safe diagnostic" >&2
+  exit 1
+}
+if grep -Fq "$temp" "$temp/invalid-state-path.log"; then
+  echo "filesystem startup diagnostic exposed its local path" >&2
+  exit 1
+fi
 curl -fsS -X POST "$base/pipelines/human-approval/runs" -H 'Content-Type: application/json' -d '{}' > "$temp/api-run.json"
 run_id=$(jq -r '.id' "$temp/api-run.json")
 for _ in $(seq 1 100); do
