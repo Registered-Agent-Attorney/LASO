@@ -118,10 +118,14 @@ jobs:
       - name: Start disposable loopback-only MinIO
         run: |
           if ss -ltn | grep -q ':19387 '; then echo 'test port is already in use' >&2; exit 1; fi
+          access_key="$(openssl rand -hex 16)"
+          secret_key="$(openssl rand -hex 32)"
+          printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
+            "$access_key" "$secret_key" >> "$GITHUB_ENV"
           docker run --detach --name laso-m4-minio \
             --publish 127.0.0.1:19387:9000 \
-            --env MINIO_ROOT_USER=laso_ci_access \
-            --env MINIO_ROOT_PASSWORD=synthetic_ci_only_secret_8f3e \
+            --env MINIO_ROOT_USER="$access_key" \
+            --env MINIO_ROOT_PASSWORD="$secret_key" \
             quay.io/minio/minio:RELEASE.2024-11-07T00-52-20Z \
             server /data
           curl --retry-connrefused --retry 60 --retry-delay 1 -fsS \
@@ -142,8 +146,6 @@ jobs:
           cmake --build build-s3 --parallel 2
           ctest --test-dir build-s3 --output-on-failure
         env:
-          AWS_ACCESS_KEY_ID: laso_ci_access
-          AWS_SECRET_ACCESS_KEY: synthetic_ci_only_secret_8f3e
           AWS_DEFAULT_REGION: us-east-1
           AWS_EC2_METADATA_DISABLED: "true"
           LASO_S3_TEST_ENDPOINT: http://127.0.0.1:19387
