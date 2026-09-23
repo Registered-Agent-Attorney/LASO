@@ -98,7 +98,10 @@ fixtures remain the default test path.
 Installation is intentionally small and conventional:
 
 ```sh
-cmake --install build --prefix "$HOME/.local"
+cmake -S . -B build-user -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local" -DLASO_INSTALL_SYSTEMD_UNIT=OFF
+cmake --build build-user --parallel 2
+cmake --install build-user
 ```
 
 This installs the CLI, server, deterministic reference worker, public headers,
