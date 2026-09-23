@@ -19,10 +19,17 @@
   provenance. Added integrity and conservative GC operator commands plus large
   generated-file and gateway regression coverage. PostgreSQL stores metadata and
   references only; at-least-once attempts with one authoritative fenced
-  completion remain the guarantee. Artifact transport is implemented and
-  substantially validated; artifact-specific cross-machine chaos testing
-  remains in progress. See `VALIDATION.md` for completed evidence and the
-  explicit follow-up checklist.
+  completion remain the guarantee. The initial artifact-specific chaos suite
+  was incomplete at that publication point; the later M3.6 closure evidence is
+  recorded in `VALIDATION.md`.
+
+- Closed M3.6 artifact-transport validation using separate Linux owner and
+  worker operating-system/process/network boundaries. Normal distributed runs,
+  upload/materialization worker-loss cases, stale completion fencing,
+  PostgreSQL interruption, owner recovery, integrity verification, and the
+  short-TTL lease regression passed. LASO provides at-least-once attempts with
+  one authoritative fenced completion and does not claim exactly-once
+  execution. See `VALIDATION.md` for the acceptance evidence.
 
 - Added opt-in PostgreSQL node-work distribution for deterministic parallel
   branches. Durable fenced `NodeWork` records, bounded global/per-run node slots,

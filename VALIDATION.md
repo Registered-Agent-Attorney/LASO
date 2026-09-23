@@ -510,7 +510,39 @@ valid current fence can commit one authoritative result. LASO does not claim
 exactly-once execution. SQLite remains explicitly single-instance, and remote
 execution remains limited to the supported agent/worker path.
 
-## M3.6 artifact transport status — partially validated
+## M3.6 artifact transport status — closed and validated
+
+The earlier partial-validation note below is retained as historical evidence.
+M3.6 was subsequently closed using a clean Ubuntu Server virtual machine as a
+separate operating-system, process, and network boundary. The validation used
+PostgreSQL coordination and shared artifact transport, and confirmed normal
+remote claims and heartbeats before exercising recovery cases. No private host
+identifiers or infrastructure addresses are part of this record.
+
+| Final M3.6 acceptance | Result |
+|---|---|
+| Normal distributed artifact baseline | **PASS: 3/3** |
+| Worker loss after input materialization | **PASS**; lease expiry, replacement claim, and recovery completed |
+| Worker loss during output upload | **PASS**; incomplete upload was not accepted as authoritative |
+| Worker loss after artifact publication | **PASS**; publication alone did not confer workflow authority |
+| Stale completion and fencing | **PASS**; stale fence rejected |
+| PostgreSQL interruption during artifact execution | **PASS**; recovery completed without manual database repair |
+| Owner restart and recovery | **PASS**; durable state and artifacts were recovered |
+| Artifact integrity | **PASS**; hashes, size, and provenance verified |
+| Short-TTL lease regression | **PASS**: 3-second lease with 500 ms heartbeat |
+
+These results close the artifact-specific cross-machine chaos acceptance. The
+previously unreachable physical worker remains an infrastructure follow-up; no
+evidence links that outage to LASO, and it is not required for M3.6 acceptance.
+The separate Ubuntu VM supplied the supported cross-OS/process/network
+boundary. LASO provides at-least-once attempts with one authoritative fenced
+completion; it does not claim exactly-once execution.
+
+### Historical partial-validation record
+
+The following table and checklist describe the earlier acceptance point before
+the final VM-based chaos pass. They are retained for audit history, not as the
+current milestone status.
 
 Artifact transport is implemented and substantially validated. Artifact-specific
 cross-machine chaos testing remains in progress. The results below are the
