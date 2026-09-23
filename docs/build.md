@@ -86,10 +86,10 @@ prefix:
 
 ```sh
 sudo apt-get install -y libcurl4-openssl-dev libssl-dev zlib1g-dev
-git clone --depth 1 --branch 1.11.890 https://github.com/aws/aws-sdk-cpp.git ../aws-sdk-cpp
+git clone --recurse-submodules --depth 1 --branch 1.11.890 https://github.com/aws/aws-sdk-cpp.git ../aws-sdk-cpp
 cmake -S ../aws-sdk-cpp -B ../aws-sdk-cpp-build \
-  -DBUILD_ONLY=s3 -DAUTORUN_UNIT_TESTS=OFF -DBUILD_SHARED_LIBS=ON \
-  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_ONLY=s3 -DAUTORUN_UNIT_TESTS=OFF -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$HOME/.local/aws-sdk"
 cmake --build ../aws-sdk-cpp-build --parallel 2
 cmake --install ../aws-sdk-cpp-build

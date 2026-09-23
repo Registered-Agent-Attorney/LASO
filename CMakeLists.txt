@@ -42,6 +42,9 @@ if(LASO_ENABLE_POSTGRES)
   pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 endif()
 if(LASO_ENABLE_S3)
+  # AWSSDK's imported static targets reference ZLIB::ZLIB. Define it before
+  # loading those targets so clean installations can resolve the interface.
+  find_package(ZLIB REQUIRED)
   find_package(AWSSDK REQUIRED COMPONENTS s3)
 endif()
 include(FetchContent)
