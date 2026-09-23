@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
-import os
+import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,12 +29,36 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._relay(upload=True)
 
     def _relay(self, upload: bool = False) -> None:
+        self.connection.settimeout(self.server.upload_timeout)
+        content_length = 0
+        if upload:
+            length_headers = self.headers.get_all("Content-Length", [])
+            if self.headers.get("Transfer-Encoding") or len(length_headers) != 1:
+                self.send_error(400, "upload requires a single Content-Length")
+                self.close_connection = True
+                return
+            try:
+                content_length = int(length_headers[0])
+            except ValueError:
+                self.send_error(400, "invalid Content-Length")
+                self.close_connection = True
+                return
+            if content_length < 0:
+                self.send_error(400, "invalid Content-Length")
+                self.close_connection = True
+                return
+            if content_length > self.server.max_upload_bytes:
+                self.send_error(413, "upload exceeds acceptance proxy limit")
+                self.close_connection = True
+                return
+
         upstream = http.client.HTTPConnection(
-            self.server.upstream_host, self.server.upstream_port, timeout=120
+            self.server.upstream_host,
+            self.server.upstream_port,
+            timeout=self.server.upload_timeout,
         )
         try:
             length_header = self.headers.get("Content-Length")
-            content_length = int(length_header) if length_header is not None else 0
             upstream.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
             for name, value in self.headers.items():
                 if name.lower() not in {"host", "connection", "content-length", "expect"}:
@@ -46,7 +70,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if upload:
                 self._mark(self.server.started_marker)
                 remaining = content_length
+                deadline = time.monotonic() + self.server.upload_timeout
                 while remaining:
+                    time_left = deadline - time.monotonic()
+                    if time_left <= 0:
+                        raise socket.timeout("acceptance upload deadline exceeded")
+                    self.connection.settimeout(time_left)
                     chunk = self.rfile.read(min(64 * 1024, remaining))
                     if not chunk:
                         upstream.close()
@@ -113,6 +142,8 @@ class ArtifactChaosProxy(ThreadingHTTPServer):
         self.release_file = args.release_file
         self.rate_bps = args.rate_bps
         self.hold_timeout = args.hold_timeout
+        self.max_upload_bytes = args.max_upload_bytes
+        self.upload_timeout = args.upload_timeout
 
 
 def main() -> None:
@@ -125,9 +156,16 @@ def main() -> None:
     parser.add_argument("--release-file")
     parser.add_argument("--rate-bps", type=int, default=0)
     parser.add_argument("--hold-timeout", type=float, default=600)
+    parser.add_argument("--max-upload-bytes", type=int, default=256 * 1024 * 1024)
+    parser.add_argument("--upload-timeout", type=float, default=300)
     args = parser.parse_args()
-    if args.rate_bps < 0 or args.hold_timeout <= 0:
-        parser.error("rate and hold timeout must be non-negative")
+    if (
+        args.rate_bps < 0
+        or args.hold_timeout <= 0
+        or args.max_upload_bytes <= 0
+        or args.upload_timeout <= 0
+    ):
+        parser.error("rate must be non-negative; size and time limits must be positive")
     if bool(args.published_marker) != bool(args.release_file):
         parser.error("published marker and release file must be provided together")
     server = ArtifactChaosProxy(args)
