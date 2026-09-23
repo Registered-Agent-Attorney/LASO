@@ -2,6 +2,8 @@
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/memory/stl/AWSStreamFwd.h>
 #include <aws/s3/S3Client.h>
+#include <aws/s3/model/CreateBucketRequest.h>
+#include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <array>
 #include <chrono>
@@ -67,6 +69,28 @@ Artifact metadata(std::string name) {
   value.media_type = "application/octet-stream";
   return value;
 }
+
+void ensure_bucket(const S3ArtifactStoreConfig &config) {
+  Aws::S3::S3ClientConfiguration client_config;
+  client_config.region = config.region;
+  client_config.endpointOverride = config.endpoint;
+  client_config.scheme = std::string_view(config.endpoint).starts_with("http://")
+                             ? Aws::Http::Scheme::HTTP
+                             : Aws::Http::Scheme::HTTPS;
+  client_config.connectTimeoutMs = static_cast<long>(config.connect_timeout_ms);
+  client_config.requestTimeoutMs = static_cast<long>(config.request_timeout_ms);
+  Aws::S3::S3Client client(client_config,
+                           Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+                           config.path_style);
+  Aws::S3::Model::HeadBucketRequest head;
+  head.SetBucket(config.bucket);
+  if (client.HeadBucket(head).IsSuccess())
+    return;
+  Aws::S3::Model::CreateBucketRequest create;
+  create.SetBucket(config.bucket);
+  if (!client.CreateBucket(create).IsSuccess())
+    throw std::runtime_error("Unable to initialize disposable S3 test bucket");
+}
 } // namespace
 
 TEST(S3Artifacts, StreamsLargeContentAddressedObjectAndMaterializesVerifiedBytes) {
@@ -76,6 +100,7 @@ TEST(S3Artifacts, StreamsLargeContentAddressedObjectAndMaterializesVerifiedBytes
     GTEST_SKIP() << "S3 integration endpoint is not configured";
   auto storage = make_storage(dir.path / "state.db");
   S3ArtifactStore store(*config, *storage, {128U * 1024U * 1024U, 256U * 1024U * 1024U, 3600});
+  ASSERT_NO_THROW(ensure_bucket(*config));
 
   const auto source = dir.path / "synthetic-64m.bin";
   {
@@ -111,6 +136,7 @@ TEST(S3Artifacts, DuplicateConcurrentPublicationIsIdempotentAndMissingObjectsFai
     GTEST_SKIP() << "S3 integration endpoint is not configured";
   auto storage = make_storage(dir.path / "state.db");
   S3ArtifactStore store(*config, *storage);
+  ASSERT_NO_THROW(ensure_bucket(*config));
   const auto source = dir.path / "small.bin";
   std::ofstream(source, std::ios::binary) << "synthetic content-addressed object";
   const auto expected = sha256_file(source);
@@ -190,6 +216,7 @@ TEST(S3Artifacts, DetectsContentCorruptionAtPublishedObjectKey) {
     GTEST_SKIP() << "S3 integration endpoint is not configured";
   auto storage = make_storage(dir.path / "state.db");
   S3ArtifactStore store(*config, *storage);
+  ASSERT_NO_THROW(ensure_bucket(*config));
   const auto source = dir.path / "input.bin";
   std::ofstream(source, std::ios::binary) << "synthetic content-addressed object";
   const auto artifact = store.put_file(metadata("corrupt.bin"), source);
