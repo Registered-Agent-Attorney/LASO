@@ -85,7 +85,7 @@
     "runtime_image": "PASS; host-network health endpoint served as unprivileged user",
     "local_gpu_inference": "NOT PART OF RELEASE-READINESS AUDIT",
     "systemd_unit_verify": "PASS",
-    "systemd_deployment": "PENDING",
+    "systemd_deployment": "PARTIAL: rootless systemd user-service lifecycle passed; dedicated system account and system-unit sandbox not run",
     "tsan": "BLOCKED; host runtime unexpected memory mapping"
   }
 }

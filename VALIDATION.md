@@ -1,5 +1,40 @@
 # Validation record
 
+## Latest systemd deployment validation (2026-09-22)
+
+This section records the deployment-hardening work from the current source tree;
+the older dated matrices below are retained as historical snapshots. Validation
+used Linux x86-64, systemd 255, GCC 13.3.0, CMake 3.28.3, and Ninja. Debug,
+Release, sanitizer, and PostgreSQL builds all configured, built, and staged
+installed binaries, headers, example configuration, documentation, and the
+generated systemd unit under isolated install prefixes. `systemd-analyze verify`
+accepted the generated unit. The unit embeds the configured install prefix and
+does not refer to the source/build tree.
+
+| Check | Result |
+|---|---|
+| GCC Debug CTest (SQLite default) | **PASS: 202 scheduled; 198 passed, 4 skipped** (three PostgreSQL-only tests and the PostgreSQL backend-not-built guard) |
+| GCC Release CTest (SQLite default) | **PASS: 202 scheduled; 198 passed, 4 skipped** (same expected PostgreSQL-disabled cases) |
+| ASan + UBSan CTest (SQLite default, leak detection enabled) | **PASS: 202 scheduled; 198 passed, 4 skipped** (same expected PostgreSQL-disabled cases) |
+| PostgreSQL-enabled GCC Debug CTest | **PASS serial run: 220 scheduled; 219 passed, 1 skipped** (cross-machine M3 acceptance requires a separate remote setup) |
+| PostgreSQL CTest parallel diagnostic run | **Not supported with the shared single-owner test database:** overlapping test processes were rejected by the intentional PostgreSQL database ownership lock (`PostgreSQL database is owned by another LASO process`). Two of the four initial parallel failures reproduced with this explicit cause; the full serial suite passed. Parallel result is not claimed as passing.** |
+| Unit installation and syntax | **PASS:** `cmake --install` into isolated prefixes; expected executables/config/docs/unit present; `systemd-analyze verify` passed |
+| Native systemd user-service acceptance, SQLite | **PASS:** health, durable approval recovery across SIGTERM and SIGKILL restart, exactly-once completion event, SIGINT, repeated lifecycle, configuration failures, worker-child cleanup |
+| Native systemd user-service acceptance, PostgreSQL | **PASS:** same lifecycle and durable recovery checks against a unique temporary schema, removed after service shutdown |
+| Dedicated system account and system-unit sandbox | **BLOCKED:** this environment has no `laso` account/group and no available privilege to create them or install/start the system manager unit. Rootless user units do not validate `User=`, `Group=`, `StateDirectory=`, or system-unit filesystem restrictions. |
+| Child-process/orphan check | **PASS:** acceptance observed worker-host termination on restart/stop and no LASO/reference worker processes remained afterward |
+
+The acceptance procedure is `tests/acceptance/systemd-lifecycle.sh`. Run
+`--preflight <installed-unit>` for non-mutating systemd/unit checks; run
+`--user <install-prefix> <source-tree>` for the rootless user-service lifecycle.
+For PostgreSQL, set `LASO_SYSTEMD_ACCEPTANCE_POSTGRES_DSN` to a disposable test
+database DSN and use `--user-postgres`; the harness creates and drops only its
+unique test schema. These modes do not install users/groups or alter system
+services. A privileged Linux validation environment must still install the
+unit and verify the dedicated service identity and actual system-manager
+filesystem sandbox before the full systemd deployment gap can be considered
+closed.
+
 Snapshot validated: 2026-09-18. Source review and packaging were performed in a
 development environment. Native validation used an isolated Ubuntu 24.04.5 LTS
 (x86-64) environment.
@@ -111,7 +146,7 @@ and small copy/allocation opportunities. The configured CI command exits zero.
 
 | Check | Status |
 |---|---|
-| Full systemd installation, privilege setup, and shutdown behavior | **PENDING** |
+| Dedicated-account systemd installation and system-unit sandbox | **BLOCKED:** rootless lifecycle coverage passed; privileged system-manager install, account ownership, and `StateDirectory` sandbox remain unvalidated (details above) |
 | GitHub Actions execution | **PASS: public workflow 35380101673; GCC, Clang, Debian, ASan/UBSan, formatting, clang-tidy, and PostgreSQL jobs succeeded** |
 | Optional TSan execution | **BLOCKED ON HOST: GCC runtime aborted during test discovery with `unexpected memory mapping`** |
 

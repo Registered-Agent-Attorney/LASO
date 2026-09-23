@@ -13,7 +13,7 @@ matrix and security limitations before production deployment.
 with GCC and Clang, ASan/UBSan, a Debian 13 container build, a runtime image
 health check, and GitHub Actions. These are development and CI results, not a
 production-readiness claim. See [VALIDATION.md](VALIDATION.md) for exact scope,
-pending systemd deployment validation, and the blocked host TSan run.
+systemd deployment validation status, and the blocked host TSan run.
 
 ```text
                  API / CLI
@@ -76,9 +76,10 @@ binaries are `build/bin/laso`, `build/bin/laso-server`, and
 `build/plugins/liblaso_example_model_provider.so`; the offline worker example is
 `build/worker-plugins/liblaso_example_worker.so`. Core, runtime, storage factory,
 SQLite, optional PostgreSQL, plugin loader, application, API, and CLI are separate
-library targets. Installation currently
-installs the executables, public headers, C SDK header, example configuration,
-and public documentation. A relocatable CMake SDK package is deferred.
+library targets. Installation includes the executables, public headers, C SDK
+header, example configuration, public documentation, and a prefix-configured
+systemd service unit. Disable it with `-DLASO_INSTALL_SYSTEMD_UNIT=OFF` for a
+user-local CLI-only install. A relocatable CMake SDK package is deferred.
 
 ## First pipeline
 
@@ -239,14 +240,17 @@ docker compose -f deploy/docker/compose.yaml up --build
 ```
 
 The Compose example deliberately uses Linux host networking with the API on host
-loopback. Persistent data lives in a named volume. A sample systemd unit runs the
-daemon in the foreground as an unprivileged service account.
+loopback. Persistent data lives in a named volume. The installed systemd unit runs
+the daemon in the foreground as an unprivileged `laso` service account and uses a
+systemd-managed state directory. Full system-account/service validation is
+reported separately from rootless user-service acceptance.
 
 ## Current limitations and deferred work
 
 - Linux builds, tests, sanitizer builds, and the Debian container path are
-  covered by the documented validation paths. Full systemd installation and
-  shutdown behavior remain deployment-dependent.
+  covered by the documented validation paths. Systemd unit installation and
+  rootless user-service lifecycle have a bounded acceptance procedure; full
+  dedicated-account system-service validation remains deployment-dependent.
 - SQLite remains one-process only. PostgreSQL supports an explicit multi-instance
   execution mode with bounded run claims, database-time leases, heartbeats,
   fencing tokens, crash takeover, and durable deterministic branch work. A run
