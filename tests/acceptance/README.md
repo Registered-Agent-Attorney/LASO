@@ -58,3 +58,18 @@ renewal/expiry, fencing, duplicate completion, cancellation recovery, and
 multi-instance recovery. The full worker-death, stale-live-worker, database
 interruption, and owner-recovery scenarios remain separate operational gates;
 they must not be inferred from SQLite or from a successful basic run.
+
+The loopback-only `artifact-chaos-proxy.py` provides deterministic upload
+barriers for artifact failure experiments. It bounds declared upload size and
+upload duration, marks request start/publication using caller-selected files,
+and can hold the successful response until a release file appears. Its local
+barrier behavior can be tested without PostgreSQL, an SSH target, or a worker
+provider:
+
+```sh
+python3 tests/acceptance/test_artifact_chaos_proxy.py
+```
+
+These tests validate the fault injector only; they are not evidence of LASO
+artifact recovery or cross-machine behavior. The proxy binds to loopback and is
+intended for isolated acceptance runs, not production deployment.
