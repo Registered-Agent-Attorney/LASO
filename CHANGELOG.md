@@ -12,6 +12,15 @@
 
 ## Unreleased
 
+- Added an optional S3-compatible content-addressed artifact backend behind
+  `LASO_ENABLE_S3`; the filesystem backend remains the default and cloud-free.
+  Uploads and downloads stream through bounded temporary files with hash/size
+  verification, immutable conditional publication, bounded request behavior,
+  and AWS SDK credential-chain integration. Remote S3 garbage collection is
+  intentionally unsupported. The backend implementation and focused service
+  tests are present, but distributed S3 acceptance and S3-specific chaos
+  validation remain in progress; this is not an M4.1 validation claim.
+
 - Added durable content-addressed artifact transport for distributed workspaces
   and returned results. Files stream through atomic filesystem objects, can be
   materialized through an authenticated object-only gateway when instances do

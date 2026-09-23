@@ -538,16 +538,14 @@ The separate Ubuntu VM supplied the supported cross-OS/process/network
 boundary. LASO provides at-least-once attempts with one authoritative fenced
 completion; it does not claim exactly-once execution.
 
-### Historical partial-validation record
+### Historical partial-validation record (superseded)
 
-At that earlier acceptance checkpoint, the following table and checklist
+At the earlier artifact-publication checkpoint, the table and checklist below
 described the then-incomplete state before the final VM-based chaos pass. They
-are retained for audit history, not as the current milestone status.
+are retained as historical evidence, not as the current milestone status.
 
-Artifact transport is implemented and substantially validated. Artifact-specific
-cross-machine chaos testing remains in progress. The results below are the
-existing acceptance evidence; they are not a claim that the remaining chaos
-scenarios passed.
+The checklist records what remained pending at that checkpoint. The later
+acceptance results in the M3.6 closure section above supersede that status.
 
 | Artifact validation | Result |
 |---|---|
@@ -564,7 +562,7 @@ scenarios passed.
 | Release matrix | **PASS: 202 total; 198 passed, 0 failed, 4 expected skips** |
 | ASan/UBSan equivalent matrix | **PASS; expected PostgreSQL skips; no actionable sanitizer failures reported** |
 
-The following artifact-specific acceptance work remains open:
+The following artifact-specific acceptance work was open at that checkpoint:
 
 - [ ] Worker death after artifact materialization
 - [ ] Worker death during output upload
@@ -574,16 +572,36 @@ The following artifact-specific acceptance work remains open:
 - [ ] Full owner-restart artifact recovery
 - [ ] Diagnose remote worker health/heartbeat stall
 
-In the latest closure attempt, the remote worker stopped advancing its health/
+In that closure attempt, the remote worker stopped advancing its health/
 heartbeat and did not claim queued work, so the requested artifact chaos barriers
-were not reached. The root cause is not yet established; it has not been
-classified as a LASO, network, or environment defect. These cases remain
-follow-up validation, not passed tests. The earlier distributed-runtime
-cancellation, lease, owner recovery, and database interruption results above
-refer to that runtime acceptance scope and do not substitute for these
-artifact-specific scenarios.
+were not reached. The root cause was not established. Later acceptance on the
+clean Ubuntu VM demonstrated normal heartbeat/claim behavior and passed the
+artifact-specific worker-loss, stale-completion, database-interruption, and
+owner-restart scenarios listed in the M3.6 closure table above. The old physical
+worker outage remains an infrastructure follow-up; there is no evidence linking
+it to LASO.
 
-The artifact gateway currently uses a deployment-local bearer token. SQLite
-remains single-instance; S3 storage and arbitrary remote side-effecting tools
-are not implemented. LASO provides at-least-once attempt semantics with one
-authoritative fenced completion, not exactly-once execution.
+The artifact gateway uses a deployment-local bearer token. SQLite remains
+single-instance. The optional S3-compatible artifact backend is now implemented
+under M4.1, whose distributed acceptance and failure validation are still in
+progress. Arbitrary remote side-effecting tools remain unsupported. LASO
+provides at-least-once attempt semantics with one authoritative fenced
+completion, not exactly-once execution.
+
+## M4.1 S3 implementation status — validation incomplete
+
+The optional S3-compatible backend is implemented behind `LASO_ENABLE_S3`; the
+filesystem backend remains the default and does not require the AWS SDK. The
+S3-enabled PostgreSQL Debug tree built and its full regression matrix completed
+with 228 passed, 0 failed, and 1 expected skip. The focused S3/configuration
+tests passed 7/7, including a generated 64 MiB streaming upload/download and
+materialization, concurrent duplicate publication, unavailable endpoint,
+invalid credentials, and content-corruption detection. The default cloud-free
+SQLite Debug matrix completed with 201 passed, 0 failed, and 4 expected skips.
+
+This does not validate M4.1. Distributed owner/worker execution through direct
+shared S3 access, interrupted S3 transfers, S3 outage during authoritative
+artifact retrieval, stale-worker publication against the S3 backend, and owner
+restart using S3 artifacts remain pending. S3 garbage collection is intentionally
+unsupported. See the [M4 roadmap](docs/roadmap.md) and
+[artifact-store guide](docs/artifacts.md) for the implemented boundary.
