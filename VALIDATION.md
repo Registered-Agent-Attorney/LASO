@@ -605,3 +605,34 @@ artifact retrieval, stale-worker publication against the S3 backend, and owner
 restart using S3 artifacts remain pending. S3 garbage collection is intentionally
 unsupported. See the [M4 roadmap](docs/roadmap.md) and
 [artifact-store guide](docs/artifacts.md) for the implemented boundary.
+
+### Independent PR #11 S3 validation (2026-09-24)
+
+Validation was run from PR head `928eca18635b818c207fef7195e057b98f682673`
+with PostgreSQL 16 and the S3-enabled build. MinIO was built from the
+`RELEASE.2025-09-07T16-13-09Z` source on a separate physical Linux ARM64 host.
+The test runner reached MinIO through an SSH loopback tunnel; the test-only
+HTTP exception was enabled only for loopback endpoints. Synthetic disposable
+credentials were used. No AWS service or production credentials were involved.
+
+| Check | Result |
+|---|---|
+| PostgreSQL-enabled baseline CTest | **PASS: 225 scheduled, 223 passed, 0 failed, 2 expected skips** (S3-only configuration guard and the external distributed-acceptance gate) |
+| S3-focused integration against MinIO on the separate host | **PASS: 5/5** |
+| Full PostgreSQL + S3 CTest against the same isolated PostgreSQL and MinIO services | **PASS: 230 scheduled, 229 passed, 0 failed, 1 expected skip** (`distributed_m3_acceptance` requires its separately built remote acceptance executable) |
+| 64 MiB object upload, verification, materialization, and integrity scan | **PASS** over the SSH tunnel; focused test completed in 78.88 seconds |
+| Concurrent duplicate writers and missing-object rejection | **PASS** |
+| Unavailable endpoint during artifact put preflight | **PASS**; the existence check failed within its configured bound and no artifact metadata was published |
+| Invalid credentials and error redaction | **PASS** against MinIO authentication |
+| Corruption at a content-addressed object key | **PASS**; retrieval and integrity scanning rejected the changed bytes |
+
+The physical boundary validated here is between the LASO S3 client process and
+the MinIO server. LASO owner/controller and worker processes were not run on
+different machines against one shared PostgreSQL schema and S3 namespace in
+this pass. Accordingly, normal cross-machine workflow completion, worker loss
+during upload, interrupted transfers, S3 outage during retrieval, owner restart
+with S3-backed state, and stale-worker publication against S3 remain **NOT RUN**.
+The two-service PostgreSQL and stale-fence integration cases did pass in the
+full suite, but they do not substitute for the missing cross-machine S3 workflow.
+AWS S3 compatibility and HTTPS certificate validation were also **NOT RUN**;
+the tested service was MinIO and the test-only endpoint used loopback HTTP.
