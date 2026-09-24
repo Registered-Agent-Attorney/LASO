@@ -620,6 +620,7 @@ credentials were used. No AWS service or production credentials were involved.
 | PostgreSQL-enabled baseline CTest | **PASS: 225 scheduled, 223 passed, 0 failed, 2 expected skips** (S3-only configuration guard and the external distributed-acceptance gate) |
 | S3-focused integration against MinIO on the separate host | **PASS: 5/5** |
 | Full PostgreSQL + S3 CTest against the same isolated PostgreSQL and MinIO services | **PASS: 230 scheduled, 229 passed, 0 failed, 1 expected skip** (`distributed_m3_acceptance` requires its separately built remote acceptance executable) |
+| ThreadSanitizer attempt (separate PostgreSQL-enabled build) | **BLOCKED before tests**; GoogleTest discovery could not start the instrumented binary: `FATAL: ThreadSanitizer: unexpected memory mapping` (exit 66). No TSan test result is claimed. |
 | 64 MiB object upload, verification, materialization, and integrity scan | **PASS** over the SSH tunnel; focused test completed in 78.88 seconds |
 | Concurrent duplicate writers and missing-object rejection | **PASS** |
 | Unavailable endpoint during artifact put preflight | **PASS**; the existence check failed within its configured bound and no artifact metadata was published |
