@@ -626,33 +626,38 @@ credentials were used. No AWS service or production credentials were involved.
 | Invalid credentials and error redaction | **PASS** against MinIO authentication |
 | Corruption at a content-addressed object key | **PASS**; retrieval and integrity scanning rejected the changed bytes |
 
-The physical boundary validated above is between the LASO S3 client process and
-the MinIO server. A separate owner/controller and worker process on different
-physical machines was then attempted against one PostgreSQL schema and one S3
-namespace. The run **FAILED before worker submission**: the owner rejected the
-worker node during preparation because its local `WorkerManager` could not
-resolve the configured worker ID. No durable worker job was created and no
-cross-machine artifact was produced. This indicates a distributed worker
-registration/routing blocker in this setup; it is not evidence of an S3 transfer
-failure. Cross-machine workflow completion is therefore **FAIL**, while worker
-loss during upload, interrupted transfers, S3 outage during retrieval, owner
-restart with S3-backed state, and stale-worker publication against S3 remain
-**NOT RUN**. The two-service PostgreSQL and stale-fence integration cases did
-pass in the full suite, but they do not substitute for the missing cross-machine
-S3 workflow. AWS S3 compatibility and HTTPS certificate validation were also
+The cross-machine workflow ran the x86 owner/controller on the test runner and
+the ARM64 worker and MinIO on a separate physical Linux host. Both LASO
+instances coordinated through the same PostgreSQL schema over a scoped SSH
+forward; each process reached the same MinIO namespace. A parallel worker
+branch received a 31-byte input workspace manifest, staged it on the worker,
+and the deterministic Codex protocol fixture wrote a 29-byte
+`remote-artifact.txt`. The run reached **Completed**. PostgreSQL contained the
+input and output content-addressed manifests; the owner-side integrity command
+downloaded and verified both S3 objects (2/2). After a clean owner restart, the
+same run remained Completed and the owner verified both objects again (2/2).
+The two hosts did not share a local workspace path. This used a deterministic
+fixture, not the real Codex CLI/provider.
+
+Worker loss during upload, interrupted transfers, S3 outage during retrieval,
+owner death while a worker is active, and stale-worker publication against S3
+remain **NOT RUN**. The two-service PostgreSQL and stale-fence integration cases
+did pass in the full suite, but they do not substitute for those S3-specific
+chaos cases. AWS S3 compatibility and HTTPS certificate validation were also
 **NOT RUN**; the tested service was MinIO and the test-only endpoint used
 loopback HTTP.
 
 | Distributed / integrity scenario | Result |
 |---|---|
 | S3 client on x86 host to MinIO on separate ARM64 physical host | **PASS** |
-| Owner/controller on one machine and worker on another, sharing PostgreSQL and S3 | **FAIL before worker submission**; owner-side worker resolution rejected the node and no durable job/artifact was created |
+| Owner/controller on one machine and worker on another, sharing PostgreSQL and S3 | **PASS**; parallel worker branch completed and published a remote workspace result manifest |
+| Owner restart after completed cross-machine run; durable state and S3 objects readable | **PASS**; state remained Completed and integrity scan verified 2/2 objects after restart |
 | Content-addressed upload/download and SHA-256 verification, including 64 MiB streamed object | **PASS** |
 | Duplicate concurrent publication and retrieval of existing content | **PASS** |
 | Corrupt bytes at expected content key rejected by retrieval/integrity scan | **PASS** |
 | Unavailable S3 endpoint during put preflight fails bounded and publishes no artifact metadata | **PASS** |
 | Worker killed before/during/after artifact upload | **NOT RUN** |
-| Owner killed/restarted while a remote worker is active | **NOT RUN** |
+| Owner killed/restarted while a remote worker is active | **NOT RUN** (restart after completed run passed separately) |
 | S3 outage during artifact retrieval or temporary S3 network interruption | **NOT RUN** |
 | PostgreSQL outage/recovery during an S3-backed worker attempt | **NOT RUN** |
 | Stale worker fencing against an S3 artifact completion | **NOT RUN** (the general PostgreSQL stale-fence suite passed, but not with this S3 workflow) |
