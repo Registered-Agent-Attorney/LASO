@@ -643,6 +643,21 @@ S3 workflow. AWS S3 compatibility and HTTPS certificate validation were also
 **NOT RUN**; the tested service was MinIO and the test-only endpoint used
 loopback HTTP.
 
+| Distributed / integrity scenario | Result |
+|---|---|
+| S3 client on x86 host to MinIO on separate ARM64 physical host | **PASS** |
+| Owner/controller on one machine and worker on another, sharing PostgreSQL and S3 | **FAIL before worker submission**; owner-side worker resolution rejected the node and no durable job/artifact was created |
+| Content-addressed upload/download and SHA-256 verification, including 64 MiB streamed object | **PASS** |
+| Duplicate concurrent publication and retrieval of existing content | **PASS** |
+| Corrupt bytes at expected content key rejected by retrieval/integrity scan | **PASS** |
+| Unavailable S3 endpoint during put preflight fails bounded and publishes no artifact metadata | **PASS** |
+| Worker killed before/during/after artifact upload | **NOT RUN** |
+| Owner killed/restarted while a remote worker is active | **NOT RUN** |
+| S3 outage during artifact retrieval or temporary S3 network interruption | **NOT RUN** |
+| PostgreSQL outage/recovery during an S3-backed worker attempt | **NOT RUN** |
+| Stale worker fencing against an S3 artifact completion | **NOT RUN** (the general PostgreSQL stale-fence suite passed, but not with this S3 workflow) |
+| AWS S3 behavior and HTTPS certificate validation | **NOT RUN** |
+
 The deterministic Codex protocol fixture now has a mode that writes a fixed
 artifact into the workspace supplied by the worker request. Its focused local
 test passed (1/1). This provides a reproducible artifact-producing worker for a
