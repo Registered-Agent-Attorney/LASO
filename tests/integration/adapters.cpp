@@ -963,7 +963,7 @@ TEST(Api, SessionSseDeliversCommittedJournalEvents) {
   client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
   client.socket().close(ec);
   server.stop();
-  io.stop();
+  server_thread.join();
 }
 TEST(Api, RunMetadataIsPreservedForWorkerContext) {
   TemporaryDirectory dir;
