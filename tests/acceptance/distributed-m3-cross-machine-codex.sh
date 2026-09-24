@@ -199,6 +199,8 @@ remote_b_server_pid=
 remote_db_interrupt_pid=
 artifact_tunnel_pid=
 s3_tunnel_pid=
+artifact_tunnel_active=0
+s3_tunnel_active=0
 run_root=$(mktemp -d)
 owner_pid=
 cleanup() {
@@ -220,6 +222,12 @@ cleanup() {
   if [[ -n "${remote_db_interrupt_pid:-}" ]]; then kill "$remote_db_interrupt_pid" 2>/dev/null || true; wait "$remote_db_interrupt_pid" 2>/dev/null || true; fi
   if [[ -n "${artifact_tunnel_pid:-}" ]]; then kill "$artifact_tunnel_pid" 2>/dev/null || true; wait "$artifact_tunnel_pid" 2>/dev/null || true; fi
   if [[ -n "${s3_tunnel_pid:-}" ]]; then kill "$s3_tunnel_pid" 2>/dev/null || true; wait "$s3_tunnel_pid" 2>/dev/null || true; fi
+  if [[ "${artifact_tunnel_active:-0}" == 1 && -n "${LASO_SSH_CONTROL_PATH:-}" ]]; then
+    ssh "${ssh_options[@]}" -O cancel -R "127.0.0.1:${remote_artifact_port}" "$target" >/dev/null 2>&1 || true
+  fi
+  if [[ "${s3_tunnel_active:-0}" == 1 && -n "${LASO_SSH_CONTROL_PATH:-}" ]]; then
+    ssh "${ssh_options[@]}" -O cancel -R "127.0.0.1:${remote_s3_port}" "$target" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${s3_release_file:-}" ]]; then touch "$s3_release_file" 2>/dev/null || true; fi
   if [[ -n "${fault_release_file:-}" ]]; then touch "$fault_release_file" 2>/dev/null || true; fi
   for marker in "${remote_ready_path:-}" "${s3_started_marker:-}" \
@@ -283,6 +291,7 @@ sed -e "s|@DATA_DIR@|$(escape_sed "$owner_data")|g" \
     -e "s|@ARTIFACT_SERVICE_PORT@|$owner_artifact_port|g" \
     -e "s|@ARTIFACT_SERVICE_URL@||g" \
     -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
+    -e "s|^artifact_service_port:.*|artifact_service_port: $owner_artifact_port|" \
     "$source_dir/tests/acceptance/distributed-m3-cross-machine-worker-config.yaml.in" |
   sed '/^process_workers:/,$d' > "$run_root/owner.yaml"
 if [[ "$artifact_backend" == "s3" ]]; then
@@ -436,42 +445,63 @@ for _ in $(seq 1 300); do
   sleep 0.1
 done
 curl -fsS "$base/health" >/dev/null || { echo "owner health check failed" >&2; exit 1; }
+echo "cross_machine_owner_api_port=$owner_port artifact_gateway_port=$owner_artifact_port"
+if [[ "$artifact_backend" == "s3" ]]; then
+  echo "cross_machine_s3_namespace=cross-machine/$schema"
+fi
+artifact_probe=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $artifact_token" \
+  -I "http://127.0.0.1:$owner_artifact_port/api/v1/artifacts/invalid-id" 2>/dev/null || true)
+echo "cross_machine_owner_artifact_gateway_probe=$artifact_probe"
 
 # The worker's artifact URL is loopback-local on the remote host. Carry it
 # over a scoped reverse SSH tunnel so PostgreSQL coordination and object
 # transport remain private to the two test instances.
-ssh -N "${ssh_options[@]}" -o ExitOnForwardFailure=yes \
-  -R "127.0.0.1:${remote_artifact_port}:127.0.0.1:${owner_artifact_port}" "$target" \
-  >"$run_root/artifact-tunnel.stdout" 2>"$run_root/artifact-tunnel.stderr" &
-artifact_tunnel_pid=$!
+artifact_forward="127.0.0.1:${remote_artifact_port}:127.0.0.1:${owner_artifact_port}"
+if [[ -n "${LASO_SSH_CONTROL_PATH:-}" ]]; then
+  ssh "${ssh_options[@]}" -O forward -R "$artifact_forward" "$target"
+  artifact_tunnel_active=1
+else
+  ssh -N "${ssh_options[@]}" -o ExitOnForwardFailure=yes -R "$artifact_forward" "$target" \
+    >"$run_root/artifact-tunnel.stdout" 2>"$run_root/artifact-tunnel.stderr" &
+  artifact_tunnel_pid=$!
+fi
 for _ in $(seq 1 100); do
-  kill -0 "$artifact_tunnel_pid" 2>/dev/null || {
+  if [[ -n "$artifact_tunnel_pid" ]] && ! kill -0 "$artifact_tunnel_pid" 2>/dev/null; then
     echo "artifact reverse tunnel failed during startup" >&2
     cat "$run_root/artifact-tunnel.stderr" >&2 || true
     exit 1
-  }
+  fi
   response_code=$(remote_has "curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $artifact_token' -I 'http://127.0.0.1:$remote_artifact_port/api/v1/artifacts/invalid-id'" 2>/dev/null || true)
   [[ "$response_code" == 400 ]] && break
   sleep 0.1
 done
-[[ "${response_code:-}" == 400 ]] || { echo "artifact reverse tunnel health check failed" >&2; exit 1; }
+[[ "${response_code:-}" == 400 ]] || {
+  echo "artifact reverse tunnel health check failed (owner HTTP $artifact_probe, worker HTTP ${response_code:-no response})" >&2
+  remote_has "ss -ltn | grep ':$remote_artifact_port ' || true" >&2 || true
+  exit 1
+}
 
 if [[ "$remote_artifact_mode" == "s3" ]]; then
-  ssh -N "${ssh_options[@]}" -o ExitOnForwardFailure=yes \
-    -R "127.0.0.1:${remote_s3_port}:${remote_s3_tunnel_target}" "$target" \
-    >"$run_root/s3-tunnel.stdout" 2>"$run_root/s3-tunnel.stderr" &
-  s3_tunnel_pid=$!
+  s3_forward="127.0.0.1:${remote_s3_port}:${remote_s3_tunnel_target}"
+  if [[ -n "${LASO_SSH_CONTROL_PATH:-}" ]]; then
+    ssh "${ssh_options[@]}" -O forward -R "$s3_forward" "$target"
+    s3_tunnel_active=1
+  else
+    ssh -N "${ssh_options[@]}" -o ExitOnForwardFailure=yes -R "$s3_forward" "$target" \
+      >"$run_root/s3-tunnel.stdout" 2>"$run_root/s3-tunnel.stderr" &
+    s3_tunnel_pid=$!
+  fi
   if [[ "$remote_s3_endpoint" == https://* && -n "$remote_ca_copy" ]]; then
     remote_s3_health="curl -fsS --cacert '$remote_ca_copy' '$remote_s3_endpoint/minio/health/live' >/dev/null"
   else
     remote_s3_health="curl -fsS '$remote_s3_endpoint/minio/health/live' >/dev/null"
   fi
   for _ in $(seq 1 100); do
-    kill -0 "$s3_tunnel_pid" 2>/dev/null || {
+    if [[ -n "$s3_tunnel_pid" ]] && ! kill -0 "$s3_tunnel_pid" 2>/dev/null; then
       echo "S3 reverse tunnel failed during startup" >&2
       cat "$run_root/s3-tunnel.stderr" >&2 || true
       exit 1
-    }
+    fi
     remote_has "$remote_s3_health" >/dev/null 2>&1 && break
     sleep 0.1
   done
@@ -894,6 +924,9 @@ PY
   ctest --test-dir "$run_root/accepted-$iteration/build" --output-on-failure >/dev/null
   attempts=$(curl -fsS "$base/runs/$run_id/attempts?limit=100")
   jq -c '[.[] | {id,node_id,state,attempt,worker_job_id,started_at,finished_at,fencing_token}]' <<<"$attempts"
+  provenance=$(jq -c '.manifest.provenance | {run_id,node_work_id,attempt_id,worker_id,fencing_token}' \
+    "$run_root/result-manifest.json")
+  echo "cross_machine_artifact_provenance=$provenance"
   artifact_info=$(jq -c '.manifest.files[] | select(.path == "remote-artifact.txt") | {sha256,size,object_id}' \
     "$run_root/result-manifest.json")
   [[ -n "$artifact_info" ]] || { echo "fixture artifact was absent from the result manifest" >&2; exit 1; }
