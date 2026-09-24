@@ -282,9 +282,9 @@ int cli_main(int argc, char **argv) {
     std::cout << result.dump(2) << '\n';
     const bool artifact_integrity_failed =
         *artifact_verify && result.is_object() && result.value("invalid", 0U) > 0;
-    return result.is_object() && (result.value("state", std::string{}) == "Failed" ||
-                                  result.value("state", std::string{}) == "TimedOut" ||
-                                  artifact_integrity_failed)
+    return result.is_object() &&
+                   (result.value("state", std::string{}) == "Failed" ||
+                    result.value("state", std::string{}) == "TimedOut" || artifact_integrity_failed)
                ? 2
                : 0;
   } catch (const Error &e) {
