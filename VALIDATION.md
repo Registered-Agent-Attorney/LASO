@@ -639,13 +639,17 @@ same run remained Completed and the owner verified both objects again (2/2).
 The two hosts did not share a local workspace path. This used a deterministic
 fixture, not the real Codex CLI/provider.
 
-Worker loss during upload, interrupted transfers, S3 outage during retrieval,
-owner death while a worker is active, and stale-worker publication against S3
-remain **NOT RUN**. The two-service PostgreSQL and stale-fence integration cases
-did pass in the full suite, but they do not substitute for those S3-specific
-chaos cases. AWS S3 compatibility and HTTPS certificate validation were also
-**NOT RUN**; the tested service was MinIO and the test-only endpoint used
-loopback HTTP.
+Worker loss during upload, in-flight transfer interruption, owner death while
+a worker is active, and stale-worker publication against S3 remain **NOT RUN**.
+With the workflow already Completed, stopping MinIO made the owner's artifact
+verification exit nonzero and report both objects invalid (2/2); the durable
+workflow state remained Completed. After
+MinIO was restored, verification recovered to 2/2 with no errors. This is a
+retrieval outage/recovery check, not an in-flight worker interruption test. The
+two-service PostgreSQL and stale-fence integration cases did pass in the full
+suite, but they do not substitute for S3-specific worker chaos cases. AWS S3
+compatibility and HTTPS certificate validation were also **NOT RUN**; the tested
+service was MinIO and the test-only endpoint used loopback HTTP.
 
 | Distributed / integrity scenario | Result |
 |---|---|
@@ -658,7 +662,8 @@ loopback HTTP.
 | Unavailable S3 endpoint during put preflight fails bounded and publishes no artifact metadata | **PASS** |
 | Worker killed before/during/after artifact upload | **NOT RUN** |
 | Owner killed/restarted while a remote worker is active | **NOT RUN** (restart after completed run passed separately) |
-| S3 outage during artifact retrieval or temporary S3 network interruption | **NOT RUN** |
+| S3 outage during artifact retrieval and service recovery | **PASS**; post-completion integrity verification failed closed (2/2 invalid), workflow state stayed Completed, then verification recovered to 2/2 after MinIO restart |
+| Temporary S3 network interruption during a live worker transfer | **NOT RUN** |
 | PostgreSQL outage/recovery during an S3-backed worker attempt | **NOT RUN** |
 | Stale worker fencing against an S3 artifact completion | **NOT RUN** (the general PostgreSQL stale-fence suite passed, but not with this S3 workflow) |
 | AWS S3 behavior and HTTPS certificate validation | **NOT RUN** |
