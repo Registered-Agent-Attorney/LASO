@@ -1,6 +1,8 @@
 // Deterministic app-server-shaped fixture for the optional Codex adapter tests.
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <laso/core/types.hpp>
 #include <thread>
@@ -61,6 +63,13 @@ int main(int argc, char **argv) {
       const auto params = request.value("params", Json::object());
       const auto input = params.value("input", Json::array());
       const auto prompt = input.empty() ? std::string{} : input.front().value("text", "");
+      if (mode == "write-workspace") {
+        const auto cwd = params.value("cwd", std::string{});
+        std::ofstream artifact(std::filesystem::path(cwd) / "remote-artifact.txt",
+                              std::ios_base::binary | std::ios_base::trunc);
+        if (!artifact || !(artifact << "cross-machine-s3-artifact-v1\n"))
+          return 74;
+      }
       if (mode == "quiet-over-one-minute")
         std::this_thread::sleep_for(std::chrono::milliseconds(60050));
       if (prompt.find("request-permission") != std::string::npos) {

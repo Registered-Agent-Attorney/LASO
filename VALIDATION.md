@@ -626,13 +626,25 @@ credentials were used. No AWS service or production credentials were involved.
 | Invalid credentials and error redaction | **PASS** against MinIO authentication |
 | Corruption at a content-addressed object key | **PASS**; retrieval and integrity scanning rejected the changed bytes |
 
-The physical boundary validated here is between the LASO S3 client process and
-the MinIO server. LASO owner/controller and worker processes were not run on
-different machines against one shared PostgreSQL schema and S3 namespace in
-this pass. Accordingly, normal cross-machine workflow completion, worker loss
-during upload, interrupted transfers, S3 outage during retrieval, owner restart
-with S3-backed state, and stale-worker publication against S3 remain **NOT RUN**.
-The two-service PostgreSQL and stale-fence integration cases did pass in the
-full suite, but they do not substitute for the missing cross-machine S3 workflow.
-AWS S3 compatibility and HTTPS certificate validation were also **NOT RUN**;
-the tested service was MinIO and the test-only endpoint used loopback HTTP.
+The physical boundary validated above is between the LASO S3 client process and
+the MinIO server. A separate owner/controller and worker process on different
+physical machines was then attempted against one PostgreSQL schema and one S3
+namespace. The run **FAILED before worker submission**: the owner rejected the
+worker node during preparation because its local `WorkerManager` could not
+resolve the configured worker ID. No durable worker job was created and no
+cross-machine artifact was produced. This indicates a distributed worker
+registration/routing blocker in this setup; it is not evidence of an S3 transfer
+failure. Cross-machine workflow completion is therefore **FAIL**, while worker
+loss during upload, interrupted transfers, S3 outage during retrieval, owner
+restart with S3-backed state, and stale-worker publication against S3 remain
+**NOT RUN**. The two-service PostgreSQL and stale-fence integration cases did
+pass in the full suite, but they do not substitute for the missing cross-machine
+S3 workflow. AWS S3 compatibility and HTTPS certificate validation were also
+**NOT RUN**; the tested service was MinIO and the test-only endpoint used
+loopback HTTP.
+
+The deterministic Codex protocol fixture now has a mode that writes a fixed
+artifact into the workspace supplied by the worker request. Its focused local
+test passed (1/1). This provides a reproducible artifact-producing worker for a
+future distributed acceptance run; it does not change or validate production
+worker routing.
