@@ -128,8 +128,17 @@ jobs:
             --env MINIO_ROOT_PASSWORD="$secret_key" \
             quay.io/minio/minio:RELEASE.2024-11-07T00-52-20Z \
             server /data
-          curl --retry-connrefused --retry 60 --retry-delay 1 -fsS \
-            http://127.0.0.1:19387/minio/health/live >/dev/null
+          for attempt in {1..30}; do
+            if curl --connect-timeout 2 --max-time 2 -fsS \
+              http://127.0.0.1:19387/minio/health/live >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'MinIO did not become healthy within the bounded startup window' >&2
+          docker inspect --format 'state={{.State.Status}} exit={{.State.ExitCode}}' \
+            laso-m4-minio >&2 || true
+          exit 1
       - name: Build optional AWS SDK S3 component
         run: |
           git clone --recurse-submodules --depth 1 --branch 1.11.890 \
