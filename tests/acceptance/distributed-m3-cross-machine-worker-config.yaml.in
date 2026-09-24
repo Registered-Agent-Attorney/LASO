@@ -27,7 +27,7 @@ process_workers:
   codex:
     executable: @CODEX_WORKER@
     args: [--codex, @CODEX_BIN@, --allowed-root, @WORKSPACE_ROOT@, --timeout-ms, "180000"]
-    environment_allowlist: [HOME, CODEX_HOME, PATH]
+    environment_allowlist: [HOME, CODEX_HOME, PATH, LASO_CODEX_FIXTURE_MODE, LASO_CODEX_FIXTURE_MARKER, LASO_CODEX_FIXTURE_DONE_MARKER, LASO_CODEX_FIXTURE_ARTIFACT_CONTENT, LASO_CODEX_FIXTURE_SLEEP_MS]
     startup_timeout_ms: 180000
     request_timeout_ms: 180000
     interaction_timeout_ms: 300000
