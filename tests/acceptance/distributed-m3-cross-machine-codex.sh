@@ -234,6 +234,7 @@ cleanup() {
                 "${s3_progress_marker:-}" "${s3_published_marker:-}"; do
     [[ -z "$marker" ]] || rm -f -- "$marker" 2>/dev/null || true
   done
+  if [[ -n "${fault_release_file:-}" ]]; then rm -f -- "$fault_release_file" 2>/dev/null || true; fi
   if [[ -n "${remote_b_root:-}" ]]; then remote_has "rm -rf -- '$remote_b_root'" || true; fi
   if [[ -n "${remote_root:-}" && -n "${remote_ready_path:-}" ]]; then
     remote_has "rm -f -- '$remote_ready_path' '$remote_root/provider-finished.done'" || true
@@ -271,7 +272,7 @@ wait_remote_file() {
 wait_local_file() {
   local path=$1
   for _ in $(seq 1 1800); do
-    [[ -s "$path" ]] && return 0
+    [[ -e "$path" ]] && return 0
     sleep 0.1
   done
   return 1
