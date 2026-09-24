@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
       if (mode == "write-workspace") {
         const auto cwd = params.value("cwd", std::string{});
         std::ofstream artifact(std::filesystem::path(cwd) / "remote-artifact.txt",
-                              std::ios_base::binary | std::ios_base::trunc);
+                               std::ios_base::binary | std::ios_base::trunc);
         if (!artifact || !(artifact << "cross-machine-s3-artifact-v1\n"))
           return 74;
       }
