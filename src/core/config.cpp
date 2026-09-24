@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <laso/core/config.hpp>
 #include <laso/pipeline/parser.hpp>
 #include <regex>
@@ -57,8 +58,9 @@ void Config::validate() {
         artifact_s3_connect_timeout_ms == 0 || artifact_s3_connect_timeout_ms > 120000 ||
         artifact_s3_request_timeout_ms == 0 || artifact_s3_request_timeout_ms > 600000 ||
         artifact_s3_max_retries > 5 || max_artifact_bytes > 5'000'000'000ULL ||
-        !artifact_service_url.empty() || artifact_service_port != 0 ||
-        !artifact_service_token.empty())
+        (!artifact_s3_ca_file.empty() && (!std::filesystem::is_regular_file(artifact_s3_ca_file) ||
+                                          !std::ifstream(artifact_s3_ca_file).good())) ||
+        !artifact_service_url.empty())
       throw Error(ErrorCode::Configuration, "Invalid S3 artifact storage configuration");
     if (!artifact_s3_endpoint.empty()) {
       static const std::regex endpoint_pattern(
@@ -86,7 +88,7 @@ void Config::validate() {
     }
 #endif
   } else if (!artifact_s3_endpoint.empty() || !artifact_s3_bucket.empty() ||
-             artifact_s3_allow_http || artifact_s3_path_style ||
+             artifact_s3_allow_http || artifact_s3_path_style || !artifact_s3_ca_file.empty() ||
              artifact_s3_region != "us-east-1" || artifact_s3_prefix != "laso" ||
              artifact_s3_connect_timeout_ms != 3000 || artifact_s3_request_timeout_ms != 30000 ||
              artifact_s3_max_retries != 2) {
@@ -380,6 +382,7 @@ Config load_config(const std::filesystem::path &supplied,
                     "ARTIFACT_S3_BUCKET",
                     "ARTIFACT_S3_REGION",
                     "ARTIFACT_S3_PREFIX",
+                    "ARTIFACT_S3_CA_FILE",
                     "ARTIFACT_S3_CONNECT_TIMEOUT_MS",
                     "ARTIFACT_S3_REQUEST_TIMEOUT_MS",
                     "ARTIFACT_S3_MAX_RETRIES",
@@ -493,6 +496,8 @@ Config load_config(const std::filesystem::path &supplied,
       c.artifact_s3_region = v;
     else if (k == "artifact_s3_prefix")
       c.artifact_s3_prefix = v;
+    else if (k == "artifact_s3_ca_file")
+      c.artifact_s3_ca_file = v;
     else if (k == "artifact_s3_connect_timeout_ms")
       c.artifact_s3_connect_timeout_ms = uint64(v);
     else if (k == "artifact_s3_request_timeout_ms")

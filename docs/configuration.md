@@ -20,6 +20,7 @@ credentials and binds the development API to loopback.
 | `artifact_s3_bucket` | empty | Required bucket when `artifact_backend: s3` is selected. LASO does not create buckets. |
 | `artifact_s3_region` | `us-east-1` | Signing region used by the S3 client. |
 | `artifact_s3_prefix` | `laso` | Dedicated key namespace prefix; raw workspace paths are never used as keys. |
+| `artifact_s3_ca_file` | empty | Optional PEM CA bundle for S3 HTTPS endpoints using a private trust root. TLS certificate verification remains enabled. |
 | `artifact_s3_path_style` | `false` | Use path-style requests where required by an S3-compatible service. |
 | `artifact_s3_allow_http` | `false` | Explicit loopback-only exception for isolated local testing; production endpoints must use verified HTTPS. |
 | `artifact_s3_connect_timeout_ms` | `3000` | Bounded connection timeout. |

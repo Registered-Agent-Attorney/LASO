@@ -72,7 +72,8 @@ std::unique_ptr<ArtifactStore> make_artifact_store(const Config &config, Storage
                               config.artifact_s3_region, config.artifact_s3_prefix,
                               root / "scratch", config.artifact_s3_connect_timeout_ms,
                               config.artifact_s3_request_timeout_ms, config.artifact_s3_max_retries,
-                              config.artifact_s3_path_style, config.artifact_s3_allow_http},
+                              config.artifact_s3_path_style, config.artifact_s3_allow_http,
+                              config.artifact_s3_ca_file},
         storage, limits);
 #else
     throw Error(ErrorCode::Configuration,
