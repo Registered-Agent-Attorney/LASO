@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <laso/core/config.hpp>
 #include <laso/pipeline/parser.hpp>
 #include <regex>
@@ -38,6 +39,61 @@ void Config::validate() {
     db_path = data_dir / "laso.db";
   if (artifact_root.empty())
     artifact_root = data_dir / "artifacts";
+  if (artifact_backend != "filesystem" && artifact_backend != "s3")
+    throw Error(ErrorCode::Configuration, "Unsupported artifact backend");
+  if (artifact_backend == "s3") {
+#ifndef LASO_HAS_S3
+    throw Error(ErrorCode::Configuration,
+                "S3 artifact storage requires a build with LASO_ENABLE_S3=ON");
+#else
+    if (artifact_s3_bucket.size() < 3 || artifact_s3_bucket.size() > 63 ||
+        !std::regex_match(artifact_s3_bucket, std::regex("[a-z0-9][a-z0-9.-]*[a-z0-9]")) ||
+        artifact_s3_bucket.find("..") != std::string::npos || artifact_s3_region.empty() ||
+        artifact_s3_region.size() > 128 || artifact_s3_prefix.empty() ||
+        artifact_s3_prefix.size() > 256 || artifact_s3_prefix.front() == '/' ||
+        artifact_s3_prefix.back() == '/' || artifact_s3_prefix.find("..") != std::string::npos ||
+        artifact_s3_prefix.find("//") != std::string::npos ||
+        std::regex_search(artifact_s3_prefix, std::regex("(^|/)\\.(?:/|$)")) ||
+        !std::regex_match(artifact_s3_prefix, std::regex("[A-Za-z0-9._/-]+")) ||
+        artifact_s3_connect_timeout_ms == 0 || artifact_s3_connect_timeout_ms > 120000 ||
+        artifact_s3_request_timeout_ms == 0 || artifact_s3_request_timeout_ms > 600000 ||
+        artifact_s3_max_retries > 5 || max_artifact_bytes > 5'000'000'000ULL ||
+        (!artifact_s3_ca_file.empty() && (!std::filesystem::is_regular_file(artifact_s3_ca_file) ||
+                                          !std::ifstream(artifact_s3_ca_file).good())) ||
+        !artifact_service_url.empty())
+      throw Error(ErrorCode::Configuration, "Invalid S3 artifact storage configuration");
+    if (!artifact_s3_endpoint.empty()) {
+      static const std::regex endpoint_pattern(
+          "^(https?)://(\\[[0-9A-Fa-f:]+\\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?$");
+      std::smatch match;
+      if (!std::regex_match(artifact_s3_endpoint, match, endpoint_pattern))
+        throw Error(ErrorCode::Configuration, "Invalid S3 artifact endpoint");
+      if (match[3].matched) {
+        const auto port = std::stoul(match[3].str().substr(1));
+        if (port == 0 || port > 65535)
+          throw Error(ErrorCode::Configuration, "Invalid S3 artifact endpoint port");
+      }
+      if (match[1] == "http") {
+        const auto host = match[2].str();
+        if (!artifact_s3_allow_http ||
+            (host != "localhost" && host != "127.0.0.1" && host != "[::1]"))
+          throw Error(ErrorCode::Configuration,
+                      "Plain HTTP S3 endpoints are allowed only for explicit loopback tests");
+      } else if (artifact_s3_allow_http)
+        throw Error(ErrorCode::Configuration,
+                    "artifact_s3_allow_http applies only to loopback HTTP testing");
+    } else if (artifact_s3_allow_http) {
+      throw Error(ErrorCode::Configuration,
+                  "Plain HTTP S3 testing requires an explicit loopback endpoint");
+    }
+#endif
+  } else if (!artifact_s3_endpoint.empty() || !artifact_s3_bucket.empty() ||
+             artifact_s3_allow_http || artifact_s3_path_style || !artifact_s3_ca_file.empty() ||
+             artifact_s3_region != "us-east-1" || artifact_s3_prefix != "laso" ||
+             artifact_s3_connect_timeout_ms != 3000 || artifact_s3_request_timeout_ms != 30000 ||
+             artifact_s3_max_retries != 2) {
+    throw Error(ErrorCode::Configuration, "S3 options require artifact_backend: s3");
+  }
   if (artifact_service_token.size() > 4096 ||
       (!artifact_service_url.empty() && artifact_service_token.empty()) ||
       (artifact_service_port != 0 && artifact_service_token.empty()) ||
@@ -321,6 +377,17 @@ Config load_config(const std::filesystem::path &supplied,
   for (auto name : {"DATA_DIR",
                     "DB_PATH",
                     "ARTIFACT_ROOT",
+                    "ARTIFACT_BACKEND",
+                    "ARTIFACT_S3_ENDPOINT",
+                    "ARTIFACT_S3_BUCKET",
+                    "ARTIFACT_S3_REGION",
+                    "ARTIFACT_S3_PREFIX",
+                    "ARTIFACT_S3_CA_FILE",
+                    "ARTIFACT_S3_CONNECT_TIMEOUT_MS",
+                    "ARTIFACT_S3_REQUEST_TIMEOUT_MS",
+                    "ARTIFACT_S3_MAX_RETRIES",
+                    "ARTIFACT_S3_PATH_STYLE",
+                    "ARTIFACT_S3_ALLOW_HTTP",
                     "ARTIFACT_SERVICE_URL",
                     "ARTIFACT_SERVICE_TOKEN",
                     "ARTIFACT_SERVICE_HOST",
@@ -419,6 +486,28 @@ Config load_config(const std::filesystem::path &supplied,
       c.data_dir = v;
     else if (k == "artifact_root")
       c.artifact_root = v;
+    else if (k == "artifact_backend")
+      c.artifact_backend = v;
+    else if (k == "artifact_s3_endpoint")
+      c.artifact_s3_endpoint = v;
+    else if (k == "artifact_s3_bucket")
+      c.artifact_s3_bucket = v;
+    else if (k == "artifact_s3_region")
+      c.artifact_s3_region = v;
+    else if (k == "artifact_s3_prefix")
+      c.artifact_s3_prefix = v;
+    else if (k == "artifact_s3_ca_file")
+      c.artifact_s3_ca_file = v;
+    else if (k == "artifact_s3_connect_timeout_ms")
+      c.artifact_s3_connect_timeout_ms = uint64(v);
+    else if (k == "artifact_s3_request_timeout_ms")
+      c.artifact_s3_request_timeout_ms = uint64(v);
+    else if (k == "artifact_s3_max_retries")
+      c.artifact_s3_max_retries = integer(v);
+    else if (k == "artifact_s3_path_style")
+      c.artifact_s3_path_style = boolean(v);
+    else if (k == "artifact_s3_allow_http")
+      c.artifact_s3_allow_http = boolean(v);
     else if (k == "artifact_service_url")
       c.artifact_service_url = v;
     else if (k == "artifact_service_token")

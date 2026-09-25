@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <laso/storage/storage.hpp>
+#include <memory>
 #include <span>
 #include <string>
 #include <utility>
@@ -107,4 +108,39 @@ private:
   Storage &storage_;
   ArtifactStoreLimits limits_;
 };
+
+#ifdef LASO_HAS_S3
+struct S3ArtifactStoreConfig {
+  std::string endpoint, bucket, region = "us-east-1", prefix = "laso";
+  std::filesystem::path scratch_root;
+  std::uint64_t connect_timeout_ms = 3000, request_timeout_ms = 30000;
+  unsigned max_retries = 2;
+  bool path_style = false, allow_http = false;
+  std::filesystem::path ca_file;
+};
+
+// Uses the AWS SDK credential provider chain and a controlled content-hash key
+// namespace. The scratch root is local staging only; object bytes live in S3.
+class S3ArtifactStore final : public ArtifactStore {
+public:
+  S3ArtifactStore(S3ArtifactStoreConfig config, Storage &storage, ArtifactStoreLimits limits = {});
+  ~S3ArtifactStore() override;
+  S3ArtifactStore(const S3ArtifactStore &) = delete;
+  S3ArtifactStore &operator=(const S3ArtifactStore &) = delete;
+  Artifact put(Artifact metadata, std::span<const std::byte> bytes) override;
+  Artifact put_file(Artifact metadata, const std::filesystem::path &source) override;
+  bool exists(const std::string &object_id) const override;
+  void verify(const std::string &object_id, const std::string &sha256 = {},
+              std::uint64_t size = 0) const override;
+  void materialize(const std::string &object_id, const std::filesystem::path &destination,
+                   const std::string &sha256 = {}, std::uint64_t size = 0) const override;
+  ArtifactIntegrityReport integrity() const override;
+  Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) override;
+  const std::filesystem::path &root() const override;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+#endif
 } // namespace laso

@@ -705,6 +705,23 @@ Task<void> Runtime::claim_loop() {
           deps_.coordination->release(*work_lease);
           continue;
         }
+        std::vector<Record> claim_records;
+        if (work.state == NodeWorkState::Running && !work.attempt_id.empty()) {
+          try {
+            auto previous =
+                deps_.storage.get(RecordKind::Attempt, work.attempt_id).get<NodeExecution>();
+            if (previous.state == NodeState::Running) {
+              previous.state = NodeState::Failed;
+              previous.error = "Distributed node work lease expired before attempt completed";
+              previous.finished_at = timestamp();
+              claim_records.push_back(
+                  {RecordKind::Attempt, previous.id, previous.run_id, Json(previous)});
+            }
+          } catch (const Error &error) {
+            if (error.code != ErrorCode::NotFound)
+              throw;
+          }
+        }
         work.state = NodeWorkState::Running;
         ++work.attempt;
         work.attempt_id = uuid();
@@ -714,8 +731,8 @@ Task<void> Runtime::claim_loop() {
         work.last_renewed_at = work_lease->heartbeat_at;
         work.lease_expires_at = work_lease->expires_at;
         work.updated_at = timestamp();
-        commit_node_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}}, work,
-                          *work_lease);
+        claim_records.push_back({RecordKind::NodeWork, work.id, work.run_id, Json(work)});
+        commit_node_owned(claim_records, work, *work_lease);
         log_diagnostic("runtime.distributed_node_claimed",
                        {{"node_work_id", work.id},
                         {"attempt", work.attempt},

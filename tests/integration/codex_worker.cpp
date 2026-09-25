@@ -55,6 +55,19 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
   transport.stop();
 }
 
+TEST(CodexWorker, DeterministicFixtureCanWriteIntoRequestedWorkspace) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport("codex", codex_config(root.path, "write-workspace"));
+  ASSERT_NO_THROW(transport.start());
+  const auto submitted = transport.submit(
+      request(root.path, "codex-workspace-artifact", "write the distributed fixture artifact"));
+  ASSERT_EQ(submitted.state, WorkerJobState::Completed) << submitted.error;
+  std::ifstream artifact(root.path / "remote-artifact.txt", std::ios_base::binary);
+  const std::string contents((std::istreambuf_iterator<char>(artifact)),
+                             std::istreambuf_iterator<char>());
+  EXPECT_EQ(contents, "cross-machine-s3-artifact-v1\n");
+}
+
 TEST(CodexWorker, SessionCanBeReconciledAfterAdapterRestart) {
   TemporaryDirectory root;
   std::string session;

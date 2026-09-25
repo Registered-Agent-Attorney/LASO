@@ -107,3 +107,18 @@ TEST(Cli, OperatorInspectShowsDurableLineageWithoutPayloads) {
   EXPECT_EQ(runs.front().at("id"), run.at("id"));
   EXPECT_EQ(runs.front().at("state"), "Completed");
 }
+
+TEST(Cli, ArtifactVerifyReturnsFailureForInvalidObject) {
+  TemporaryDirectory directory;
+  const auto invalid_object = directory.path / "artifacts" / "objects" / "invalid-object";
+  std::filesystem::create_directories(invalid_object.parent_path());
+  std::ofstream(invalid_object, std::ios::binary) << "synthetic-corrupt-object";
+
+  const auto verified =
+      invoke_cli({"laso", "--data-dir", directory.path.string(), "artifact", "verify"});
+
+  EXPECT_EQ(verified.status, 2);
+  const auto report = Json::parse(verified.output);
+  EXPECT_EQ(report.at("invalid"), 1U);
+  EXPECT_EQ(report.at("verified"), 0U);
+}

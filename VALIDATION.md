@@ -510,12 +510,42 @@ valid current fence can commit one authoritative result. LASO does not claim
 exactly-once execution. SQLite remains explicitly single-instance, and remote
 execution remains limited to the supported agent/worker path.
 
-## M3.6 artifact transport status — partially validated
+## M3.6 artifact transport status — closed and validated
 
-Artifact transport is implemented and substantially validated. Artifact-specific
-cross-machine chaos testing remains in progress. The results below are the
-existing acceptance evidence; they are not a claim that the remaining chaos
-scenarios passed.
+The earlier partial-validation note below is retained as historical evidence.
+M3.6 was subsequently closed using a clean Ubuntu Server virtual machine as a
+separate operating-system, process, and network boundary. The validation used
+PostgreSQL coordination and shared artifact transport, and confirmed normal
+remote claims and heartbeats before exercising recovery cases. No private host
+identifiers or infrastructure addresses are part of this record.
+
+| Final M3.6 acceptance | Result |
+|---|---|
+| Normal distributed artifact baseline | **PASS: 3/3** |
+| Worker loss after input materialization | **PASS**; lease expiry, replacement claim, and recovery completed |
+| Worker loss during output upload | **PASS**; incomplete upload was not accepted as authoritative |
+| Worker loss after artifact publication | **PASS**; publication alone did not confer workflow authority |
+| Stale completion and fencing | **PASS**; stale fence rejected |
+| PostgreSQL interruption during artifact execution | **PASS**; recovery completed without manual database repair |
+| Owner restart and recovery | **PASS**; durable state and artifacts were recovered |
+| Artifact integrity | **PASS**; hashes, size, and provenance verified |
+| Short-TTL lease regression | **PASS**: 3-second lease with 500 ms heartbeat |
+
+These results close the artifact-specific cross-machine chaos acceptance. The
+previously unreachable physical worker remains an infrastructure follow-up; no
+evidence links that outage to LASO, and it is not required for M3.6 acceptance.
+The separate Ubuntu VM supplied the supported cross-OS/process/network
+boundary. LASO provides at-least-once attempts with one authoritative fenced
+completion; it does not claim exactly-once execution.
+
+### Historical partial-validation record (superseded)
+
+At the earlier artifact-publication checkpoint, the table and checklist below
+described the then-incomplete state before the final VM-based chaos pass. They
+are retained as historical evidence, not as the current milestone status.
+
+The checklist records what remained pending at that checkpoint. The later
+acceptance results in the M3.6 closure section above supersede that status.
 
 | Artifact validation | Result |
 |---|---|
@@ -532,7 +562,7 @@ scenarios passed.
 | Release matrix | **PASS: 202 total; 198 passed, 0 failed, 4 expected skips** |
 | ASan/UBSan equivalent matrix | **PASS; expected PostgreSQL skips; no actionable sanitizer failures reported** |
 
-The following artifact-specific acceptance work remains open:
+The following artifact-specific acceptance work was open at that checkpoint:
 
 - [ ] Worker death after artifact materialization
 - [ ] Worker death during output upload
@@ -542,16 +572,180 @@ The following artifact-specific acceptance work remains open:
 - [ ] Full owner-restart artifact recovery
 - [ ] Diagnose remote worker health/heartbeat stall
 
-In the latest closure attempt, the remote worker stopped advancing its health/
+In that closure attempt, the remote worker stopped advancing its health/
 heartbeat and did not claim queued work, so the requested artifact chaos barriers
-were not reached. The root cause is not yet established; it has not been
-classified as a LASO, network, or environment defect. These cases remain
-follow-up validation, not passed tests. The earlier distributed-runtime
-cancellation, lease, owner recovery, and database interruption results above
-refer to that runtime acceptance scope and do not substitute for these
-artifact-specific scenarios.
+were not reached. The root cause was not established. Later acceptance on the
+clean Ubuntu VM demonstrated normal heartbeat/claim behavior and passed the
+artifact-specific worker-loss, stale-completion, database-interruption, and
+owner-restart scenarios listed in the M3.6 closure table above. The old physical
+worker outage remains an infrastructure follow-up; there is no evidence linking
+it to LASO.
 
-The artifact gateway currently uses a deployment-local bearer token. SQLite
-remains single-instance; S3 storage and arbitrary remote side-effecting tools
-are not implemented. LASO provides at-least-once attempt semantics with one
-authoritative fenced completion, not exactly-once execution.
+The artifact gateway uses a deployment-local bearer token. SQLite remains
+single-instance. The optional S3-compatible artifact backend is now implemented
+under M4.1, whose distributed acceptance and failure validation are still in
+progress. Arbitrary remote side-effecting tools remain unsupported. LASO
+provides at-least-once attempt semantics with one authoritative fenced
+completion, not exactly-once execution.
+
+## M4.1 S3 implementation status — validation incomplete
+
+The optional S3-compatible backend is implemented behind `LASO_ENABLE_S3`; the
+filesystem backend remains the default and does not require the AWS SDK. The
+S3-enabled PostgreSQL Debug tree built and its full regression matrix completed
+with 228 passed, 0 failed, and 1 expected skip. The focused S3/configuration
+tests passed 7/7, including a generated 64 MiB streaming upload/download and
+materialization, concurrent duplicate publication, unavailable endpoint,
+invalid credentials, and content-corruption detection. The default cloud-free
+SQLite Debug matrix completed with 201 passed, 0 failed, and 4 expected skips.
+
+This does not validate M4.1. Distributed owner/worker execution through direct
+shared S3 access, interrupted S3 transfers, S3 outage during authoritative
+artifact retrieval, stale-worker publication against the S3 backend, and owner
+restart using S3 artifacts remain pending. S3 garbage collection is intentionally
+unsupported. See the [M4 roadmap](docs/roadmap.md) and
+[artifact-store guide](docs/artifacts.md) for the implemented boundary.
+
+### Independent PR #11 S3 validation (2026-09-24)
+
+Validation was run from PR head `928eca18635b818c207fef7195e057b98f682673`
+with PostgreSQL 16 and the S3-enabled build. MinIO was built from the
+`RELEASE.2025-09-07T16-13-09Z` source on a separate physical Linux ARM64 host.
+The test runner reached MinIO through an SSH loopback tunnel; the test-only
+HTTP exception was enabled only for loopback endpoints. Synthetic disposable
+credentials were used. No AWS service or production credentials were involved.
+
+| Check | Result |
+|---|---|
+| PostgreSQL-enabled baseline CTest | **PASS: 225 scheduled, 223 passed, 0 failed, 2 expected skips** (S3-only configuration guard and the external distributed-acceptance gate) |
+| S3-focused integration against MinIO on the separate host | **PASS: 5/5** |
+| Full PostgreSQL + S3 CTest against the same isolated PostgreSQL and MinIO services | **PASS: 230 scheduled, 229 passed, 0 failed, 1 expected skip** (`distributed_m3_acceptance` requires its separately built remote acceptance executable) |
+| ThreadSanitizer attempt (separate PostgreSQL-enabled build) | **BLOCKED before tests**; GoogleTest discovery could not start the instrumented binary: `FATAL: ThreadSanitizer: unexpected memory mapping` (exit 66). No TSan test result is claimed. |
+| 64 MiB object upload, verification, materialization, and integrity scan | **PASS** over the SSH tunnel; focused test completed in 78.88 seconds |
+| Concurrent duplicate writers and missing-object rejection | **PASS** |
+| Unavailable endpoint during artifact put preflight | **PASS**; the existence check failed within its configured bound and no artifact metadata was published |
+| Invalid credentials and error redaction | **PASS** against MinIO authentication |
+| Corruption at a content-addressed object key | **PASS**; retrieval and integrity scanning rejected the changed bytes |
+
+The cross-machine workflow ran the x86 owner/controller on the test runner and
+the ARM64 worker and MinIO on a separate physical Linux host. Both LASO
+instances coordinated through the same PostgreSQL schema over a scoped SSH
+forward; each process reached the same MinIO namespace. A parallel worker
+branch received a 31-byte input workspace manifest, staged it on the worker,
+and the deterministic Codex protocol fixture wrote a 29-byte
+`remote-artifact.txt`. The run reached **Completed**. PostgreSQL contained the
+input and output content-addressed manifests; the owner-side integrity command
+downloaded and verified both S3 objects (2/2). After a clean owner restart, the
+same run remained Completed and the owner verified both objects again (2/2).
+The two hosts did not share a local workspace path. This used a deterministic
+fixture, not the real Codex CLI/provider.
+
+At that earlier checkpoint, worker loss during upload, in-flight transfer interruption, owner death while a worker was active, and stale-worker publication against S3 were **NOT RUN**. The recovered physical checkpoint below adds a partial pre-publication attempt and TLS certificate results; the other failure gates remain open.
+With the workflow already Completed, stopping MinIO made the owner's artifact
+verification exit nonzero and report both objects invalid (2/2); the durable
+workflow state remained Completed. After
+MinIO was restored, verification recovered to 2/2 with no errors. This is a
+retrieval outage/recovery check, not an in-flight worker interruption test. The
+two-service PostgreSQL and stale-fence integration cases did pass in the full
+suite, but they do not substitute for S3-specific worker chaos cases. AWS S3 compatibility was **NOT RUN** at that checkpoint; the recovered physical checkpoint below records the private-CA TLS checks. The earlier endpoint tests used MinIO.
+
+| Distributed / integrity scenario | Result |
+|---|---|
+| S3 client on x86 host to MinIO on separate ARM64 physical host | **PASS** |
+| Owner/controller on one machine and worker on another, sharing PostgreSQL and S3 | **PASS**; parallel worker branch completed and published a remote workspace result manifest |
+| Owner restart after completed cross-machine run; durable state and S3 objects readable | **PASS**; state remained Completed and integrity scan verified 2/2 objects after restart |
+| Content-addressed upload/download and SHA-256 verification, including 64 MiB streamed object | **PASS** |
+| Duplicate concurrent publication and retrieval of existing content | **PASS** |
+| Corrupt bytes at expected content key rejected by retrieval/integrity scan | **PASS** |
+| Unavailable S3 endpoint during put preflight fails bounded and publishes no artifact metadata | **PASS** |
+| Worker killed before artifact publication | **PASS**; the corrected physical rerun verified the selected process tree exited, the S3 object was absent at the fault point, and a replacement attempt completed with authoritative output |
+| Worker killed during S3 publication | **PASS**; process tree killed during an 8 MiB transfer and the run recovered |
+| Worker killed after S3 publication but before completion | **PASS**; published object survived worker loss and a replacement completed the run |
+| Owner killed/restarted while a remote worker is active | **PASS**; only the owner process was terminated and the run recovered to Completed |
+| S3 outage during an active transfer | **PASS**; only the disposable S3-compatible service was interrupted and restored; the transfer retried |
+| PostgreSQL outage/recovery during an S3-backed worker attempt | **PASS**; only the disposable PostgreSQL service was stopped briefly; the API recovered and the run completed |
+| Stale worker fencing against an S3 artifact completion | **PASS**; stale job and attempt became Failed; the accepted manifest names the completed replacement attempt |
+| S3 outage during artifact retrieval and service recovery | **PASS**; post-completion verification failed closed while run state stayed Completed, then recovered after service restoration |
+| Trusted TLS certificate | **PASS**; private CA accepted with verification enabled |
+| Untrusted TLS certificate rejection | **PASS**; untrusted CA rejected with verification enabled and no bypass |
+| Direct AWS S3 compatibility | **NOT RUN**; physical acceptance used a disposable S3-compatible service |
+
+### Recovered physical M4.1 checkpoint history (2026-09-24)
+
+The table below preserves the state recovered from the interrupted session before the follow-up physical runs. Current acceptance results are recorded in the next section.
+
+The interrupted acceptance session completed one normal physical cross-machine S3
+run using the generic roles `owner-host` and `worker-host`. The disposable
+PostgreSQL database and S3-compatible service were on the owner side; the worker
+connected over the real network. Test-only credentials and a private CA were
+used. This checkpoint records the results recovered from the session log and
+disposable database.
+
+| Gate | Run / attempt | Initial state and fault | Evidence and final state | Result |
+|---|---|---|---|---|
+| Physical baseline | Run `61a7bbb7-c541-4775-81c4-4cdd861f1a6d`; worker attempt `9eecabde-842c-4009-b7e6-e9ed983b5ed7` | Fresh disposable schema and S3 prefix; no injected fault | Run reached Completed. Owner retrieved and verified the 29-byte `remote-artifact.txt`; SHA-256 `c2b480081bd1f9af06c970024ad88096dd5b0cfefe1a52e894135882865d9600`. PostgreSQL recorded the completed run and S3 artifact metadata. | **PASS** |
+| Worker death before publication | Runs `8df44fb9-0c95-4268-990a-fc84bd1f6f9a` and `aa90c1ab-1aca-4ce6-89b4-4dc795d00029`; attempts `a66f7f49-fd1b-4203-a973-5cfde2dc3b13`, `d4e228f8-2004-4c00-b3f1-7d9bb7f9a0f8`, `3e5e3539-b396-4d5e-a664-04d488892be5` | Fresh disposable schemas and prefixes; worker was targeted for termination at the pre-publication barrier | First run paused at the barrier and the expected S3 object returned 404, but the original harness did not verify the target process had exited and an empty release marker blocked recovery. In the follow-up run, retry lease renewals failed, the worker result was rejected, and the owner run ended Failed with `Pipeline execution failed`. No authoritative artifact completion was established. The follow-up ended in the disposable PostgreSQL database; no S3 artifact SHA-256 applies. | **PARTIAL**; recovery failed and verified process termination is still required |
+| Worker death during S3 publication | — | Not run | No physical transfer was interrupted. | **NOT RUN** |
+| Worker death after S3 publication, before completion | — | Not run | No post-publication barrier was exercised. | **NOT RUN** |
+| S3 outage during active transfer | — | Not run | Only completed-run retrieval outage/recovery had passed at the earlier checkpoint; it does not cover an active transfer. | **NOT RUN** |
+| Owner death during worker execution | — | Not run | No owner process was terminated during active S3-backed work. | **NOT RUN** |
+| PostgreSQL interruption during S3-backed work | — | Not run | No database interruption was injected into the disposable PostgreSQL service. | **NOT RUN** |
+| Stale worker publication | — | Not run | No stale attempt was challenged against the authoritative S3 result. | **NOT RUN** |
+| Trusted TLS certificate | Focused S3 suite; no workflow run ID | Disposable HTTPS S3 service with generated private CA installed as trusted | TLS-enabled focused suite passed 19/19; a trusted private CA was accepted with verification enabled. Per-case artifact digest was not retained in the recovered summary. | **PASS** |
+| Untrusted TLS certificate rejection | Focused S3 suite; no workflow run ID | Disposable HTTPS S3 service using a CA absent from the trust bundle | TLS-enabled focused suite passed 19/19; the untrusted certificate was rejected with verification enabled and no bypass configured. | **PASS** |
+
+The acceptance harness verifies the selected remote PID tree exits after
+`KILL`, allows an empty fault-release marker, and checks that a stale worker job
+and its scheduler attempt both become terminal before accepting a replacement
+result. Its PostgreSQL and S3 outage paths validate an explicitly configured
+test-only container and restore it during cleanup. These checks were exercised
+in the physical cases below. The harness uses only disposable resources.
+
+### Current M4.1 physical acceptance results (2026-09-25)
+
+The owner and worker ran on separate physical systems over the real network.
+The owner hosted the disposable PostgreSQL database and S3-compatible service;
+all credentials and endpoints were test-only. The deterministic worker fixture
+produced fixed artifacts. Each completed run was checked in PostgreSQL, and the
+owner downloaded and verified the returned content-addressed object by size and
+SHA-256.
+
+| Case | Run and authoritative attempt | Fault and lease/fence evidence | PostgreSQL, S3, and recovery | Result |
+|---|---|---|---|---|
+| Physical baseline | Run `61a7bbb7-c541-4775-81c4-4cdd861f1a6d`; attempt `9eecabde-842c-4009-b7e6-e9ed983b5ed7` | No injected fault; distinct owner and worker machines | Run Completed; owner verified the 29-byte artifact, SHA-256 `c2b480081bd1f9af06c970024ad88096dd5b0cfefe1a52e894135882865d9600` | **PASS** |
+| Worker killed before publication | Run `6aa7a8db-3966-481e-904a-2f8850a4454d`; interrupted attempt `d02b959a-e4c3-4371-8a42-12d93ea3889d`; accepted attempt `176e681b-68e7-45a2-b4b0-0cb5a2d22771` | S3 object absent at the pre-publication barrier; the worker process tree was confirmed dead. Recovery acquired a higher fence; accepted provenance fence `2` | PostgreSQL NodeWork and run completed on retry. Owner retrieved and verified the 29-byte artifact, SHA-256 `c2b480081bd1f9af06c970024ad88096dd5b0cfefe1a52e894135882865d9600` | **PASS** |
+| Worker killed during publication | Run `5dd2aee5-4cd6-4c7f-96c4-525bc95ff2f7`; accepted attempt `159ae2b6-91ac-4a62-8c48-9395316f4090` | Worker process tree killed at 65,524 of 8,388,608 bytes uploaded; accepted provenance fence `11` | Retry recovered and owner verified the 8 MiB object, SHA-256 `695861265ca767585d7ea8e6e5f1f0f7718087d0c3af5fbc75382d6f3df8a6e6`; final run Completed | **PASS** |
+| Worker killed after publication | Run `625ba770-8cc8-49bf-bdcc-6a2f04e7d6d7`; accepted attempt `e7031807-9f94-4f1e-b803-293473d9e05f` | S3 publication marker observed before worker death and before run completion; accepted provenance fence `7` | Replacement recovered the run; owner verified the 8 MiB object, SHA-256 `695861265ca767585d7ea8e6e5f1f0f7718087d0c3af5fbc75382d6f3df8a6e6`; final run Completed | **PASS** |
+| S3 outage during active transfer | Run `257107a8-6add-4e9f-9f63-f211a2edc510`; accepted attempt `d62aece9-6ece-40ab-8eb4-892520d9ff53` | Disposable S3-compatible service stopped after 131,048 of 8,388,608 bytes; service restored; final provenance fence `20` | Transfer retried; PostgreSQL recorded completion; owner verified the 8 MiB object, SHA-256 `695861265ca767585d7ea8e6e5f1f0f7718087d0c3af5fbc75382d6f3df8a6e6` | **PASS** |
+| Owner death during worker execution | Run `b90dbc32-3acb-456b-933f-0cba69791631`; accepted attempt `4e387c8f-63ba-4b55-af54-429acb7af8cb` | Owner process killed while the worker job was active; only that process was terminated; accepted provenance fence `1` | Owner restarted; PostgreSQL run and NodeWork recovered to Completed; owner verified the 29-byte artifact, SHA-256 `c2b480081bd1f9af06c970024ad88096dd5b0cfefe1a52e894135882865d9600` | **PASS** |
+| PostgreSQL interruption | Run `3a3f08c5-f101-4267-a33c-53e9635d404e`; accepted attempt `1834f653-35c2-4e26-a122-c15ee183597f` | Disposable PostgreSQL service stopped for 3 seconds during active work; lease TTL was 30 seconds; bounded startup timeout prevented a TCP-accepted but silent endpoint from blocking indefinitely; accepted provenance fence `2` | One attempt failed during the outage and a retry completed after database recovery; owner API passed 20 health cycles; owner verified the 29-byte artifact, SHA-256 `c2b480081bd1f9af06c970024ad88096dd5b0cfefe1a52e894135882865d9600` | **PASS** |
+| Stale worker publication/fencing | Run `5d0aec03-7fb8-4f1d-9638-db08077ab769`; stale attempt `2e93d477-4277-4b98-82b9-d867eb04ac63`; accepted attempt `c0ede17b-3c40-45bd-9e27-d1587075ce60` | Old worker was suspended past the staleness interval. Its job and attempt were recorded Failed after losing authority. Replacement attempt completed with fence `2`; accepted manifest names that completed attempt | PostgreSQL run and NodeWork completed. Owner retrieved `winning-attempt` (16 bytes), SHA-256 `50723b3848c94826d73c5b60fed653601b35451d2ae3d4e4e1ade650c4b8040a`; stale output did not become authoritative | **PASS** |
+| Trusted TLS | Focused TLS-enabled S3 suite | Generated private CA trusted by the client; verification remained enabled | Focused suite passed 19/19; certificate accepted | **PASS** |
+| Untrusted TLS | Focused TLS-enabled S3 suite | Certificate authority absent from the trust bundle; no verification bypass | Focused suite passed 19/19; certificate rejected | **PASS** |
+
+The first stale-worker run correctly fenced the result but left its historical
+attempt record marked `Running` after the worker job was `Failed`. Recovery now
+marks that prior attempt `Failed` in the same PostgreSQL transaction that
+claims the replacement NodeWork under its newer lease. A crash-takeover
+regression and the physical stale-worker rerun both verify the terminal history.
+
+A stalled PostgreSQL startup was also reproduced with a server that accepted TCP
+but never answered the PostgreSQL protocol. The prior synchronous libpq startup
+could block beyond the pool acquisition timeout because `connect_timeout` does
+not bound the post-TCP startup handshake. The pool now uses `pqxx::connecting`
+and a deadline-driven socket poll; the new probe fails within its 100 ms bound.
+
+The lease release path now expires the row instead of deleting it, preserving
+monotonic fencing tokens. Its regression verifies that reacquisition increases
+the token and that a prior token cannot write. The focused owner tests and the
+physical recovery runs passed with this behavior.
+
+The full local CTest suite, excluding the opt-in physical acceptance test,
+passed 237 tests; 6 opt-in S3/Codex tests were skipped. The owner and worker
+builds succeeded. Hosted CI and PR review remain before merge.
+
+The deterministic Codex protocol fixture now has a mode that writes a fixed
+artifact into the workspace supplied by the worker request. Its focused local
+test passed (1/1). This provides a reproducible artifact-producing worker for a
+future distributed acceptance run; it does not change or validate production
+worker routing.

@@ -35,10 +35,10 @@ PostgreSQL fence.
 
 ## Multi-instance transfer
 
-The canonical backend is filesystem-backed. For PostgreSQL multi-instance
-execution, configure the same trusted reachable artifact root for every
-participating instance when such a mount is available. A local per-host root
-cannot satisfy remote object materialization by itself.
+The default backend is filesystem-backed and needs no cloud SDK or credentials.
+For PostgreSQL multi-instance execution, configure the same trusted reachable
+artifact root for every participating instance when such a mount is available.
+A local per-host root cannot satisfy remote object materialization by itself.
 
 Where a shared mount is not available, the store owner can enable the scoped
 artifact gateway with `artifact_service_port` and a deployment-local bearer
@@ -50,6 +50,43 @@ general file server, and PostgreSQL still stores only metadata and references.
 Keep the listener loopback/private and use a protected tunnel or network when
 crossing hosts. Do not put provider credentials, SSH keys, environment dumps,
 or unrelated host paths in a manifest.
+
+### Optional S3-compatible backend
+
+Build with `-DLASO_ENABLE_S3=ON` and select `artifact_backend: s3` to use an
+S3-compatible object store. This build option requires the AWS SDK for C++ S3
+component; normal filesystem builds do not find, link, or require that SDK.
+Owners and workers access the bucket directly for object bytes, rather than
+forwarding normal artifact traffic through the owner gateway. PostgreSQL
+continues to hold artifact metadata and the authoritative workflow references.
+
+The S3 key is generated only from the configured namespace and validated
+SHA-256 identity (`<prefix>/objects/<first-two-hex>/<remaining-hex>`). LASO uses
+conditional create-only writes; a conflicting existing key is never silently
+overwritten, and duplicate publication is accepted only after streaming the
+existing object and verifying its digest and size. Downloads stream to a private
+temporary file and are exposed only after size and SHA-256 checks pass. S3
+object presence alone never makes a NodeWork result authoritative; the current
+PostgreSQL fence still decides that.
+
+Credentials come from the AWS SDK's standard credential-provider chain (for
+example, a workload role or `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in
+the process environment). LASO does not put credentials into YAML run state,
+logs, artifact metadata, or manifests. Remote endpoints use HTTPS with
+certificate verification enabled. Set `artifact_s3_ca_file` to a PEM CA bundle
+when the endpoint uses a private trust root; certificate verification remains
+enabled. Plain HTTP is rejected except when an
+operator explicitly enables the test-only path for a loopback endpoint.
+Connection/request timeouts and SDK retries are bounded by configuration.
+
+M4.1 does not enable S3 garbage collection. `laso artifact gc` fails clearly for
+this backend instead of enumerating or deleting bucket contents. `artifact
+verify` checks durable LASO artifact references and detects missing/corrupt
+objects; it does not enumerate unrelated bucket keys. Apply lifecycle cleanup
+only through a separately reviewed, namespace-scoped policy.
+Because this implementation uses bounded single-request `PutObject` rather
+than multipart upload, configure the S3 object limit at or below 5,000,000,000
+bytes. The default 256 MiB limit is unchanged.
 
 ## Inspection and cleanup
 

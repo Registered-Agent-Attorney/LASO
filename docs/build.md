@@ -77,6 +77,34 @@ authenticated database; never put the DSN in a repository file or command log.
 For a complete deterministic two-instance example, see
 [the distributed example](../examples/distributed/README.md).
 
+## Optional S3-compatible artifact store
+
+The default build remains independent of AWS credentials and the cloud SDK. To
+enable S3 support, install/build the [AWS SDK for C++ S3 component](https://github.com/aws/aws-sdk-cpp).
+For a source build on Ubuntu/Debian, the SDK can be built into a user-local
+prefix:
+
+```sh
+sudo apt-get install -y libcurl4-openssl-dev libssl-dev zlib1g-dev
+git clone --recurse-submodules --depth 1 --branch 1.11.890 https://github.com/aws/aws-sdk-cpp.git ../aws-sdk-cpp
+cmake -S ../aws-sdk-cpp -B ../aws-sdk-cpp-build \
+  -DBUILD_ONLY=s3 -DAUTORUN_UNIT_TESTS=OFF -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local/aws-sdk"
+cmake --build ../aws-sdk-cpp-build --parallel 2
+cmake --install ../aws-sdk-cpp-build
+
+CMAKE_PREFIX_PATH="$HOME/.local/aws-sdk" cmake -S . -B build-s3 -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DLASO_ENABLE_S3=ON
+cmake --build build-s3 --parallel 2
+ctest --test-dir build-s3 --output-on-failure
+```
+
+This opt-in SDK build is only needed for LASO's S3 backend. The S3 integration
+tests skip unless `LASO_S3_TEST_ENDPOINT` and `LASO_S3_TEST_BUCKET` point to a
+disposable test service and the AWS SDK credential chain is configured for
+that service. Never use production buckets or credentials for these tests.
+
 ## Optional provider adapters
 
 Provider adapters are opt-in and do not download providers or credentials:

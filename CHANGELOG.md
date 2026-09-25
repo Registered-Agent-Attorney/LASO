@@ -12,6 +12,23 @@
 
 ## Unreleased
 
+- Added an optional S3-compatible content-addressed artifact backend behind
+  `LASO_ENABLE_S3`; the filesystem backend remains the default and cloud-free.
+  Uploads and downloads stream through bounded temporary files with hash/size
+  verification, immutable conditional publication, bounded request behavior,
+  and AWS SDK credential-chain integration. Remote S3 garbage collection is
+  intentionally unsupported. Physical owner/worker acceptance, fault recovery,
+  stale-result fencing, and trusted/untrusted TLS validation have passed using
+  disposable infrastructure. Hosted CI remains before M4.1 closure; see
+  `VALIDATION.md` for the sanitized evidence.
+
+- Preserve expired PostgreSQL lease rows so fencing tokens remain monotonic, and
+  mark a superseded running node attempt failed in the same fenced transaction
+  that claims its replacement. Bound PostgreSQL connection startup with the
+  configured pool acquisition deadline, including when a server accepts TCP but
+  stalls during protocol startup. Regression tests cover token takeover,
+  interrupted attempt history, and stalled startup.
+
 - Added durable content-addressed artifact transport for distributed workspaces
   and returned results. Files stream through atomic filesystem objects, can be
   materialized through an authenticated object-only gateway when instances do
@@ -19,10 +36,17 @@
   provenance. Added integrity and conservative GC operator commands plus large
   generated-file and gateway regression coverage. PostgreSQL stores metadata and
   references only; at-least-once attempts with one authoritative fenced
-  completion remain the guarantee. Artifact transport is implemented and
-  substantially validated; artifact-specific cross-machine chaos testing
-  remains in progress. See `VALIDATION.md` for completed evidence and the
-  explicit follow-up checklist.
+  completion remain the guarantee. The initial artifact-specific chaos suite
+  was incomplete at that publication point; the later M3.6 closure evidence is
+  recorded in `VALIDATION.md`.
+
+- Closed M3.6 artifact-transport validation using separate Linux owner and
+  worker operating-system/process/network boundaries. Normal distributed runs,
+  upload/materialization worker-loss cases, stale completion fencing,
+  PostgreSQL interruption, owner recovery, integrity verification, and the
+  short-TTL lease regression passed. LASO provides at-least-once attempts with
+  one authoritative fenced completion and does not claim exactly-once
+  execution. See `VALIDATION.md` for the acceptance evidence.
 
 - Added opt-in PostgreSQL node-work distribution for deterministic parallel
   branches. Durable fenced `NodeWork` records, bounded global/per-run node slots,

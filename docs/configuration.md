@@ -15,6 +15,17 @@ credentials and binds the development API to loopback.
 | `data_dir` | `.laso` | Runtime state and the default local artifact-store parent. Keep it inside a dedicated service-owned directory. |
 | `db_path` | `data_dir/laso.db` | SQLite database path when SQLite is selected. |
 | `artifact_root` | `data_dir/artifacts` | Content-addressed object store root. In multi-instance mode this must be a trusted shared/reachable filesystem root for every participating instance. |
+| `artifact_backend` | `filesystem` | `filesystem` (default) or optional `s3`. S3 requires a build with `LASO_ENABLE_S3=ON`. |
+| `artifact_s3_endpoint` | empty | Optional S3-compatible endpoint origin. Empty uses the AWS SDK's region-derived endpoint. Do not include credentials or URL query strings. |
+| `artifact_s3_bucket` | empty | Required bucket when `artifact_backend: s3` is selected. LASO does not create buckets. |
+| `artifact_s3_region` | `us-east-1` | Signing region used by the S3 client. |
+| `artifact_s3_prefix` | `laso` | Dedicated key namespace prefix; raw workspace paths are never used as keys. |
+| `artifact_s3_ca_file` | empty | Optional PEM CA bundle for S3 HTTPS endpoints using a private trust root. TLS certificate verification remains enabled. |
+| `artifact_s3_path_style` | `false` | Use path-style requests where required by an S3-compatible service. |
+| `artifact_s3_allow_http` | `false` | Explicit loopback-only exception for isolated local testing; production endpoints must use verified HTTPS. |
+| `artifact_s3_connect_timeout_ms` | `3000` | Bounded connection timeout. |
+| `artifact_s3_request_timeout_ms` | `30000` | Bounded per-request timeout. |
+| `artifact_s3_max_retries` | `2` | Bounded SDK retry count (maximum `5`). |
 | `max_artifact_bytes` | `268435456` | Maximum size of one streamed artifact object. |
 | `max_artifact_temp_bytes` | `536870912` | Maximum configured temporary upload budget; incomplete uploads are private and reaped after the cleanup grace period. |
 | `artifact_cleanup_grace_seconds` | `3600` | Age before unreferenced objects or temporary uploads are eligible for cleanup. |
@@ -43,6 +54,13 @@ object-only gateway. The gateway exposes no directory listing or arbitrary path
 access and must remain loopback/private unless an authenticated deployment
 explicitly permits a remote bind. Do not put credentials, provider
 environments, or arbitrary host paths in manifests.
+
+The optional S3 backend uses the AWS SDK credential-provider chain and is not a
+dependency of the default build. Set credentials through the deployment's
+standard SDK mechanism (prefer workload identity/roles); never place keys in
+the LASO YAML file. `artifact_backend: s3` cannot be combined with the owner
+artifact gateway. Each participating owner/worker must be able to reach the
+same bucket directly. Remote GC is intentionally unsupported in this milestone.
 
 ## Concurrency, deadlines, and budgets
 
