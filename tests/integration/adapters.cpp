@@ -8,6 +8,7 @@
 #include <laso/artifacts/artifacts.hpp>
 #include <laso/artifacts/server.hpp>
 #include <laso/runtime/workspace.hpp>
+#include <laso/storage/coordination.hpp>
 #include <laso/storage/factory.hpp>
 #include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
@@ -1228,6 +1229,151 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
   GTEST_SKIP() << "PostgreSQL backend is not enabled";
 #endif
 }
+TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto schema = "laso_session_stale_completion_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  struct SchemaCleanup {
+    std::string dsn;
+    std::string schema;
+    ~SchemaCleanup() {
+      try {
+        pqxx::connection connection(dsn);
+        pqxx::work transaction(connection);
+        transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+        transaction.commit();
+      } catch (...) {
+      }
+    }
+  } cleanup{dsn, schema};
+
+  CoordinationOptions coordination_options;
+  coordination_options.postgres_dsn = dsn;
+  coordination_options.postgres_schema = schema;
+  auto owner_a = create_coordination(coordination_options, "session-owner-a");
+  auto owner_b = create_coordination(coordination_options, "session-owner-b");
+  StorageOptions storage_options;
+  storage_options.backend = "postgres";
+  storage_options.postgres_dsn = dsn;
+  storage_options.postgres_schema = schema;
+  storage_options.allow_multiple_processes = true;
+  auto storage = create_storage(storage_options);
+
+  AgentSession session;
+  session.pipeline_id = "session-fixture";
+  storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+  const auto turn_id = session.id + "-turn-stale";
+  const Json turn{{"idempotency_key", "stale-completion"},
+                  {"input", {{"tag", "continuation"}}},
+                  {"state", "queued"},
+                  {"pipeline_id", session.pipeline_id}};
+  ASSERT_TRUE(storage->submit_session_turn(session.id, turn_id, turn, Json::object()));
+
+  auto session_lease = owner_a->acquire("session:" + session.id, 5000);
+  ASSERT_TRUE(session_lease);
+  const auto claimed = storage->claim_next_session_turn(session.id, session_lease->owner_instance,
+                                                        session_lease->fencing_token,
+                                                        session_lease->expires_at, Json::object());
+  ASSERT_TRUE(claimed);
+  laso::Run running;
+  running.id = "run-session-stale-completion";
+  running.pipeline_id = session.pipeline_id;
+  running.session_id = session.id;
+  running.session_turn_id = turn_id;
+  ASSERT_TRUE(storage->bind_session_turn_run(session.id, turn_id, Json(running), Json::object(),
+                                             session_lease->owner_instance,
+                                             session_lease->fencing_token, Json::object()));
+  ASSERT_TRUE(owner_a->release(*session_lease));
+
+  const auto run_resource = "run:" + running.id;
+  auto old_lease = owner_a->acquire(run_resource, 5000);
+  ASSERT_TRUE(old_lease);
+  const auto candidate_id = running.id + "-continuation-fixture";
+  const auto make_candidate = [&](const std::string &value, const std::string &scope) {
+    return Record{RecordKind::SessionContinuation,
+                  candidate_id,
+                  running.id,
+                  {{"scope", scope},
+                   {"session_id", session.id},
+                   {"run_id", running.id},
+                   {"turn_id", turn_id},
+                   {"provider_id", "fixture"},
+                   {"provider_version", "1"},
+                   {"state", value}}};
+  };
+  const auto old_candidate = make_candidate("continuation-old", "candidate");
+  storage->commit_owned({old_candidate}, run_resource, old_lease->owner_instance,
+                        old_lease->fencing_token);
+  ASSERT_TRUE(owner_a->release(*old_lease));
+
+  auto current_lease = owner_b->acquire(run_resource, 5000);
+  ASSERT_TRUE(current_lease);
+  EXPECT_GT(current_lease->fencing_token, old_lease->fencing_token);
+  const auto current_candidate = make_candidate("continuation-current", "candidate");
+  storage->commit_owned({current_candidate}, run_resource, current_lease->owner_instance,
+                        current_lease->fencing_token);
+
+  laso::Run completed = running;
+  completed.state = RunState::Completed;
+  completed.message.payload = {{"text", "current-result"}};
+  completed.owner_instance_id = current_lease->owner_instance;
+  completed.fencing_token = current_lease->fencing_token;
+  Event run_completed;
+  run_completed.run_id = completed.id;
+  run_completed.type = "run.completed";
+  auto promoted = make_candidate("continuation-current", "current");
+  promoted.id = session.id + "-continuation-fixture";
+  promoted.run_id = session.id;
+  promoted.value["source_run_id"] = completed.id;
+  auto discarded = make_candidate("", "discarded");
+  storage->commit_session_run(
+      {{RecordKind::Run, completed.id, completed.id, Json(completed)},
+       {RecordKind::Event, run_completed.id, completed.id, Json(run_completed)},
+       promoted,
+       discarded},
+      current_lease->owner_instance, current_lease->fencing_token, Json::object());
+
+  EXPECT_THROW(storage->commit_owned({make_candidate("continuation-stale", "candidate")},
+                                     run_resource, old_lease->owner_instance,
+                                     old_lease->fencing_token),
+               Error);
+  laso::Run stale = completed;
+  stale.message.payload = {{"text", "stale-result"}};
+  stale.owner_instance_id = old_lease->owner_instance;
+  stale.fencing_token = old_lease->fencing_token;
+  Event stale_event;
+  stale_event.run_id = stale.id;
+  stale_event.type = "run.completed";
+  auto stale_continuation = make_candidate("continuation-stale", "current");
+  stale_continuation.id = session.id + "-continuation-fixture";
+  stale_continuation.run_id = session.id;
+  EXPECT_THROW(storage->commit_session_run(
+                   {{RecordKind::Run, stale.id, stale.id, Json(stale)},
+                    {RecordKind::Event, stale_event.id, stale.id, Json(stale_event)},
+                    stale_continuation},
+                   old_lease->owner_instance, old_lease->fencing_token, Json::object()),
+               Error);
+
+  const auto stored_turn = storage->get(RecordKind::SessionTurn, turn_id);
+  EXPECT_EQ(stored_turn.at("state"), "succeeded");
+  EXPECT_EQ(stored_turn.at("result").at("text"), "current-result");
+  const auto continuations = storage->list(RecordKind::SessionContinuation, session.id);
+  ASSERT_EQ(continuations.size(), 1U);
+  EXPECT_EQ(continuations.front().at("state"), "continuation-current");
+  const auto events = storage->session_events(session.id, 0, 100);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [](const Json &event) {
+                            return event.value("type", std::string{}) == "turn.execution.completed";
+                          }),
+            1);
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
+
 TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
   for_each_storage_backend([](const auto &backend) {
     TemporaryDirectory dir;
