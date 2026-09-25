@@ -2549,22 +2549,26 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
     client.expires_after(std::chrono::seconds(5));
     client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
     const auto existing_events = writer.session_events(session.id, 0, 100);
-    const auto first_accept = std::find_if(existing_events.begin(), existing_events.end(),
-                                           [&](const Json &event) {
-                                             return event.value("type", std::string{}) ==
-                                                        "input.accepted" &&
-                                                    event.value("turn_id", std::string{}) ==
-                                                        first.at("id").get<std::string>();
-                                           });
+    const auto first_accept =
+        std::find_if(existing_events.begin(), existing_events.end(), [&](const Json &event) {
+          return event.value("type", std::string{}) == "input.accepted" &&
+                 event.value("turn_id", std::string{}) == first.at("id").get<std::string>();
+        });
     ASSERT_NE(first_accept, existing_events.end());
     auto cursor = first_accept->at("sequence").get<std::uint64_t>();
     const auto request = "GET /api/v1/sessions/" + session.id +
                          "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
-                         "text/event-stream\r\nLast-Event-ID: " + std::to_string(cursor) +
-                         "\r\n\r\n";
+                         "text/event-stream\r\nLast-Event-ID: " +
+                         std::to_string(cursor) + "\r\n\r\n";
     asio::write(client, asio::buffer(request));
     asio::streambuf response_buffer;
     (void)asio::read_until(client, response_buffer, "\r\n\r\n");
+    {
+      std::istream headers(&response_buffer);
+      std::string line;
+      while (std::getline(headers, line) && line != "\r") {
+      }
+    }
     const auto read_frame = [&]() {
       client.expires_after(std::chrono::seconds(5));
       asio::read_until(client, response_buffer, "\n\n");
@@ -2591,8 +2595,9 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
       cursor = sequence;
       EXPECT_EQ(frame.find("replay-one"), std::string::npos);
       replayed_second = is_accepted_turn(frame, replayed.at("id").get<std::string>());
-      if (replayed_second)
+      if (replayed_second) {
         EXPECT_NE(frame.find("replay-two"), std::string::npos);
+      }
     }
     EXPECT_TRUE(replayed_second);
     const auto posted = writer.submit_session_turn(session.id, "writer-instance-input",
