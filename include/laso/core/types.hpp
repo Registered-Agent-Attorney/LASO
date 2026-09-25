@@ -442,6 +442,29 @@ struct Event {
   Json payload = Json::object();
   Json metadata = Json::object();
 };
+// Durable identity for a sequence of agent inputs. Provider state is kept out
+// of the public session record.
+struct AgentSession {
+  std::string id = uuid(), pipeline_id, state = "open", created_at = timestamp(),
+              updated_at = created_at;
+  std::uint64_t next_sequence = 1;
+};
+inline void to_json(Json &j, const AgentSession &s) {
+  j = {{"id", s.id},
+       {"pipeline_id", s.pipeline_id},
+       {"state", s.state},
+       {"created_at", s.created_at},
+       {"updated_at", s.updated_at},
+       {"next_sequence", s.next_sequence}};
+}
+inline void from_json(const Json &j, AgentSession &s) {
+  s.id = j.value("id", uuid());
+  s.pipeline_id = j.value("pipeline_id", std::string{});
+  s.state = j.value("state", std::string{"open"});
+  s.created_at = j.value("created_at", timestamp());
+  s.updated_at = j.value("updated_at", s.created_at);
+  s.next_sequence = j.value("next_sequence", std::uint64_t{1});
+}
 inline void to_json(Json &j, const Event &e) {
   j = {{"id", e.id},
        {"run_id", e.run_id},

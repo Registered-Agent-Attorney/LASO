@@ -16,7 +16,7 @@ private:
   Service &service_;
   IdentityProvider &identity_;
   ApiResponse route(const std::string &, const std::string &, const Json &, const Actor &,
-                    std::size_t limit, std::size_t offset);
+                    std::size_t limit, std::size_t offset, std::uint64_t after);
 };
 class HttpServer {
 public:

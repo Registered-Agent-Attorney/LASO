@@ -1,7 +1,9 @@
 #include <atomic>
 #include <boost/beast.hpp>
+#include <charconv>
 #include <cstddef>
 #include <laso/api/api.hpp>
+#include <limits>
 #include <set>
 
 namespace laso {
@@ -15,6 +17,7 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
   Tcp::acceptor acceptor;
   Api &api;
   std::set<std::shared_ptr<beast::tcp_stream>> sessions;
+  std::size_t event_streams = 0;
   bool stopping = false;
   Impl(asio::io_context &io, Api &api_ref, const std::string &host, unsigned short port)
       : api_strand(asio::make_strand(api_pool)), strand(asio::make_strand(io)), acceptor(strand),
@@ -38,6 +41,130 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
       const auto target = std::string(request.target());
       const auto body = request.body();
       const auto authorization = std::string(request[http::field::authorization]);
+      const auto event_stream = target.find("/api/v1/sessions/") == 0 &&
+                                target.find("/events/stream") != std::string::npos;
+      if (event_stream) {
+        const auto marker = std::string("/events/stream");
+        const auto marker_pos = target.find(marker);
+        const auto session_path = target.substr(0, marker_pos);
+        const auto base = session_path + "/events";
+        const auto check = co_await asio::co_spawn(
+            api_strand,
+            [this, target, authorization]() -> Task<ApiResponse> {
+              co_return api.handle("GET", target, "", authorization);
+            },
+            asio::use_awaitable);
+        if (check.status != 200) {
+          http::response<http::string_body> denied{static_cast<http::status>(check.status), 11};
+          denied.set(http::field::content_type, "application/json");
+          denied.keep_alive(false);
+          denied.body() = check.body.dump();
+          denied.prepare_payload();
+          co_await http::async_write(*stream, denied, asio::use_awaitable);
+          throw std::runtime_error("SSE request rejected");
+        }
+        std::uint64_t cursor = 0;
+        if (!request["Last-Event-ID"].empty()) {
+          const auto value = std::string(request["Last-Event-ID"]);
+          const auto parsed = std::from_chars(value.data(), value.data() + value.size(), cursor);
+          if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+              cursor > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            http::response<http::string_body> bad{http::status::bad_request, 11};
+            bad.set(http::field::content_type, "application/json");
+            bad.keep_alive(false);
+            bad.body() = R"({"error":"Invalid Last-Event-ID"})";
+            bad.prepare_payload();
+            co_await http::async_write(*stream, bad, asio::use_awaitable);
+            throw std::runtime_error("invalid SSE cursor");
+          }
+        }
+        if (event_streams >= 32) {
+          http::response<http::string_body> full{http::status::too_many_requests, 11};
+          full.set(http::field::content_type, "application/json");
+          full.keep_alive(false);
+          full.body() = R"({"error":"Session stream capacity is exhausted"})";
+          full.prepare_payload();
+          co_await http::async_write(*stream, full, asio::use_awaitable);
+          throw std::runtime_error("SSE capacity reached");
+        }
+        ++event_streams;
+        struct StreamCountGuard {
+          std::size_t &count;
+          ~StreamCountGuard() {
+            --count;
+          }
+        } stream_count_guard{event_streams};
+        stream->expires_never();
+        const std::string headers =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
+            "Connection: close\r\nX-Accel-Buffering: no\r\n\r\n";
+        co_await asio::async_write(stream->socket(), asio::buffer(headers), asio::use_awaitable);
+        asio::steady_timer poll(stream->get_executor());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(30);
+        auto last_keepalive = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() < deadline) {
+          const auto poll_target = base + "?after=" + std::to_string(cursor) + "&limit=1";
+          auto page = co_await asio::co_spawn(
+              api_strand,
+              [this, poll_target, authorization]() -> Task<ApiResponse> {
+                co_return api.handle("GET", poll_target, "", authorization);
+              },
+              asio::use_awaitable);
+          if (page.status != 200)
+            break;
+          bool sent = false;
+          bool closed_event_sent = false;
+          if (page.body.is_array())
+            for (const auto &event : page.body) {
+              const auto sequence = event.value("sequence", std::uint64_t{0});
+              if (sequence <= cursor)
+                continue;
+              const auto frame =
+                  "id: " + std::to_string(sequence) + "\ndata: " + event.dump() + "\n\n";
+              co_await asio::async_write(stream->socket(), asio::buffer(frame),
+                                         asio::use_awaitable);
+              cursor = sequence;
+              sent = true;
+              closed_event_sent =
+                  closed_event_sent || event.value("type", std::string{}) == "session.closed";
+            }
+          if (closed_event_sent)
+            break;
+          if (!sent) {
+            auto session = co_await asio::co_spawn(
+                api_strand,
+                [this, session_path, authorization]() -> Task<ApiResponse> {
+                  co_return api.handle("GET", session_path, "", authorization);
+                },
+                asio::use_awaitable);
+            if (session.status != 200)
+              break;
+            if (session.body.value("state", std::string{}) == "closed") {
+              auto final_events = co_await asio::co_spawn(
+                  api_strand,
+                  [this, poll_target, authorization]() -> Task<ApiResponse> {
+                    co_return api.handle("GET", poll_target, "", authorization);
+                  },
+                  asio::use_awaitable);
+              if (final_events.status != 200)
+                break;
+              if (final_events.body.is_array() && !final_events.body.empty())
+                continue;
+              break;
+            }
+          }
+          const auto now = std::chrono::steady_clock::now();
+          if (!sent && now - last_keepalive >= std::chrono::seconds(15)) {
+            const std::string heartbeat = ": keepalive\n\n";
+            co_await asio::async_write(stream->socket(), asio::buffer(heartbeat),
+                                       asio::use_awaitable);
+            last_keepalive = now;
+          }
+          poll.expires_after(sent ? std::chrono::milliseconds(0) : std::chrono::milliseconds(250));
+          co_await poll.async_wait(asio::use_awaitable);
+        }
+        throw std::runtime_error("SSE stream ended");
+      }
       auto result = co_await asio::co_spawn(
           api_strand,
           [this, method, target, body, authorization]() -> Task<ApiResponse> {

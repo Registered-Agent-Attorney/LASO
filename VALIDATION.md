@@ -749,3 +749,31 @@ artifact into the workspace supplied by the worker request. Its focused local
 test passed (1/1). This provides a reproducible artifact-producing worker for a
 future distributed acceptance run; it does not change or validate production
 worker routing.
+
+
+## M5.1 durable session journal and replay (2026-09-25)
+
+The M5.1 acceptance boundary was reviewed against the implementation and tested
+with SQLite and the disposable PostgreSQL backend. M5.1 persists accepted input
+and observable events; it does not execute accepted turns or persist provider
+continuation state.
+
+| Acceptance case | Evidence | Result |
+|---|---|---|
+| Identical idempotent retry | API retry returns the original turn record and leaves one `input.accepted` event in the ordered journal. | **PASS** |
+| Conflicting idempotency-key reuse | API returns HTTP 409; the original turn and event remain unchanged. | **PASS** |
+| Concurrent submissions | Twelve actual concurrent storage writers produce one contiguous, duplicate-free per-session event sequence on SQLite and PostgreSQL. | **PASS** |
+| Close versus input acceptance | Concurrent close and submit serialize transactionally: either the input commits before the final close event, or it is rejected after close; no partial turn/event is stored. | **PASS** |
+| Service restart | Recreated SQLite-backed service retains open and closed session state, accepted turns, event sequence, replay, and rejection of new closed-session input. | **PASS** |
+| Storage reopen | Session acceptance, ordered journal, close event, and replay survive storage connection reopen on both enabled backends. | **PASS** |
+| SSE cursor resume | Disconnect/reconnect with nonzero `Last-Event-ID` returns only later events; the final `session.closed` event is delivered and the stream terminates. | **PASS** |
+| PostgreSQL cross-instance replay/live observation | Independent LASO service instances share a disposable schema; an observer replays a committed event and receives a later writer event over an open SSE stream using a nonzero `Last-Event-ID`. | **PASS** |
+| SQLite deployment boundary | Existing configuration validation rejects SQLite with `execution_mode: multi_instance`; session documentation makes SQLite's single-instance scope explicit. | **PASS** |
+| Query bounds and request sizes | API pagination, cursor parsing, request-size checks, event-page limits, and bounded SSE duration/stream count were reviewed; existing API limit regression passes. | **PASS** |
+
+The Linux GCC Debug build with PostgreSQL and S3 enabled completed. The serial
+normal CTest suite listed 251 tests: 245 passed, 6 opt-in S3/Codex fixtures were
+skipped, and none failed. The separate physical `distributed_m3_acceptance` test
+was not repeated for M5.1 because M5.1's cross-instance requirement is covered
+by independent services sharing PostgreSQL. `clang-format-18 --dry-run
+--Werror` and `git diff --check` passed. Hosted CI on PR #13 head `0fef776` passed all 7 checks: GCC, Clang, Release, PostgreSQL, S3, Debian, and ASan/UBSan.

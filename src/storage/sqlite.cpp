@@ -1,6 +1,7 @@
 #include <array>
 #include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
+#include <limits>
 #include <mutex>
 #include <sqlite3.h>
 
@@ -23,7 +24,10 @@ std::string table(RecordKind kind) {
                                        "external_event_claims",
                                        "worker_jobs",
                                        "worker_interactions",
-                                       "node_work"};
+                                       "node_work",
+                                       "agent_sessions",
+                                       "session_turns",
+                                       "session_events"};
   const auto index = static_cast<std::size_t>(kind);
   if (index >= names.size())
     throw Error(ErrorCode::Validation, "Unknown record kind");
@@ -40,8 +44,9 @@ Statement prepare(sqlite3 *db, const std::string &sql) {
   return {raw, sqlite3_finalize};
 }
 void bind(sqlite3_stmt *s, int index, const std::string &value) {
-  if (sqlite3_bind_text(s, index, value.c_str(), static_cast<int>(value.size()),
-                        SQLITE_TRANSIENT) != SQLITE_OK)
+  const auto result =
+      sqlite3_bind_text(s, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
+  if (result != SQLITE_OK)
     throw Error(ErrorCode::Storage, "SQLite binding failed");
 }
 std::string serialize(const Json &value) {
@@ -85,19 +90,19 @@ SQLiteStorage::SQLiteStorage(const std::filesystem::path &path) : impl_(std::mak
   exec(raw, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
   auto version_stmt = prepare(raw, "PRAGMA user_version");
   if (sqlite3_step(version_stmt.get()) != SQLITE_ROW ||
-      sqlite3_column_int(version_stmt.get(), 0) > 5)
+      sqlite3_column_int(version_stmt.get(), 0) > 6)
     throw Error(ErrorCode::Storage, "Unsupported database schema version");
   version_stmt.reset();
   exec(raw, "BEGIN IMMEDIATE");
   try {
-    for (std::size_t i = 0; i < 16; ++i) {
+    for (std::size_t i = 0; i < 19; ++i) {
       auto name = table(static_cast<RecordKind>(i));
       exec(raw, "CREATE TABLE IF NOT EXISTS " + name +
                     " (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, body TEXT NOT NULL "
                     "CHECK(json_valid(body)), sequence INTEGER NOT NULL)");
       exec(raw, "CREATE INDEX IF NOT EXISTS " + name + "_run ON " + name + "(run_id,sequence)");
     }
-    exec(raw, "PRAGMA user_version=5; COMMIT");
+    exec(raw, "PRAGMA user_version=6; COMMIT");
   } catch (...) {
     sqlite3_exec(raw, "ROLLBACK", nullptr, nullptr, nullptr);
     throw;
@@ -209,7 +214,7 @@ bool SQLiteStorage::claim(const Record &record, const std::vector<Record> &assoc
     throw Error(ErrorCode::Validation, "Record id is empty");
   if (record.kind != RecordKind::ScheduleOccurrence && record.kind != RecordKind::TriggerDelivery &&
       record.kind != RecordKind::ExternalEventClaim && record.kind != RecordKind::WorkerJob &&
-      record.kind != RecordKind::NodeWork)
+      record.kind != RecordKind::NodeWork && record.kind != RecordKind::SessionTurn)
     throw Error(ErrorCode::Validation, "Record kind cannot be claimed");
   const auto name = table(record.kind);
   const auto body = serialize(record.value);
@@ -250,6 +255,150 @@ bool SQLiteStorage::claim(const Record &record, const std::vector<Record> &assoc
     sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
     throw;
   }
+}
+bool SQLiteStorage::submit_session_turn(const std::string &session_id, const std::string &turn_id,
+                                        const Json &turn, Json event) {
+  if (session_id.empty() || session_id.size() > 128 || turn_id.empty() || turn_id.size() > 256 ||
+      !turn.is_object() || !turn.contains("input") || !turn.contains("idempotency_key") ||
+      turn.dump().size() > 1024 * 1024 || event.dump().size() > 2 * 1024 * 1024)
+    throw Error(ErrorCode::Validation, "Invalid session turn");
+  std::lock_guard lock(impl_->mutex);
+  auto *db = impl_->db.get();
+  exec(db, "BEGIN IMMEDIATE");
+  try {
+    auto session_stmt = prepare(db, "SELECT body FROM agent_sessions WHERE id=?");
+    bind(session_stmt.get(), 1, session_id);
+    if (sqlite3_step(session_stmt.get()) != SQLITE_ROW)
+      throw Error(ErrorCode::NotFound, "Agent session not found");
+    auto session = parse(session_stmt.get()).get<AgentSession>();
+    auto existing = prepare(db, "SELECT body FROM session_turns WHERE id=?");
+    bind(existing.get(), 1, turn_id);
+    if (sqlite3_step(existing.get()) == SQLITE_ROW) {
+      const auto prior = parse(existing.get());
+      if (prior.value("session_id", std::string{}) != session_id ||
+          prior.value("idempotency_key", std::string{}) !=
+              turn.value("idempotency_key", std::string{}) ||
+          prior.value("input", Json()) != turn.value("input", Json()))
+        throw Error(ErrorCode::Conflict, "Session turn idempotency key was reused");
+      exec(db, "COMMIT");
+      return false;
+    }
+    if (session.state != "open")
+      throw Error(ErrorCode::Conflict, "Agent session is closed");
+    const auto sequence = session.next_sequence++;
+    if (sequence > static_cast<std::uint64_t>(std::numeric_limits<sqlite3_int64>::max()))
+      throw Error(ErrorCode::Capacity, "Agent session sequence is exhausted");
+    session.updated_at = timestamp();
+    event["id"] = event.value("id", uuid());
+    event["session_id"] = session_id;
+    event["sequence"] = sequence;
+    event["type"] = "input.accepted";
+    event["turn_id"] = turn_id;
+    event["payload"] = {{"input", turn.at("input")}};
+    if (event.dump().size() > 2 * 1024 * 1024)
+      throw Error(ErrorCode::Validation, "Session event exceeds limit");
+    auto turn_record = turn;
+    turn_record["id"] = turn_id;
+    turn_record["session_id"] = session_id;
+    turn_record["sequence"] = sequence;
+    auto turn_stmt =
+        prepare(db, "INSERT INTO session_turns(id,run_id,body,sequence) VALUES(?,?,?,?)");
+    bind(turn_stmt.get(), 1, turn_id);
+    bind(turn_stmt.get(), 2, session_id);
+    const auto turn_body = serialize(turn_record);
+    bind(turn_stmt.get(), 3, turn_body);
+    if (sqlite3_bind_int64(turn_stmt.get(), 4, static_cast<sqlite3_int64>(sequence)) != SQLITE_OK)
+      throw Error(ErrorCode::Storage, "SQLite session sequence bind failed");
+    if (sqlite3_step(turn_stmt.get()) != SQLITE_DONE)
+      throw Error(ErrorCode::Storage, "SQLite session turn insert failed");
+    auto event_stmt =
+        prepare(db, "INSERT INTO session_events(id,run_id,body,sequence) VALUES(?,?,?,?)");
+    const auto event_id = event.at("id").get<std::string>();
+    bind(event_stmt.get(), 1, event_id);
+    bind(event_stmt.get(), 2, session_id);
+    const auto event_body = serialize(event);
+    bind(event_stmt.get(), 3, event_body);
+    if (sqlite3_bind_int64(event_stmt.get(), 4, static_cast<sqlite3_int64>(sequence)) != SQLITE_OK)
+      throw Error(ErrorCode::Storage, "SQLite session event sequence bind failed");
+    if (sqlite3_step(event_stmt.get()) != SQLITE_DONE)
+      throw Error(ErrorCode::Storage, "SQLite session event insert failed");
+    auto update = prepare(db, "UPDATE agent_sessions SET body=? WHERE id=?");
+    const auto session_body = serialize(Json(session));
+    bind(update.get(), 1, session_body);
+    bind(update.get(), 2, session_id);
+    if (sqlite3_step(update.get()) != SQLITE_DONE)
+      throw Error(ErrorCode::Storage, "Session update failed");
+    exec(db, "COMMIT");
+    return true;
+  } catch (...) {
+    sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+    throw;
+  }
+}
+bool SQLiteStorage::close_agent_session(const std::string &session_id, Json event) {
+  if (session_id.empty() || session_id.size() > 128)
+    throw Error(ErrorCode::Validation, "Invalid agent session id");
+  std::lock_guard lock(impl_->mutex);
+  auto *db = impl_->db.get();
+  exec(db, "BEGIN IMMEDIATE");
+  try {
+    auto query = prepare(db, "SELECT body FROM agent_sessions WHERE id=?");
+    bind(query.get(), 1, session_id);
+    if (sqlite3_step(query.get()) != SQLITE_ROW)
+      throw Error(ErrorCode::NotFound, "Agent session not found");
+    auto session = parse(query.get()).get<AgentSession>();
+    if (session.state == "closed") {
+      exec(db, "COMMIT");
+      return false;
+    }
+    session.state = "closed";
+    session.updated_at = timestamp();
+    const auto sequence = session.next_sequence++;
+    if (sequence > static_cast<std::uint64_t>(std::numeric_limits<sqlite3_int64>::max()))
+      throw Error(ErrorCode::Capacity, "Agent session sequence is exhausted");
+    event["id"] = event.value("id", uuid());
+    event["session_id"] = session_id;
+    event["sequence"] = sequence;
+    event["type"] = "session.closed";
+    const auto event_body = serialize(event);
+    const auto session_body = serialize(Json(session));
+    auto insert =
+        prepare(db, "INSERT INTO session_events(id,run_id,body,sequence) VALUES(?,?,?,?)");
+    const auto event_id = event.at("id").get<std::string>();
+    bind(insert.get(), 1, event_id);
+    bind(insert.get(), 2, session_id);
+    bind(insert.get(), 3, event_body);
+    sqlite3_bind_int64(insert.get(), 4, static_cast<sqlite3_int64>(sequence));
+    if (sqlite3_step(insert.get()) != SQLITE_DONE)
+      throw Error(ErrorCode::Storage, "SQLite close event insert failed");
+    auto update = prepare(db, "UPDATE agent_sessions SET body=? WHERE id=?");
+    bind(update.get(), 1, session_body);
+    bind(update.get(), 2, session_id);
+    if (sqlite3_step(update.get()) != SQLITE_DONE)
+      throw Error(ErrorCode::Storage, "SQLite session close failed");
+    exec(db, "COMMIT");
+    return true;
+  } catch (...) {
+    sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+    throw;
+  }
+}
+std::vector<Json> SQLiteStorage::session_events(const std::string &session_id, std::uint64_t after,
+                                                std::size_t limit) const {
+  if (session_id.empty() || session_id.size() > 128 || limit == 0 || limit > 1000 ||
+      after > static_cast<std::uint64_t>(std::numeric_limits<sqlite3_int64>::max()))
+    throw Error(ErrorCode::Validation, "Invalid session event page");
+  std::lock_guard lock(impl_->mutex);
+  auto stmt =
+      prepare(impl_->db.get(), "SELECT body FROM session_events WHERE run_id=? AND sequence>? "
+                               "ORDER BY sequence LIMIT ?");
+  bind(stmt.get(), 1, session_id);
+  sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(after));
+  sqlite3_bind_int64(stmt.get(), 3, static_cast<sqlite3_int64>(limit));
+  std::vector<Json> result;
+  while (sqlite3_step(stmt.get()) == SQLITE_ROW)
+    result.push_back(parse(stmt.get()));
+  return result;
 }
 Json SQLiteStorage::get(RecordKind kind, const std::string &id) const {
   std::lock_guard lock(impl_->mutex);

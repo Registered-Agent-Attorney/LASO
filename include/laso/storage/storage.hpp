@@ -22,7 +22,10 @@ enum class RecordKind {
   ExternalEventClaim,
   WorkerJob,
   WorkerInteraction,
-  NodeWork
+  NodeWork,
+  AgentSession,
+  SessionTurn,
+  SessionEvent
 };
 struct Record {
   RecordKind kind;
@@ -46,6 +49,29 @@ public:
   // external event identities. Associated records are inserted in the same
   // transaction only when the claim is new.
   virtual bool claim(const Record &record, const std::vector<Record> &associated = {}) = 0;
+  // Session inputs and events use a per-session sequence assigned while the
+  // session row is locked. The database remains authoritative across service
+  // instances; event delivery may poll this journal.
+  virtual bool submit_session_turn(const std::string &session_id, const std::string &turn_id,
+                                   const Json &turn, Json event) {
+    (void)session_id;
+    (void)turn_id;
+    (void)turn;
+    (void)event;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support agent sessions");
+  }
+  virtual bool close_agent_session(const std::string &session_id, Json event) {
+    (void)session_id;
+    (void)event;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support agent sessions");
+  }
+  virtual std::vector<Json> session_events(const std::string &session_id, std::uint64_t after,
+                                           std::size_t limit) const {
+    (void)session_id;
+    (void)after;
+    (void)limit;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support agent sessions");
+  }
   virtual Json get(RecordKind kind, const std::string &id) const = 0;
   virtual std::vector<Json> list(RecordKind kind, const std::string &run_id = "",
                                  std::size_t limit = 1000, std::size_t offset = 0) const = 0;
@@ -63,6 +89,9 @@ public:
                     std::uint64_t) override;
   void request_cancellation(const std::string &) override;
   bool claim(const Record &, const std::vector<Record> &associated = {}) override;
+  bool submit_session_turn(const std::string &, const std::string &, const Json &, Json) override;
+  bool close_agent_session(const std::string &, Json) override;
+  std::vector<Json> session_events(const std::string &, std::uint64_t, std::size_t) const override;
   Json get(RecordKind, const std::string &) const override;
   std::vector<Json> list(RecordKind, const std::string &run_id = "", std::size_t limit = 1000,
                          std::size_t offset = 0) const override;

@@ -1,12 +1,14 @@
 #include "../support.hpp"
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <boost/beast.hpp>
 #include <fstream>
 #include <laso/api/api.hpp>
 #include <laso/artifacts/artifacts.hpp>
 #include <laso/artifacts/server.hpp>
 #include <laso/runtime/workspace.hpp>
+#include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
 #include <thread>
 
@@ -207,6 +209,133 @@ TEST(Storage, ConformanceSerializesConcurrentCommits) {
     EXPECT_FALSE(failed);
     EXPECT_EQ(s->list(RecordKind::Event, "run-1").size(), 128U);
   });
+}
+TEST(Storage, SessionTurnsAreOrderedIdempotentReplayableAndDurable) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    const auto path = dir.path / "sessions.db";
+    const auto session_id = "session-" + uuid();
+    {
+      auto storage = backend.open(path);
+      AgentSession session;
+      session.id = session_id;
+      session.pipeline_id = "example@1";
+      storage->commit({{RecordKind::AgentSession, session_id, session_id, Json(session)}});
+      std::atomic<bool> failed = false;
+      std::vector<std::jthread> writers;
+      for (unsigned i = 0; i < 12; ++i)
+        writers.emplace_back([&, i] {
+          try {
+            const auto key = "request-" + std::to_string(i);
+            Json turn{{"idempotency_key", key}, {"input", {{"n", i}}}, {"state", "queued"}};
+            Event event;
+            event.type = "ignored-by-store";
+            ASSERT_TRUE(storage->submit_session_turn(session_id, "turn-" + std::to_string(i), turn,
+                                                     Json(event)));
+          } catch (...) {
+            failed = true;
+          }
+        });
+      writers.clear();
+      EXPECT_FALSE(failed);
+      EXPECT_FALSE(storage->submit_session_turn(
+          session_id, "turn-0",
+          Json{{"idempotency_key", "request-0"}, {"input", {{"n", 0}}}, {"state", "queued"}},
+          Json::object()));
+      EXPECT_THROW(storage->submit_session_turn(
+                       session_id, "turn-0",
+                       Json{{"idempotency_key", "request-0"}, {"input", {{"n", 99}}}},
+                       Json::object()),
+                   Error);
+      const auto all = storage->session_events(session_id, 0, 100);
+      ASSERT_EQ(all.size(), 12U);
+      for (std::size_t i = 0; i < all.size(); ++i)
+        EXPECT_EQ(all[i].at("sequence").template get<std::uint64_t>(), i + 1);
+      EXPECT_EQ(storage->session_events(session_id, 7, 100).size(), 5U);
+      EXPECT_TRUE(storage->session_events(session_id, 12, 100).empty());
+      EXPECT_TRUE(storage->close_agent_session(session_id, Json{{"type", "ignored"}}));
+      EXPECT_FALSE(storage->close_agent_session(session_id, Json::object()));
+      EXPECT_EQ(storage->session_events(session_id, 12, 100).back().at("sequence"), 13U);
+    }
+    auto reopened = backend.open(path);
+    EXPECT_EQ(reopened->session_events(session_id, 0, 100).size(), 13U);
+  });
+}
+TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto storage = backend.open(dir.path / "session-close-race.db");
+    AgentSession session;
+    storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+
+    std::barrier start(3);
+    std::atomic<unsigned> accepted{0};
+    std::atomic<unsigned> conflicts{0};
+    std::atomic<unsigned> closed{0};
+    std::atomic<bool> unexpected_error{false};
+    std::jthread submitter([&] {
+      start.arrive_and_wait();
+      try {
+        accepted = storage->submit_session_turn(session.id, "close-race-request",
+                                                Json{{"idempotency_key", "close-race-request"},
+                                                     {"input", {{"value", 1}}},
+                                                     {"state", "queued"}},
+                                                Json::object());
+      } catch (const Error &error) {
+        if (error.code == ErrorCode::Conflict)
+          conflicts = 1;
+        else
+          unexpected_error = true;
+      } catch (...) {
+        unexpected_error = true;
+      }
+    });
+    std::jthread closer([&] {
+      start.arrive_and_wait();
+      try {
+        closed = storage->close_agent_session(session.id, Json::object());
+      } catch (...) {
+        unexpected_error = true;
+      }
+    });
+    start.arrive_and_wait();
+    submitter.join();
+    closer.join();
+
+    EXPECT_FALSE(unexpected_error);
+    EXPECT_EQ(accepted + conflicts, 1U);
+    EXPECT_EQ(closed, 1U);
+    const auto events = storage->session_events(session.id, 0, 10);
+    ASSERT_EQ(events.size(), accepted ? 2U : 1U);
+    if (accepted) {
+      EXPECT_EQ(events[0].at("type"), "input.accepted");
+      EXPECT_EQ(events[0].at("sequence"), 1U);
+      EXPECT_EQ(events[1].at("type"), "session.closed");
+      EXPECT_EQ(events[1].at("sequence"), 2U);
+      EXPECT_EQ(storage->list(RecordKind::SessionTurn, session.id).size(), 1U);
+    } else {
+      EXPECT_EQ(events[0].at("type"), "session.closed");
+      EXPECT_EQ(events[0].at("sequence"), 1U);
+      EXPECT_TRUE(storage->list(RecordKind::SessionTurn, session.id).empty());
+    }
+  });
+}
+TEST(Storage, IndependentSessionReadersSeeTheSameCommittedJournal) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "shared-session.db";
+  SQLiteStorage writer(path);
+  SQLiteStorage first_reader(path);
+  SQLiteStorage second_reader(path);
+  AgentSession session;
+  writer.commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+  const Json turn{{"idempotency_key", "input-1"}, {"input", {{"value", 1}}}};
+  Event event;
+  ASSERT_TRUE(writer.submit_session_turn(session.id, "turn-1", turn, Json(event)));
+  const auto first = first_reader.session_events(session.id, 0, 10);
+  const auto second = second_reader.session_events(session.id, 0, 10);
+  ASSERT_EQ(first.size(), 1U);
+  EXPECT_EQ(first, second);
+  EXPECT_EQ(second.front().at("sequence"), 1U);
 }
 TEST(Storage, ConformanceClaimsDurableOccurrenceOnce) {
   for_each_storage_backend([](const auto &backend) {
@@ -489,8 +618,9 @@ TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
     pqxx::connection verify_connection(dsn);
     pqxx::read_transaction verify(verify_connection);
     verify.exec("SET search_path TO \"" + schema + "\", public");
-    EXPECT_EQ(verify.exec1("SELECT MAX(version) FROM laso_schema_migrations")[0].as<int>(), 8);
+    EXPECT_EQ(verify.exec1("SELECT MAX(version) FROM laso_schema_migrations")[0].as<int>(), 9);
     EXPECT_STREQ(verify.exec1("SELECT to_regclass('node_work')")[0].c_str(), "node_work");
+    EXPECT_STREQ(verify.exec1("SELECT to_regclass('agent_sessions')")[0].c_str(), "agent_sessions");
   } catch (...) {
     pqxx::connection cleanup_connection(dsn);
     pqxx::work cleanup(cleanup_connection);
@@ -813,6 +943,341 @@ TEST(Api, RegistersAndCreatesRun) {
   io.run();
   auto id = response.body.at("id").get<std::string>();
   EXPECT_EQ(api.handle("GET", "/api/v1/runs/" + id, "").body.at("state"), "Completed");
+}
+TEST(Api, PersistentSessionTurnsCanBeRetriedAndReplayed) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  ASSERT_EQ(api.handle("POST", "/api/v1/pipelines", Json{{"yaml", single()}}.dump()).status, 201U);
+  auto created = api.handle("POST", "/api/v1/sessions", R"({"pipeline_id":"test@1"})");
+  ASSERT_EQ(created.status, 201U);
+  const auto id = created.body.at("id").get<std::string>();
+  const auto inspected = api.handle("GET", "/api/v1/sessions/" + id, "").body;
+  EXPECT_EQ(inspected.at("state"), "open");
+  EXPECT_FALSE(inspected.contains("backend_state"));
+  const auto first = Json{{"idempotency_key", "request-a"}, {"input", {{"text", "first"}}}};
+  const auto first_response = api.handle("POST", "/api/v1/sessions/" + id + "/turns", first.dump());
+  ASSERT_EQ(first_response.status, 202U);
+  const auto retry_response = api.handle("POST", "/api/v1/sessions/" + id + "/turns", first.dump());
+  ASSERT_EQ(retry_response.status, 202U);
+  EXPECT_EQ(retry_response.body, first_response.body);
+  auto conflicting = first;
+  conflicting["input"]["text"] = "different input";
+  EXPECT_EQ(api.handle("POST", "/api/v1/sessions/" + id + "/turns", conflicting.dump()).status,
+            409U);
+  const auto second = Json{{"idempotency_key", "request-b"}, {"input", {{"text", "second"}}}};
+  const auto second_response =
+      api.handle("POST", "/api/v1/sessions/" + id + "/turns", second.dump());
+  ASSERT_EQ(second_response.status, 202U);
+  const auto turns = api.handle("GET", "/api/v1/sessions/" + id + "/turns", "").body;
+  ASSERT_EQ(turns.size(), 2U);
+  EXPECT_EQ(turns[0], first_response.body);
+  EXPECT_EQ(turns[1], second_response.body);
+  const auto journal = api.handle("GET", "/api/v1/sessions/" + id + "/events?after=0", "").body;
+  ASSERT_EQ(journal.size(), 2U);
+  EXPECT_EQ(journal[0].at("sequence"), 1U);
+  EXPECT_EQ(journal[0].at("type"), "input.accepted");
+  EXPECT_EQ(journal[0].at("turn_id"), first_response.body.at("id"));
+  EXPECT_EQ(journal[1].at("sequence"), 2U);
+  EXPECT_EQ(journal[1].at("turn_id"), second_response.body.at("id"));
+  const auto events = api.handle("GET", "/api/v1/sessions/" + id + "/events?after=1", "");
+  ASSERT_EQ(events.status, 200U);
+  ASSERT_EQ(events.body.size(), 1U);
+  EXPECT_EQ(events.body[0].at("sequence"), 2U);
+  EXPECT_EQ(events.body[0].at("type"), "input.accepted");
+  EXPECT_EQ(events.body[0].at("payload").at("input").at("text"), "second");
+  EXPECT_TRUE(api.handle("GET", "/api/v1/sessions/" + id + "/events?after=2", "").body.empty());
+  EXPECT_EQ(
+      api.handle("GET", "/api/v1/sessions/" + id + "/events?after=18446744073709551615", "").status,
+      400U);
+  ASSERT_EQ(api.handle("POST", "/api/v1/sessions/" + id + "/close", "{}").status, 202U);
+  const auto closed = api.handle("GET", "/api/v1/sessions/" + id + "/events?after=2", "");
+  ASSERT_EQ(closed.body.size(), 1U);
+  EXPECT_EQ(closed.body[0].at("type"), "session.closed");
+  EXPECT_EQ(api.handle("POST", "/api/v1/sessions/" + id + "/turns", first.dump()).status, 202U);
+  const auto third = Json{{"idempotency_key", "request-c"}, {"input", {{"text", "third"}}}};
+  EXPECT_EQ(api.handle("POST", "/api/v1/sessions/" + id + "/turns", third.dump()).status, 409U);
+}
+TEST(Api, PersistentSessionsSurviveServiceRestart) {
+  TemporaryDirectory dir;
+  std::string open_session_id;
+  std::string closed_session_id;
+  {
+    asio::io_context io;
+    Service service(io, config(dir.path));
+    LocalDevelopmentIdentity identity;
+    Api api(service, identity);
+    ASSERT_EQ(api.handle("POST", "/api/v1/pipelines", Json{{"yaml", single()}}.dump()).status,
+              201U);
+    const auto open_session = api.handle("POST", "/api/v1/sessions", R"({"pipeline_id":"test@1"})");
+    ASSERT_EQ(open_session.status, 201U);
+    open_session_id = open_session.body.at("id").get<std::string>();
+    const auto closed_session =
+        api.handle("POST", "/api/v1/sessions", R"({"pipeline_id":"test@1"})");
+    ASSERT_EQ(closed_session.status, 201U);
+    closed_session_id = closed_session.body.at("id").get<std::string>();
+    ASSERT_EQ(api.handle("POST", "/api/v1/sessions/" + open_session_id + "/turns",
+                         R"({"idempotency_key":"open-1","input":{"text":"one"}})")
+                  .status,
+              202U);
+    ASSERT_EQ(api.handle("POST", "/api/v1/sessions/" + closed_session_id + "/turns",
+                         R"({"idempotency_key":"closed-1","input":{"text":"one"}})")
+                  .status,
+              202U);
+    ASSERT_EQ(api.handle("POST", "/api/v1/sessions/" + closed_session_id + "/close", "{}").status,
+              202U);
+  }
+  {
+    asio::io_context io;
+    Service restarted(io, config(dir.path));
+    LocalDevelopmentIdentity identity;
+    Api api(restarted, identity);
+    const auto open = api.handle("GET", "/api/v1/sessions/" + open_session_id, "");
+    ASSERT_EQ(open.status, 200U);
+    EXPECT_EQ(open.body.at("state"), "open");
+    const auto open_events =
+        api.handle("GET", "/api/v1/sessions/" + open_session_id + "/events?after=0", "");
+    ASSERT_EQ(open_events.body.size(), 1U);
+    EXPECT_EQ(open_events.body[0].at("sequence"), 1U);
+    const auto next = api.handle("POST", "/api/v1/sessions/" + open_session_id + "/turns",
+                                 R"({"idempotency_key":"open-2","input":{"text":"two"}})");
+    ASSERT_EQ(next.status, 202U);
+    EXPECT_EQ(next.body.at("sequence"), 2U);
+
+    const auto closed = api.handle("GET", "/api/v1/sessions/" + closed_session_id, "");
+    ASSERT_EQ(closed.status, 200U);
+    EXPECT_EQ(closed.body.at("state"), "closed");
+    const auto closed_events =
+        api.handle("GET", "/api/v1/sessions/" + closed_session_id + "/events?after=0", "");
+    ASSERT_EQ(closed_events.body.size(), 2U);
+    EXPECT_EQ(closed_events.body[0].at("sequence"), 1U);
+    EXPECT_EQ(closed_events.body[1].at("sequence"), 2U);
+    EXPECT_EQ(closed_events.body[1].at("type"), "session.closed");
+    EXPECT_EQ(api.handle("POST", "/api/v1/sessions/" + closed_session_id + "/turns",
+                         R"({"idempotency_key":"closed-2","input":{"text":"two"}})")
+                  .status,
+              409U);
+  }
+}
+TEST(Api, SessionSseDeliversCommittedJournalEvents) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  service.register_pipeline(fixture("hello-pipeline"));
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto session = service.create_session("hello@1");
+  HttpServer server(io, api, "127.0.0.1", 0);
+  server.start();
+  std::jthread server_thread([&] { io.run(); });
+  asio::io_context peer_io;
+  boost::beast::tcp_stream client(peer_io);
+  client.expires_after(std::chrono::seconds(5));
+  client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+  const auto request =
+      "GET /api/v1/sessions/" + session.id +
+      "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n";
+  asio::write(client, asio::buffer(request));
+  asio::streambuf response_buffer;
+  const auto header_bytes = asio::read_until(client, response_buffer, "\r\n\r\n");
+  std::istream headers(&response_buffer);
+  std::string status_line;
+  std::getline(headers, status_line);
+  EXPECT_NE(status_line.find("200 OK"), std::string::npos);
+  bool event_content_type = false;
+  for (std::string line; std::getline(headers, line) && line != "\r";)
+    event_content_type =
+        event_content_type || line.find("Content-Type: text/event-stream") != std::string::npos;
+  EXPECT_TRUE(event_content_type);
+  (void)header_bytes;
+  const auto posted = api.handle("POST", "/api/v1/sessions/" + session.id + "/turns",
+                                 R"({"idempotency_key":"sse-input","input":{"text":"hello"}})");
+  EXPECT_EQ(posted.status, 202U);
+  client.expires_after(std::chrono::seconds(5));
+  asio::read_until(client, response_buffer, "\n\n");
+  std::istream frame_stream(&response_buffer);
+  std::string frame((std::istreambuf_iterator<char>(frame_stream)), {});
+  EXPECT_NE(frame.find("id: 1\ndata: "), std::string::npos);
+  boost::system::error_code ec;
+  client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+  client.socket().close(ec);
+  server.stop();
+  server_thread.join();
+}
+TEST(Api, SessionSseResumesAfterCursorAndEndsAfterClose) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  service.register_pipeline(fixture("hello-pipeline"));
+  const auto session = service.create_session("hello@1");
+  ASSERT_EQ(
+      service.submit_session_turn(session.id, "sse-one", Json{{"text", "one"}}).at("sequence"), 1U);
+  ASSERT_EQ(
+      service.submit_session_turn(session.id, "sse-two", Json{{"text", "two"}}).at("sequence"), 2U);
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  HttpServer server(io, api, "127.0.0.1", 0);
+  server.start();
+  std::jthread server_thread([&] { io.run(); });
+
+  auto read_frame = [&](std::uint64_t cursor, auto before_frame, bool expect_stream_end) {
+    asio::io_context peer_io;
+    boost::beast::tcp_stream client(peer_io);
+    client.expires_after(std::chrono::seconds(5));
+    client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+    const auto request = "GET /api/v1/sessions/" + session.id +
+                         "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                         "text/event-stream\r\nLast-Event-ID: " +
+                         std::to_string(cursor) + "\r\n\r\n";
+    asio::write(client, asio::buffer(request));
+    asio::streambuf response_buffer;
+    asio::read_until(client, response_buffer, "\r\n\r\n");
+    before_frame();
+    client.expires_after(std::chrono::seconds(5));
+    asio::read_until(client, response_buffer, "\n\n");
+    std::istream frame_stream(&response_buffer);
+    const std::string frame((std::istreambuf_iterator<char>(frame_stream)), {});
+    if (expect_stream_end) {
+      client.expires_after(std::chrono::seconds(2));
+      char byte{};
+      boost::system::error_code ec;
+      (void)client.read_some(asio::buffer(&byte, 1), ec);
+      EXPECT_TRUE(ec == asio::error::eof || ec == asio::error::connection_reset);
+    }
+    boost::system::error_code ec;
+    client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+    client.socket().close(ec);
+    return frame;
+  };
+
+  const auto resumed = read_frame(1, [] {}, false);
+  EXPECT_NE(resumed.find("id: 2\ndata: "), std::string::npos);
+  EXPECT_NE(resumed.find("\"text\":\"two\""), std::string::npos);
+  EXPECT_EQ(resumed.find("\"text\":\"one\""), std::string::npos);
+  ASSERT_EQ(
+      service.submit_session_turn(session.id, "sse-three", Json{{"text", "three"}}).at("sequence"),
+      3U);
+  const auto reconnected = read_frame(2, [] {}, false);
+  EXPECT_NE(reconnected.find("id: 3\ndata: "), std::string::npos);
+  EXPECT_NE(reconnected.find("\"text\":\"three\""), std::string::npos);
+  EXPECT_EQ(reconnected.find("\"text\":\"two\""), std::string::npos);
+  const auto closed = read_frame(3, [&] { service.close_session(session.id); }, true);
+  EXPECT_NE(closed.find("id: 4\ndata: "), std::string::npos);
+  EXPECT_NE(closed.find("session.closed"), std::string::npos);
+
+  asio::io_context peer_io;
+  boost::beast::tcp_stream closed_client(peer_io);
+  closed_client.expires_after(std::chrono::seconds(5));
+  closed_client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+  const auto closed_request = "GET /api/v1/sessions/" + session.id +
+                              "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                              "text/event-stream\r\nLast-Event-ID: 4\r\n\r\n";
+  asio::write(closed_client, asio::buffer(closed_request));
+  asio::streambuf closed_buffer;
+  asio::read_until(closed_client, closed_buffer, "\r\n\r\n");
+  closed_client.expires_after(std::chrono::seconds(2));
+  char byte{};
+  boost::system::error_code closed_error;
+  (void)closed_client.read_some(asio::buffer(&byte, 1), closed_error);
+  EXPECT_TRUE(closed_error == asio::error::eof || closed_error == asio::error::connection_reset);
+  closed_client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, closed_error);
+  closed_client.socket().close(closed_error);
+
+  server.stop();
+  server_thread.join();
+}
+TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto schema = "laso_session_sse_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  struct SchemaCleanup {
+    std::string dsn;
+    std::string schema;
+    ~SchemaCleanup() {
+      try {
+        pqxx::connection connection(dsn);
+        pqxx::work transaction(connection);
+        transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+        transaction.commit();
+      } catch (...) {
+      }
+    }
+  } cleanup{dsn, schema};
+  TemporaryDirectory dir;
+  Config c = config(dir.path);
+  c.storage_backend = "postgres";
+  c.postgres_dsn = dsn;
+  c.postgres_schema = schema;
+  c.execution_mode = "multi_instance";
+  c.validate();
+  asio::io_context writer_io;
+  asio::io_context observer_io;
+  {
+    Service writer(writer_io, c);
+    writer.register_pipeline(fixture("hello-pipeline"));
+    Service observer(observer_io, c);
+    LocalDevelopmentIdentity identity;
+    Api api(observer, identity);
+    const auto session = writer.create_session("hello@1");
+    const auto first = writer.submit_session_turn(session.id, "replayed-before-connect-one",
+                                                  Json{{"text", "replay-one"}});
+    const auto replayed = writer.submit_session_turn(session.id, "replayed-before-connect-two",
+                                                     Json{{"text", "replay-two"}});
+    EXPECT_EQ(first.at("sequence"), 1U);
+    EXPECT_EQ(replayed.at("sequence"), 2U);
+    HttpServer server(observer_io, api, "127.0.0.1", 0);
+    server.start();
+    std::jthread server_thread([&] { observer_io.run(); });
+    struct ServerCleanup {
+      HttpServer &server;
+      asio::io_context &io;
+      std::jthread &thread;
+      ~ServerCleanup() {
+        server.stop();
+        io.stop();
+        if (thread.joinable())
+          thread.join();
+      }
+    } server_cleanup{server, observer_io, server_thread};
+    asio::io_context peer_io;
+    boost::beast::tcp_stream client(peer_io);
+    client.expires_after(std::chrono::seconds(5));
+    client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+    const auto request = "GET /api/v1/sessions/" + session.id +
+                         "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                         "text/event-stream\r\nLast-Event-ID: 1\r\n\r\n";
+    asio::write(client, asio::buffer(request));
+    asio::streambuf response_buffer;
+    (void)asio::read_until(client, response_buffer, "\r\n\r\n");
+    client.expires_after(std::chrono::seconds(5));
+    asio::read_until(client, response_buffer, "\n\n");
+    std::istream replay_frame_stream(&response_buffer);
+    const std::string replay_frame((std::istreambuf_iterator<char>(replay_frame_stream)), {});
+    EXPECT_NE(replay_frame.find("id: 2\ndata: "), std::string::npos);
+    EXPECT_NE(replay_frame.find("input.accepted"), std::string::npos);
+    EXPECT_NE(replay_frame.find("replay-two"), std::string::npos);
+    EXPECT_EQ(replay_frame.find("replay-one"), std::string::npos);
+    const auto posted = writer.submit_session_turn(session.id, "writer-instance-input",
+                                                   Json{{"text", "from writer"}});
+    EXPECT_EQ(posted.at("sequence"), 3U);
+    client.expires_after(std::chrono::seconds(5));
+    asio::read_until(client, response_buffer, "\n\n");
+    std::istream live_frame_stream(&response_buffer);
+    const std::string live_frame((std::istreambuf_iterator<char>(live_frame_stream)), {});
+    EXPECT_NE(live_frame.find("id: 3\ndata: "), std::string::npos);
+    EXPECT_NE(live_frame.find("input.accepted"), std::string::npos);
+    boost::system::error_code ec;
+    client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+    client.socket().close(ec);
+  }
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
 }
 TEST(Api, RunMetadataIsPreservedForWorkerContext) {
   TemporaryDirectory dir;

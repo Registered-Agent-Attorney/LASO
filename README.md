@@ -226,6 +226,7 @@ not download or launch models.
 ## Development and deployment
 
 See [architecture](docs/architecture.md), [runtime semantics](docs/runtime.md),
+[persistent session primitives](docs/sessions.md),
 [pipeline composition](docs/pipelines.md),
 [storage backends](docs/storage.md),
 [scheduling and event triggers](docs/scheduling.md),

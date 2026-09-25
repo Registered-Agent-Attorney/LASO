@@ -356,6 +356,51 @@ std::string Service::start(const std::string &name_or_path, const Json &input,
                       std::move(message_metadata));
 }
 
+AgentSession Service::create_session(const std::string &pipeline_id) {
+  (void)pipeline_record(pipeline_id);
+  AgentSession session;
+  session.pipeline_id = pipeline_id;
+  storage_->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+  return session;
+}
+AgentSession Service::agent_session(const std::string &id) const {
+  return storage_->get(RecordKind::AgentSession, id).get<AgentSession>();
+}
+void Service::close_session(const std::string &id) {
+  Event event;
+  event.run_id = id;
+  event.type = "session.closed";
+  storage_->close_agent_session(id, Json(event));
+}
+Json Service::submit_session_turn(const std::string &id, const std::string &idempotency_key,
+                                  const Json &input) {
+  if (idempotency_key.empty() || idempotency_key.size() > 512 || input.dump().size() > 1024 * 1024)
+    throw Error(ErrorCode::Validation, "Invalid session input");
+  const auto session = agent_session(id);
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (const auto byte : idempotency_key) {
+    hash ^= static_cast<unsigned char>(byte);
+    hash *= 1099511628211ULL;
+  }
+  std::ostringstream turn_id;
+  turn_id << id << "-turn-" << std::hex << hash;
+  Json turn{{"idempotency_key", idempotency_key},
+            {"input", input},
+            {"state", "queued"},
+            {"accepted_at", timestamp()},
+            {"pipeline_id", session.pipeline_id}};
+  Event event;
+  event.run_id = id;
+  event.type = "input.accepted";
+  storage_->submit_session_turn(id, turn_id.str(), turn, Json(event));
+  return storage_->get(RecordKind::SessionTurn, turn_id.str());
+}
+std::vector<Json> Service::session_events(const std::string &id, std::uint64_t after,
+                                          std::size_t limit) const {
+  (void)agent_session(id);
+  return storage_->session_events(id, after, limit);
+}
+
 Json Service::create_schedule(const Json &spec) {
   auto schedule = parse_schedule_spec(spec);
   const auto raw_pipeline = schedule.pipeline_id;
