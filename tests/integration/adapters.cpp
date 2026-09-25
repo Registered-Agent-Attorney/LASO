@@ -451,6 +451,67 @@ TEST(Sessions, AcceptedTurnsExecuteDurablyInAcceptanceOrder) {
   EXPECT_EQ(replayed_completions, accepted_ids);
 }
 
+TEST(Sessions, QueuedRunRecoversAfterServiceRestartWithoutDuplicateRun) {
+  TemporaryDirectory dir;
+  std::atomic<unsigned> executions{0};
+  std::string session_id;
+  std::string turn_id;
+  std::string run_id;
+  {
+    asio::io_context io;
+    Service service(io, config(dir.path));
+    service.functions().add(
+        "session_restart",
+        std::make_shared<Function>([&](ExecutionContext &, const Json &input) -> Task<Json> {
+          executions.fetch_add(1);
+          co_return input;
+        }));
+    const auto pipeline =
+        service.register_pipeline(single("type: function\n    function: session_restart"))
+            .at("id")
+            .get<std::string>();
+    const auto session = service.create_session(pipeline);
+    session_id = session.id;
+    const auto accepted =
+        service.submit_session_turn(session.id, "restart-recovery", Json{{"value", "durable"}});
+    turn_id = accepted.at("id").get<std::string>();
+    const auto stored = service.get(RecordKind::SessionTurn, turn_id);
+    run_id = stored.at("run_id").get<std::string>();
+    EXPECT_EQ(stored.at("state"), "running");
+    EXPECT_EQ(service.get(RecordKind::Run, run_id).at("state"), "Queued");
+    EXPECT_EQ(executions.load(), 0U);
+  }
+
+  asio::io_context restarted_io;
+  Service restarted(restarted_io, config(dir.path));
+  restarted.functions().add(
+      "session_restart",
+      std::make_shared<Function>([&](ExecutionContext &, const Json &input) -> Task<Json> {
+        executions.fetch_add(1);
+        co_return input;
+      }));
+  restarted_io.run();
+
+  const auto recovered = restarted.get(RecordKind::SessionTurn, turn_id);
+  EXPECT_EQ(recovered.at("state"), "succeeded");
+  EXPECT_EQ(recovered.at("run_id"), run_id);
+  EXPECT_EQ(recovered.at("result").at("value"), "durable");
+  EXPECT_EQ(executions.load(), 1U);
+  const auto recovered_run = restarted.get(RecordKind::Run, run_id).get<laso::Run>();
+  EXPECT_EQ(recovered_run.state, RunState::Completed);
+  EXPECT_EQ(recovered_run.session_id, session_id);
+  EXPECT_EQ(recovered_run.session_turn_id, turn_id);
+  const auto events = restarted.session_events(session_id, 0, 100);
+  std::size_t started = 0;
+  std::size_t completed = 0;
+  for (const auto &event : events) {
+    started += event.at("type") == "turn.execution.started";
+    completed += event.at("type") == "turn.execution.completed";
+  }
+  EXPECT_EQ(started, 1U);
+  EXPECT_EQ(completed, 1U);
+}
+
 TEST(Sessions, DifferentSessionsExecuteConcurrently) {
   TemporaryDirectory dir;
   asio::io_context io;
