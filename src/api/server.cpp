@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <boost/beast.hpp>
 #include <charconv>
@@ -5,6 +7,7 @@
 #include <laso/api/api.hpp>
 #include <limits>
 #include <set>
+#include <stdexcept>
 
 namespace laso {
 namespace beast = boost::beast;
@@ -17,11 +20,20 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
   Tcp::acceptor acceptor;
   Api &api;
   std::set<std::shared_ptr<beast::tcp_stream>> sessions;
-  std::size_t event_streams = 0;
+  HttpServerOptions stream_options;
+  std::atomic_size_t active_event_streams{0};
+  std::atomic_uint64_t accepted_event_streams{0};
+  std::atomic_uint64_t rejected_event_streams{0};
+  std::atomic_uint64_t closed_event_streams{0};
   bool stopping = false;
-  Impl(asio::io_context &io, Api &api_ref, const std::string &host, unsigned short port)
+  Impl(asio::io_context &io, Api &api_ref, const std::string &host, unsigned short port,
+       HttpServerOptions options)
       : api_strand(asio::make_strand(api_pool)), strand(asio::make_strand(io)), acceptor(strand),
-        api(api_ref) {
+        api(api_ref), stream_options(options) {
+    if (stream_options.max_session_streams == 0 || stream_options.max_session_streams > 128 ||
+        stream_options.heartbeat_interval <= std::chrono::seconds::zero() ||
+        stream_options.max_session_stream_lifetime <= std::chrono::seconds::zero())
+      throw std::invalid_argument("Invalid session SSE limits");
     Tcp::endpoint endpoint(asio::ip::make_address(host), port);
     acceptor.open(endpoint.protocol());
     acceptor.set_option(Tcp::acceptor::reuse_address(true));
@@ -78,31 +90,63 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
             throw std::runtime_error("invalid SSE cursor");
           }
         }
-        if (event_streams >= 32) {
+        if (active_event_streams.load(std::memory_order_relaxed) >=
+            stream_options.max_session_streams) {
+          rejected_event_streams.fetch_add(1, std::memory_order_relaxed);
           http::response<http::string_body> full{http::status::too_many_requests, 11};
           full.set(http::field::content_type, "application/json");
+          full.set(http::field::cache_control, "no-store");
+          full.set(http::field::retry_after, "1");
           full.keep_alive(false);
           full.body() = R"({"error":"Session stream capacity is exhausted"})";
           full.prepare_payload();
           co_await http::async_write(*stream, full, asio::use_awaitable);
           throw std::runtime_error("SSE capacity reached");
         }
-        ++event_streams;
+        active_event_streams.fetch_add(1, std::memory_order_relaxed);
+        accepted_event_streams.fetch_add(1, std::memory_order_relaxed);
         struct StreamCountGuard {
-          std::size_t &count;
+          std::atomic_size_t &active;
+          std::atomic_uint64_t &closed;
           ~StreamCountGuard() {
-            --count;
+            active.fetch_sub(1, std::memory_order_relaxed);
+            closed.fetch_add(1, std::memory_order_relaxed);
           }
-        } stream_count_guard{event_streams};
+        } stream_count_guard{active_event_streams, closed_event_streams};
         stream->expires_never();
         const std::string headers =
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
             "Connection: close\r\nX-Accel-Buffering: no\r\n\r\n";
         co_await asio::async_write(stream->socket(), asio::buffer(headers), asio::use_awaitable);
-        asio::steady_timer poll(stream->get_executor());
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(30);
+        auto poll = std::make_shared<asio::steady_timer>(stream->get_executor());
+        auto peer_disconnected = std::make_shared<std::atomic_bool>(false);
+        asio::co_spawn(
+            stream->get_executor(),
+            [stream, poll, peer_disconnected]() -> Task<void> {
+              auto &socket = stream->socket();
+              while (true) {
+                boost::system::error_code wait_error;
+                co_await socket.async_wait(Tcp::socket::wait_read,
+                                           asio::redirect_error(asio::use_awaitable, wait_error));
+                if (wait_error)
+                  co_return;
+                std::array<char, 1> probe{};
+                boost::system::error_code read_error;
+                (void)socket.receive(asio::buffer(probe), Tcp::socket::message_peek, read_error);
+                if (read_error == asio::error::would_block || read_error == asio::error::try_again)
+                  continue;
+                peer_disconnected->store(true, std::memory_order_relaxed);
+                boost::system::error_code ignored;
+                poll->cancel(ignored);
+                co_return;
+              }
+            },
+            asio::detached);
+        const auto deadline =
+            std::chrono::steady_clock::now() + stream_options.max_session_stream_lifetime;
         auto last_keepalive = std::chrono::steady_clock::now();
-        while (std::chrono::steady_clock::now() < deadline) {
+        while (std::chrono::steady_clock::now() < deadline &&
+               !peer_disconnected->load(std::memory_order_relaxed)) {
           const auto poll_target = base + "?after=" + std::to_string(cursor) + "&limit=1";
           auto page = co_await asio::co_spawn(
               api_strand,
@@ -154,14 +198,14 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
             }
           }
           const auto now = std::chrono::steady_clock::now();
-          if (!sent && now - last_keepalive >= std::chrono::seconds(15)) {
+          if (!sent && now - last_keepalive >= stream_options.heartbeat_interval) {
             const std::string heartbeat = ": keepalive\n\n";
             co_await asio::async_write(stream->socket(), asio::buffer(heartbeat),
                                        asio::use_awaitable);
             last_keepalive = now;
           }
-          poll.expires_after(sent ? std::chrono::milliseconds(0) : std::chrono::milliseconds(250));
-          co_await poll.async_wait(asio::use_awaitable);
+          poll->expires_after(sent ? std::chrono::milliseconds(0) : std::chrono::milliseconds(250));
+          co_await poll->async_wait(asio::use_awaitable);
         }
         throw std::runtime_error("SSE stream ended");
       }
@@ -209,8 +253,9 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
     }
   }
 };
-HttpServer::HttpServer(asio::io_context &io, Api &api, const std::string &host, unsigned short port)
-    : impl_(std::make_shared<Impl>(io, api, host, port)) {}
+HttpServer::HttpServer(asio::io_context &io, Api &api, const std::string &host, unsigned short port,
+                       HttpServerOptions options)
+    : impl_(std::make_shared<Impl>(io, api, host, port, options)) {}
 HttpServer::~HttpServer() = default;
 void HttpServer::start() {
   auto self = impl_;
@@ -239,5 +284,12 @@ void HttpServer::stop() {
 }
 unsigned short HttpServer::port() const {
   return impl_->acceptor.local_endpoint().port();
+}
+HttpServerMetrics HttpServer::metrics() const {
+  return {impl_->active_event_streams.load(std::memory_order_relaxed),
+          impl_->accepted_event_streams.load(std::memory_order_relaxed),
+          impl_->rejected_event_streams.load(std::memory_order_relaxed),
+          impl_->closed_event_streams.load(std::memory_order_relaxed),
+          impl_->stream_options.max_session_streams};
 }
 } // namespace laso

@@ -104,7 +104,8 @@ void Config::validate() {
       max_artifact_temp_bytes > (std::uint64_t{8} << 40) || artifact_cleanup_grace_seconds == 0 ||
       artifact_cleanup_grace_seconds > 30 * 86400)
     throw Error(ErrorCode::Configuration, "Invalid artifact storage limit");
-  if (api_port == 0 || api_port > 65535 || artifact_service_port > 65535 || workers == 0 ||
+  if (api_port == 0 || api_port > 65535 || artifact_service_port > 65535 ||
+      max_session_sse_streams == 0 || max_session_sse_streams > 128 || workers == 0 ||
       workers > 64 || max_runs == 0 || max_runs > 1024 || max_nodes == 0 || max_nodes > 4096 ||
       max_nodes_per_run == 0 || max_nodes_per_run > max_nodes || max_models == 0 ||
       max_models > 1024 || max_tools == 0 || max_tools > 1024 || max_subpipeline_depth == 0 ||
@@ -550,6 +551,8 @@ Config load_config(const std::filesystem::path &supplied,
       c.api_host = v;
     else if (k == "api_port")
       c.api_port = integer(v);
+    else if (k == "max_session_sse_streams")
+      c.max_session_sse_streams = integer(v);
     else if (k == "log_level")
       c.log_level = v;
     else if (k == "local_openai_endpoint")
