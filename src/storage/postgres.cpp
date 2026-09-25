@@ -540,7 +540,7 @@ std::optional<Json> PostgresStorage::claim_next_session_turn(const std::string &
     } else {
       const auto queued =
           tx.exec_params("SELECT body FROM session_turns WHERE run_id=$1 "
-                         "AND body->>'state'='queued' ORDER BY sequence LIMIT 1 FOR UPDATE",
+                         "AND body::jsonb->>'state'='queued' ORDER BY sequence LIMIT 1 FOR UPDATE",
                          session_id);
       if (!queued.empty()) {
         turn = parse_body(queued.front());
@@ -882,7 +882,7 @@ bool PostgresStorage::close_agent_session(const std::string &session_id, Json ev
       }
 
       const auto queued = tx.exec_params(
-          "SELECT id,body FROM session_turns WHERE run_id=$1 ORDER BY sequence FOR UPDATE",
+          "SELECT body FROM session_turns WHERE run_id=$1 ORDER BY sequence FOR UPDATE",
           session_id);
       for (const auto &row : queued) {
         auto turn = parse_body(row);

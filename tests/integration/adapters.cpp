@@ -425,7 +425,7 @@ TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
     Event session_event;
 
     EXPECT_THROW(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
-                                                "instance-a", fence + 1, Json(session_event)),
+                                                "instance-b", 0, Json(session_event)),
                  Error);
     EXPECT_THROW(storage->get(RecordKind::Run, run.id), Error);
 
@@ -438,12 +438,12 @@ TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
     EXPECT_GT(recovered_fence, fence);
     const auto binding_fence = backend.name == "postgres" ? 0 : recovered_fence;
     EXPECT_THROW(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
-                                                "instance-a", fence, Json::object()),
+                                                "instance-a", 0, Json::object()),
                  Error);
     EXPECT_TRUE(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
                                                "instance-b", binding_fence, Json(session_event)));
     EXPECT_FALSE(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
-                                                "instance-a", fence, Json::object()));
+                                                "instance-a", 0, Json::object()));
 
     const auto stored_turn = storage->get(RecordKind::SessionTurn, first_id);
     EXPECT_EQ(stored_turn.at("state"), "running");
@@ -1330,7 +1330,7 @@ TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
   if (!dsn || !*dsn)
     GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
-  auto schema = "laso_session_stale_completion_" + uuid();
+  auto schema = "laso_stale_completion_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
     std::string dsn;
@@ -2548,29 +2548,64 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
     boost::beast::tcp_stream client(peer_io);
     client.expires_after(std::chrono::seconds(5));
     client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+    const auto existing_events = writer.session_events(session.id, 0, 100);
+    const auto first_accept = std::find_if(existing_events.begin(), existing_events.end(),
+                                           [&](const Json &event) {
+                                             return event.value("type", std::string{}) ==
+                                                        "input.accepted" &&
+                                                    event.value("turn_id", std::string{}) ==
+                                                        first.at("id").get<std::string>();
+                                           });
+    ASSERT_NE(first_accept, existing_events.end());
+    auto cursor = first_accept->at("sequence").get<std::uint64_t>();
     const auto request = "GET /api/v1/sessions/" + session.id +
                          "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
-                         "text/event-stream\r\nLast-Event-ID: 1\r\n\r\n";
+                         "text/event-stream\r\nLast-Event-ID: " + std::to_string(cursor) +
+                         "\r\n\r\n";
     asio::write(client, asio::buffer(request));
     asio::streambuf response_buffer;
     (void)asio::read_until(client, response_buffer, "\r\n\r\n");
-    client.expires_after(std::chrono::seconds(5));
-    asio::read_until(client, response_buffer, "\n\n");
-    std::istream replay_frame_stream(&response_buffer);
-    const std::string replay_frame((std::istreambuf_iterator<char>(replay_frame_stream)), {});
-    EXPECT_NE(replay_frame.find("id: 2\ndata: "), std::string::npos);
-    EXPECT_NE(replay_frame.find("input.accepted"), std::string::npos);
-    EXPECT_NE(replay_frame.find("replay-two"), std::string::npos);
-    EXPECT_EQ(replay_frame.find("replay-one"), std::string::npos);
+    const auto read_frame = [&]() {
+      client.expires_after(std::chrono::seconds(5));
+      asio::read_until(client, response_buffer, "\n\n");
+      std::istream frame_stream(&response_buffer);
+      std::uint64_t sequence = 0;
+      std::string frame;
+      for (std::string line; std::getline(frame_stream, line);) {
+        if (line.empty() || line == "\r")
+          break;
+        if (line.rfind("id: ", 0) == 0)
+          sequence = std::stoull(line.substr(4));
+        frame += line + "\n";
+      }
+      return std::pair{sequence, frame};
+    };
+    const auto is_accepted_turn = [](const std::string &frame, const std::string &turn_id) {
+      return frame.find("\"type\":\"input.accepted\"") != std::string::npos &&
+             frame.find("\"turn_id\":\"" + turn_id + "\"") != std::string::npos;
+    };
+    bool replayed_second = false;
+    for (std::size_t i = 0; i < 16 && !replayed_second; ++i) {
+      const auto [sequence, frame] = read_frame();
+      EXPECT_EQ(sequence, cursor + 1);
+      cursor = sequence;
+      EXPECT_EQ(frame.find("replay-one"), std::string::npos);
+      replayed_second = is_accepted_turn(frame, replayed.at("id").get<std::string>());
+      if (replayed_second)
+        EXPECT_NE(frame.find("replay-two"), std::string::npos);
+    }
+    EXPECT_TRUE(replayed_second);
     const auto posted = writer.submit_session_turn(session.id, "writer-instance-input",
                                                    Json{{"text", "from writer"}});
     EXPECT_EQ(posted.at("sequence"), 3U);
-    client.expires_after(std::chrono::seconds(5));
-    asio::read_until(client, response_buffer, "\n\n");
-    std::istream live_frame_stream(&response_buffer);
-    const std::string live_frame((std::istreambuf_iterator<char>(live_frame_stream)), {});
-    EXPECT_NE(live_frame.find("id: 3\ndata: "), std::string::npos);
-    EXPECT_NE(live_frame.find("input.accepted"), std::string::npos);
+    bool observed_live = false;
+    for (std::size_t i = 0; i < 16 && !observed_live; ++i) {
+      const auto [sequence, frame] = read_frame();
+      EXPECT_EQ(sequence, cursor + 1);
+      cursor = sequence;
+      observed_live = is_accepted_turn(frame, posted.at("id").get<std::string>());
+    }
+    EXPECT_TRUE(observed_live);
     boost::system::error_code ec;
     client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
     client.socket().close(ec);
