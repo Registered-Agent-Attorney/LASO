@@ -965,6 +965,92 @@ TEST(Api, SessionSseDeliversCommittedJournalEvents) {
   server.stop();
   server_thread.join();
 }
+TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto schema = "laso_session_sse_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  struct SchemaCleanup {
+    std::string dsn;
+    std::string schema;
+    ~SchemaCleanup() {
+      try {
+        pqxx::connection connection(dsn);
+        pqxx::work transaction(connection);
+        transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+        transaction.commit();
+      } catch (...) {
+      }
+    }
+  } cleanup{dsn, schema};
+  TemporaryDirectory dir;
+  Config c = config(dir.path);
+  c.storage_backend = "postgres";
+  c.postgres_dsn = dsn;
+  c.postgres_schema = schema;
+  c.execution_mode = "multi_instance";
+  c.validate();
+  asio::io_context writer_io;
+  asio::io_context observer_io;
+  {
+    Service writer(writer_io, c);
+    writer.register_pipeline(fixture("hello-pipeline"));
+    Service observer(observer_io, c);
+    LocalDevelopmentIdentity identity;
+    Api api(observer, identity);
+    const auto session = writer.create_session("hello@1");
+    const auto replayed =
+        writer.submit_session_turn(session.id, "replayed-before-connect", Json{{"text", "replay"}});
+    EXPECT_EQ(replayed.at("state"), "queued");
+    HttpServer server(observer_io, api, "127.0.0.1", 0);
+    server.start();
+    std::jthread server_thread([&] { observer_io.run(); });
+    struct ServerCleanup {
+      HttpServer &server;
+      asio::io_context &io;
+      std::jthread &thread;
+      ~ServerCleanup() {
+        server.stop();
+        io.stop();
+        if (thread.joinable())
+          thread.join();
+      }
+    } server_cleanup{server, observer_io, server_thread};
+    asio::io_context peer_io;
+    boost::beast::tcp_stream client(peer_io);
+    client.expires_after(std::chrono::seconds(5));
+    client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+    const auto request = "GET /api/v1/sessions/" + session.id +
+                         "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                         "text/event-stream\r\nLast-Event-ID: 0\r\n\r\n";
+    asio::write(client, asio::buffer(request));
+    asio::streambuf response_buffer;
+    (void)asio::read_until(client, response_buffer, "\r\n\r\n");
+    client.expires_after(std::chrono::seconds(5));
+    asio::read_until(client, response_buffer, "\n\n");
+    std::istream replay_frame_stream(&response_buffer);
+    const std::string replay_frame((std::istreambuf_iterator<char>(replay_frame_stream)), {});
+    EXPECT_NE(replay_frame.find("id: 1\ndata: "), std::string::npos);
+    EXPECT_NE(replay_frame.find("input.accepted"), std::string::npos);
+    const auto posted = writer.submit_session_turn(session.id, "writer-instance-input",
+                                                   Json{{"text", "from writer"}});
+    EXPECT_EQ(posted.at("state"), "queued");
+    client.expires_after(std::chrono::seconds(5));
+    asio::read_until(client, response_buffer, "\n\n");
+    std::istream live_frame_stream(&response_buffer);
+    const std::string live_frame((std::istreambuf_iterator<char>(live_frame_stream)), {});
+    EXPECT_NE(live_frame.find("id: 2\ndata: "), std::string::npos);
+    EXPECT_NE(live_frame.find("input.accepted"), std::string::npos);
+    boost::system::error_code ec;
+    client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+    client.socket().close(ec);
+  }
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
 TEST(Api, RunMetadataIsPreservedForWorkerContext) {
   TemporaryDirectory dir;
   asio::io_context io;
