@@ -53,8 +53,7 @@ namespace {
 std::unique_ptr<pqxx::connection>
 connect(const std::shared_ptr<PostgresConnectionPool::Lease::State> &state) {
   const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(
-                            state->options.acquisition_timeout_ms);
+                        std::chrono::milliseconds(state->options.acquisition_timeout_ms);
   pqxx::connecting pending(state->dsn);
   while (!pending.done()) {
     const auto now = std::chrono::steady_clock::now();
@@ -65,8 +64,7 @@ connect(const std::shared_ptr<PostgresConnectionPool::Lease::State> &state) {
       events |= POLLIN;
     if (pending.wait_to_write())
       events |= POLLOUT;
-    const auto remaining =
-        std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count();
+    const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count();
     pollfd socket{pending.sock(), events, 0};
     const auto ready = ::poll(&socket, 1, static_cast<int>(remaining));
     if (ready < 0) {
@@ -78,8 +76,7 @@ connect(const std::shared_ptr<PostgresConnectionPool::Lease::State> &state) {
       throw Error(ErrorCode::Storage, "PostgreSQL connection timed out");
     pending.process();
   }
-  auto connection = std::make_unique<pqxx::connection>(
-      std::move(pending).produce());
+  auto connection = std::make_unique<pqxx::connection>(std::move(pending).produce());
   pqxx::work transaction(*connection);
   transaction.exec("CREATE SCHEMA IF NOT EXISTS " + quoted_schema(state->schema));
   transaction.exec("SET search_path TO " + quoted_schema(state->schema) + ", public");

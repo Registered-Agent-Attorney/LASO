@@ -731,8 +731,7 @@ Task<void> Runtime::claim_loop() {
         work.last_renewed_at = work_lease->heartbeat_at;
         work.lease_expires_at = work_lease->expires_at;
         work.updated_at = timestamp();
-        claim_records.push_back(
-            {RecordKind::NodeWork, work.id, work.run_id, Json(work)});
+        claim_records.push_back({RecordKind::NodeWork, work.id, work.run_id, Json(work)});
         commit_node_owned(claim_records, work, *work_lease);
         log_diagnostic("runtime.distributed_node_claimed",
                        {{"node_work_id", work.id},

@@ -55,16 +55,14 @@ public:
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = 0;
-    if (::bind(listener_, reinterpret_cast<sockaddr *>(&address),
-               sizeof(address)) != 0 ||
+    if (::bind(listener_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 ||
         ::listen(listener_, 1) != 0) {
       ::close(listener_);
       listener_ = -1;
       throw std::runtime_error("unable to bind PostgreSQL probe socket");
     }
     socklen_t address_size = sizeof(address);
-    if (::getsockname(listener_, reinterpret_cast<sockaddr *>(&address),
-                      &address_size) != 0) {
+    if (::getsockname(listener_, reinterpret_cast<sockaddr *>(&address), &address_size) != 0) {
       ::close(listener_);
       listener_ = -1;
       throw std::runtime_error("unable to inspect PostgreSQL probe socket");
@@ -100,7 +98,9 @@ public:
            " dbname=laso_timeout_probe user=laso_probe connect_timeout=2";
   }
 
-  bool accepted() const { return accepted_.load(); }
+  bool accepted() const {
+    return accepted_.load();
+  }
 
 private:
   int listener_ = -1;
@@ -137,12 +137,10 @@ TEST(PostgresPool, ConnectionFailureIsBoundedAndRedacted) {
                Error);
 }
 
-
 TEST(PostgresPool, ConnectionStartupIsBoundedWhenServerStallsAfterAccept) {
   SilentPostgresEndpoint endpoint;
   const auto started = std::chrono::steady_clock::now();
-  EXPECT_THROW(PostgresConnectionPool(endpoint.dsn(), "public", {1, 1, 100}),
-               Error);
+  EXPECT_THROW(PostgresConnectionPool(endpoint.dsn(), "public", {1, 1, 100}), Error);
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - started)
                            .count();
