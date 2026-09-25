@@ -8,6 +8,7 @@
 #include <laso/artifacts/artifacts.hpp>
 #include <laso/artifacts/server.hpp>
 #include <laso/runtime/workspace.hpp>
+#include <laso/storage/factory.hpp>
 #include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
 #include <mutex>
@@ -1058,6 +1059,175 @@ TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
 #endif
 }
 
+TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto schema = "laso_session_claims_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  struct SchemaCleanup {
+    std::string dsn;
+    std::string schema;
+    ~SchemaCleanup() {
+      try {
+        pqxx::connection connection(dsn);
+        pqxx::work transaction(connection);
+        transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+        transaction.commit();
+      } catch (...) {
+      }
+    }
+  } cleanup{dsn, schema};
+
+  TemporaryDirectory dir;
+  auto options = config(dir.path);
+  options.storage_backend = "postgres";
+  options.postgres_dsn = dsn;
+  options.postgres_schema = schema;
+  options.execution_mode = "multi_instance";
+  options.validate();
+
+  std::atomic<unsigned> active{0};
+  std::atomic<unsigned> maximum_active{0};
+  std::mutex order_mutex;
+  std::vector<std::string> order;
+  auto function = std::make_shared<Function>([&](ExecutionContext &context,
+                                                 const Json &input) -> Task<Json> {
+    const auto now_active = active.fetch_add(1) + 1;
+    auto observed = maximum_active.load();
+    while (observed < now_active && !maximum_active.compare_exchange_weak(observed, now_active)) {
+    }
+    const auto tag = input.at("tag").get<std::string>();
+    if (tag == "X-A" || tag == "Y-1")
+      co_await context.delay(Milliseconds{100});
+    {
+      std::lock_guard lock(order_mutex);
+      order.push_back(tag);
+    }
+    active.fetch_sub(1);
+    co_return input;
+  });
+
+  std::string pipeline;
+  AgentSession session_x;
+  AgentSession session_y;
+  {
+    asio::io_context bootstrap_io;
+    Service bootstrap(bootstrap_io, options);
+    bootstrap.functions().add("session_claim_order", function);
+    pipeline =
+        bootstrap.register_pipeline(single("type: function\n    function: session_claim_order"))
+            .at("id")
+            .get<std::string>();
+    session_x = bootstrap.create_session(pipeline);
+    session_y = bootstrap.create_session(pipeline);
+    bootstrap.shutdown();
+  }
+
+  StorageOptions storage_options;
+  storage_options.backend = options.storage_backend;
+  storage_options.postgres_dsn = options.postgres_dsn;
+  storage_options.postgres_schema = options.postgres_schema;
+  storage_options.allow_multiple_processes = true;
+  auto storage = create_storage(storage_options);
+  const auto enqueue = [&](const AgentSession &session, const std::string &key,
+                           const std::string &tag) {
+    const auto turn_id = session.id + "-turn-" + key;
+    Json turn{{"idempotency_key", key},
+              {"input", {{"tag", tag}}},
+              {"state", "queued"},
+              {"accepted_at", timestamp()},
+              {"pipeline_id", pipeline}};
+    EXPECT_TRUE(storage->submit_session_turn(session.id, turn_id, turn, Json::object()));
+    return turn_id;
+  };
+  const auto x_a = enqueue(session_x, "pg-x-a", "X-A");
+  const auto x_b = enqueue(session_x, "pg-x-b", "X-B");
+  const auto x_c = enqueue(session_x, "pg-x-c", "X-C");
+  const auto y_1 = enqueue(session_y, "pg-y-1", "Y-1");
+  storage.reset();
+
+  asio::io_context first_io;
+  asio::io_context second_io;
+  Service first(first_io, options);
+  first.functions().add("session_claim_order", function);
+  Service second(second_io, options);
+  second.functions().add("session_claim_order", function);
+  std::barrier startup(3);
+  std::jthread first_thread([&] {
+    startup.arrive_and_wait();
+    first_io.run();
+  });
+  std::jthread second_thread([&] {
+    startup.arrive_and_wait();
+    second_io.run();
+  });
+  startup.arrive_and_wait();
+
+  const std::vector<std::pair<std::string, Json>> submitted{{session_x.id, Json{{"id", x_a}}},
+                                                            {session_x.id, Json{{"id", x_b}}},
+                                                            {session_x.id, Json{{"id", x_c}}},
+                                                            {session_y.id, Json{{"id", y_1}}}};
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool all_terminal = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    all_terminal = true;
+    for (const auto &[session_id, response] : submitted) {
+      (void)session_id;
+      const auto turn_id = response.at("id").get<std::string>();
+      const auto state = first.get(RecordKind::SessionTurn, turn_id).value("state", "");
+      if (state != "succeeded" && state != "failed" && state != "cancelled")
+        all_terminal = false;
+    }
+    if (all_terminal)
+      break;
+    std::this_thread::sleep_for(Milliseconds{10});
+  }
+  first.shutdown();
+  second.shutdown();
+  first_io.stop();
+  second_io.stop();
+  first_thread.join();
+  second_thread.join();
+  ASSERT_TRUE(all_terminal) << "PostgreSQL-backed session turns did not reach terminal state";
+
+  std::set<std::string> run_ids;
+  std::vector<std::string> x_order;
+  for (const auto &[session_id, response] : submitted) {
+    const auto turn = first.get(RecordKind::SessionTurn, response.at("id").get<std::string>());
+    EXPECT_EQ(turn.at("state"), "succeeded");
+    EXPECT_EQ(turn.at("sequence"), session_id == session_x.id ? x_order.size() + 1 : 1U);
+    ASSERT_TRUE(turn.contains("run_id"));
+    run_ids.insert(turn.at("run_id").get<std::string>());
+    if (session_id == session_x.id)
+      x_order.push_back(turn.at("input").at("tag").get<std::string>());
+  }
+  EXPECT_EQ(run_ids.size(), 4U);
+  std::vector<std::string> observed_x_order;
+  {
+    std::lock_guard lock(order_mutex);
+    for (const auto &tag : order)
+      if (tag.starts_with("X-"))
+        observed_x_order.push_back(tag);
+  }
+  EXPECT_EQ(observed_x_order, (std::vector<std::string>{"X-A", "X-B", "X-C"}));
+  EXPECT_GE(maximum_active.load(), 2U);
+  for (const auto &[session_id, response] : submitted) {
+    const auto events = first.session_events(session_id, 0, 100);
+    const auto turn_id = response.at("id").get<std::string>();
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [&](const Json &event) {
+                              return event.value("type", std::string{}) ==
+                                         "turn.execution.claimed" &&
+                                     event.value("turn_id", std::string{}) == turn_id;
+                            }),
+              1);
+  }
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
 TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
   for_each_storage_backend([](const auto &backend) {
     TemporaryDirectory dir;
