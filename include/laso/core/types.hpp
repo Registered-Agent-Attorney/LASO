@@ -9,6 +9,13 @@
 #include <vector>
 
 namespace laso {
+// Opaque provider state is held only by the runtime/session persistence path.
+// It intentionally has no JSON serialization overload.
+struct OpaqueProviderContinuation {
+  std::string provider_id;
+  std::string provider_version;
+  std::string state;
+};
 using Json = nlohmann::json;
 using Milliseconds = std::chrono::milliseconds;
 inline constexpr auto version = "0.1.0-rc.1";

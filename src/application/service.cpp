@@ -836,6 +836,7 @@ Json Service::providers() const {
                       {"streaming", m.streaming},
                       {"context_size", m.context_size},
                       {"plugin", m.plugin},
+                      {"continuation_mode", continuation_mode_name(m.continuation_mode)},
                       {"healthy", p->health().healthy},
                       {"capabilities", m.capabilities}});
   }

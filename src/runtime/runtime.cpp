@@ -7,6 +7,15 @@ namespace laso {
 namespace {
 constexpr std::size_t max_message_metadata_bytes = std::size_t{64} * 1024;
 
+std::string session_continuation_id(const std::string &session_id, const std::string &provider_id) {
+  return "current:" + std::to_string(session_id.size()) + ":" + session_id + ":" + provider_id;
+}
+
+std::string run_continuation_candidate_id(const std::string &run_id,
+                                          const std::string &provider_id) {
+  return "candidate:" + std::to_string(run_id.size()) + ":" + run_id + ":" + provider_id;
+}
+
 std::vector<Json> list_all(const Storage &storage, RecordKind kind, const std::string &run_id) {
   constexpr std::size_t page_size = 10000;
   std::vector<Json> records;
@@ -232,6 +241,51 @@ void Runtime::dispatch_session(const std::string &session_id) {
 
 void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> records) {
   std::lock_guard lock(mutex_);
+  if (!r.session_id.empty() && terminal(r.state)) {
+    std::map<std::string, Json> candidates;
+    const auto collect = [&](const Json &candidate) {
+      if (candidate.value("scope", std::string{}) != "candidate")
+        return;
+      if (candidate.value("session_id", std::string{}) != r.session_id ||
+          candidate.value("run_id", std::string{}) != r.id ||
+          candidate.value("turn_id", std::string{}) != r.session_turn_id)
+        throw Error(ErrorCode::Storage, "Stored provider continuation is invalid");
+      const auto provider_id = candidate.value("provider_id", std::string{});
+      const auto provider_version = candidate.value("provider_version", std::string{});
+      const auto state = candidate.value("state", std::string{});
+      if (provider_id.empty() || provider_version.empty() || state.empty() ||
+          state.size() > 64 * 1024)
+        throw Error(ErrorCode::Storage, "Stored provider continuation is invalid");
+      candidates[provider_id] = candidate;
+    };
+    for (const auto &candidate :
+         deps_.storage.list(RecordKind::SessionContinuation, r.id, 10000, 0))
+      collect(candidate);
+    for (const auto &record : records)
+      if (record.kind == RecordKind::SessionContinuation)
+        collect(record.value);
+    records.erase(std::remove_if(records.begin(), records.end(),
+                                 [](const Record &record) {
+                                   return record.kind == RecordKind::SessionContinuation;
+                                 }),
+                  records.end());
+    for (auto &[provider_id, candidate] : candidates) {
+      if (r.state == RunState::Completed) {
+        Json current = candidate;
+        current["scope"] = "current";
+        current["run_id"] = r.session_id;
+        current["source_run_id"] = r.id;
+        records.push_back({RecordKind::SessionContinuation,
+                           session_continuation_id(r.session_id, provider_id), r.session_id,
+                           std::move(current)});
+      }
+      candidate["scope"] = "discarded";
+      candidate["state"] = "";
+      records.push_back({RecordKind::SessionContinuation,
+                         run_continuation_candidate_id(r.id, provider_id), r.id,
+                         std::move(candidate)});
+    }
+  }
   try {
     const auto stored = deps_.storage.get(RecordKind::Run, r.id).get<Run>();
     r.cancellation_requested = r.cancellation_requested || stored.cancellation_requested;

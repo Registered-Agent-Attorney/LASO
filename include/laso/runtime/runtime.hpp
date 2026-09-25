@@ -89,7 +89,7 @@ private:
                             std::shared_ptr<ParallelState>, std::shared_ptr<AsyncLimiter>,
                             std::chrono::steady_clock::time_point, unsigned,
                             std::optional<LeaseRecord> = std::nullopt, std::string = {},
-                            std::string = {});
+                            std::string = {}, std::string = {});
   Task<bool> execute_parallel(Run &, const PipelineDefinition &, std::shared_ptr<AsyncLimiter>,
                               std::stop_token, std::chrono::steady_clock::time_point, unsigned);
   void schedule(Run run, std::optional<LeaseRecord> lease = std::nullopt);
