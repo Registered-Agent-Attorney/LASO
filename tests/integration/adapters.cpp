@@ -3,6 +3,7 @@
 #include <atomic>
 #include <barrier>
 #include <boost/beast.hpp>
+#include <condition_variable>
 #include <fstream>
 #include <laso/api/api.hpp>
 #include <laso/artifacts/artifacts.hpp>
@@ -26,10 +27,15 @@ struct ContinuationObservation {
 
 struct ContinuationFixtureState {
   std::mutex mutex;
+  std::condition_variable condition;
   std::vector<ContinuationObservation> observed;
   std::string secret_prefix;
   bool reject_state = false;
   bool timeout = false;
+  bool block_until_released = false;
+  bool provider_entered = false;
+  bool allow_provider_return = false;
+  bool provider_returned = false;
 };
 
 class SessionContinuationFixture final : public ModelProvider {
@@ -46,11 +52,20 @@ public:
                               : std::nullopt;
     bool reject = false;
     bool timeout = false;
+    bool block = false;
     {
       std::lock_guard lock(state_->mutex);
       state_->observed.push_back({tag, previous});
       reject = state_->reject_state;
       timeout = state_->timeout;
+      block = state_->block_until_released;
+    }
+    if (block) {
+      std::unique_lock lock(state_->mutex);
+      state_->provider_entered = true;
+      state_->condition.notify_all();
+      state_->condition.wait(lock, [&] { return state_->allow_provider_return; });
+      state_->provider_returned = true;
     }
     if (reject && previous)
       throw Error(ErrorCode::Provider, "Fixture rejected stored continuation");
@@ -895,6 +910,81 @@ TEST(Sessions, InvalidAndTimedOutContinuationDoNotAdvanceState) {
   EXPECT_EQ(api.handle("GET", "/api/v1/sessions/" + session.id + "/turns", "").status, 200U);
   EXPECT_EQ(service.get(RecordKind::SessionTurn, first.at("id").get<std::string>()).at("state"),
             "succeeded");
+}
+
+TEST(Sessions, CloseAfterProviderCallDoesNotAdvanceContinuation) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  trace->secret_prefix = "cancelled-provider-state-" + uuid();
+  trace->block_until_released = true;
+  Service service(io, continuation_config(dir.path));
+  register_continuation_fixture(service, trace);
+  const auto pipeline =
+      service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+  const auto session = service.create_session(pipeline);
+  const auto accepted =
+      service.submit_session_turn(session.id, "close-during-provider", Json{{"tag", "blocked"}});
+  const auto turn_id = accepted.at("id").get<std::string>();
+  std::jthread service_thread([&] { io.run(); });
+
+  bool provider_entered = false;
+  {
+    std::unique_lock lock(trace->mutex);
+    provider_entered = trace->condition.wait_for(lock, std::chrono::seconds(5),
+                                                 [&] { return trace->provider_entered; });
+  }
+  if (!provider_entered) {
+    {
+      std::lock_guard lock(trace->mutex);
+      trace->allow_provider_return = true;
+    }
+    trace->condition.notify_all();
+    service.shutdown();
+    io.stop();
+    service_thread.join();
+    FAIL() << "Continuation fixture did not reach its provider barrier";
+    return;
+  }
+
+  bool close_succeeded = true;
+  try {
+    service.close_session(session.id);
+  } catch (...) {
+    close_succeeded = false;
+  }
+  {
+    std::lock_guard lock(trace->mutex);
+    trace->allow_provider_return = true;
+  }
+  trace->condition.notify_all();
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  std::string state;
+  while (std::chrono::steady_clock::now() < deadline) {
+    state = service.get(RecordKind::SessionTurn, turn_id).value("state", "");
+    if (state == "cancelled" || state == "failed" || state == "succeeded")
+      break;
+    std::this_thread::sleep_for(Milliseconds{5});
+  }
+  service.shutdown();
+  io.stop();
+  service_thread.join();
+
+  EXPECT_TRUE(close_succeeded);
+  EXPECT_TRUE(trace->provider_returned);
+  EXPECT_EQ(state, "cancelled");
+  EXPECT_EQ(service.agent_session(session.id).state, "closed");
+  EXPECT_TRUE(service.list(RecordKind::SessionContinuation, session.id).empty());
+  const auto events = service.session_events(session.id, 0, 100);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) ==
+                                       "turn.execution.cancelled" &&
+                                   event.value("turn_id", std::string{}) == turn_id;
+                          }),
+            1);
+  EXPECT_EQ(Json(events).dump().find(trace->secret_prefix), std::string::npos);
 }
 
 TEST(Sessions, UnsupportedContinuationProviderFailsClosed) {
