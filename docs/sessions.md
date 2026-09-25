@@ -49,6 +49,8 @@ Turn inputs are durably accepted and ordered before a success response. The
 current session API is the persistence and replay substrate; it does not yet
 schedule those inputs as sequential pipeline runs or bind them to a provider's
 continuation handle. Provider continuation remains opaque and must not be
-placed in API responses. A follow-up can connect the durable turn queue to the
-existing worker recovery and fencing path without changing the session event
-cursor contract.
+placed in API responses. PostgreSQL integration coverage verifies that a turn
+written through one service instance is replayed and streamed, including
+`Last-Event-ID` resumption, by another instance. A follow-up can connect the
+durable turn queue to the existing worker recovery and fencing path without
+changing the session event cursor contract.
