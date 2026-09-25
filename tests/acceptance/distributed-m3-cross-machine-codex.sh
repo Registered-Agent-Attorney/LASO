@@ -34,6 +34,28 @@ s3_published_marker=${LASO_CROSS_MACHINE_S3_PUBLISHED_MARKER:-}
 s3_release_file=${LASO_CROSS_MACHINE_S3_RELEASE_FILE:-}
 expected_upload_bytes=${LASO_CROSS_MACHINE_EXPECTED_UPLOAD_BYTES:-}
 fault_release_file=${LASO_CROSS_MACHINE_FAULT_RELEASE_FILE:-}
+container_runtime=${LASO_TEST_CONTAINER_RUNTIME:-podman}
+postgres_container=${LASO_TEST_POSTGRES_CONTAINER:-}
+s3_test_container=${LASO_TEST_S3_CONTAINER:-}
+outage_seconds=${LASO_CROSS_MACHINE_BACKEND_OUTAGE_SECONDS:-3}
+if [[ -n "${LASO_CROSS_MACHINE_LEASE_TTL_MS:-}" ]]; then
+  lease_ttl_ms=$LASO_CROSS_MACHINE_LEASE_TTL_MS
+elif [[ "$scenario" == db-interruption ]]; then
+  # Keep the real three-second database outage inside the normal lease window.
+  lease_ttl_ms=30000
+else
+  lease_ttl_ms=3000
+fi
+[[ "$lease_ttl_ms" =~ ^[1-9][0-9]*$ ]] && ((lease_ttl_ms >= 1000 && lease_ttl_ms <= 120000)) || {
+  echo "LASO_CROSS_MACHINE_LEASE_TTL_MS must be between 1000 and 120000" >&2
+  exit 2
+}
+instance_stale_after_ms=${LASO_CROSS_MACHINE_INSTANCE_STALE_AFTER_MS:-$((lease_ttl_ms > 5000 ? lease_ttl_ms : 5000))}
+[[ "$instance_stale_after_ms" =~ ^[1-9][0-9]*$ ]] &&
+  ((10#$instance_stale_after_ms >= 10#$lease_ttl_ms && 10#$instance_stale_after_ms <= 86400000)) || {
+    echo "LASO_CROSS_MACHINE_INSTANCE_STALE_AFTER_MS must cover the lease TTL" >&2
+    exit 2
+  }
 remote_fixture_mode=${LASO_REMOTE_CODEX_FIXTURE_MODE:-}
 [[ -n "$target" && -n "$remote_build" && -n "$owner_dsn" && -n "$remote_dsn" ]] || {
   echo "LASO_REMOTE_SSH_TARGET, LASO_REMOTE_BUILD_DIR, LASO_TEST_POSTGRES_DSN, and LASO_REMOTE_POSTGRES_DSN are required" >&2
@@ -140,6 +162,20 @@ case "$scenario" in
       exit 2
     }
     ;;
+  db-interruption)
+    [[ "$artifact_backend" == s3 && "$remote_artifact_mode" == s3 && -n "$postgres_container" ]] || {
+      echo "database interruption requires direct S3 and an explicit disposable PostgreSQL container" >&2
+      exit 2
+    }
+    ;;
+  s3-outage-during-transfer)
+    [[ "$artifact_backend" == s3 && "$remote_artifact_mode" == s3 &&
+       "$remote_fixture_mode" == write-large-workspace && -n "$expected_upload_bytes" &&
+       -n "$s3_started_marker" && -n "$s3_progress_marker" && -n "$s3_test_container" ]] || {
+      echo "S3 outage requires direct S3, the large workspace fixture, transfer markers, and an explicit disposable S3 container" >&2
+      exit 2
+    }
+    ;;
 esac
 pipeline_file="$source_dir/tests/acceptance/distributed-m3-cross-machine-codex-pipeline.yaml"
 if [[ "$scenario" == "cancel" ]]; then
@@ -147,7 +183,8 @@ if [[ "$scenario" == "cancel" ]]; then
   pipeline_ref="distributed-cross-machine-codex-cancel@1"
 elif [[ "$scenario" == "worker-death" || "$scenario" == "worker-death-before-publication" ||
         "$scenario" == "worker-death-during-publication" ||
-        "$scenario" == "worker-death-after-publication" ]]; then
+        "$scenario" == "worker-death-after-publication" ||
+        "$scenario" == "s3-outage-during-transfer" ]]; then
   pipeline_ref="distributed-cross-machine-codex@1"
 elif [[ "$scenario" == "stale-worker" ]]; then
   pipeline_ref="distributed-cross-machine-codex@1"
@@ -168,6 +205,57 @@ command -v curl >/dev/null || { echo "curl is required" >&2; exit 77; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 77; }
 command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 77; }
 command -v cmake >/dev/null || { echo "cmake is required for owner-side artifact validation" >&2; exit 77; }
+if [[ "$scenario" == "db-interruption" || "$scenario" == "s3-outage-during-transfer" ]]; then
+  [[ "$outage_seconds" =~ ^[1-9][0-9]?$ ]] && (( outage_seconds <= 30 )) || {
+    echo "LASO_CROSS_MACHINE_BACKEND_OUTAGE_SECONDS must be between 1 and 30" >&2
+    exit 2
+  }
+  [[ "$container_runtime" == podman || "$container_runtime" == docker ]] || {
+    echo "LASO_TEST_CONTAINER_RUNTIME must be podman or docker" >&2
+    exit 2
+  }
+  command -v "$container_runtime" >/dev/null || { echo "test container runtime is unavailable" >&2; exit 77; }
+fi
+validate_disposable_container() {
+  local name=$1 kind=$2 details status image
+  [[ "$name" =~ ^laso-(test|acceptance|physical-m4)-${kind}-[A-Za-z0-9._-]+$ ]] || {
+    echo "container name is outside the LASO test-only naming pattern" >&2
+    return 1
+  }
+  details=$("$container_runtime" inspect --format '{{.State.Status}}|{{.Config.Image}}' "$name") || return 1
+  status=${details%%|*}
+  image=${details#*|}
+  [[ "$status" == running && "${image,,}" == *"$kind"* ]] || {
+    echo "configured disposable $kind container is not running the expected image" >&2
+    return 1
+  }
+}
+if [[ "$scenario" == "db-interruption" ]]; then
+  command -v pg_isready >/dev/null || { echo "pg_isready is required for database recovery verification" >&2; exit 77; }
+  validate_disposable_container "$postgres_container" postgres || exit 77
+fi
+if [[ "$scenario" == "s3-outage-during-transfer" ]]; then
+  validate_disposable_container "$s3_test_container" minio || exit 77
+fi
+wait_for_postgres() {
+  for _ in $(seq 1 300); do
+    PGPASSWORD="$owner_pgpassword" pg_isready -d "$owner_dsn" >/dev/null 2>&1 && return 0
+    sleep 0.1
+  done
+  return 1
+}
+wait_for_s3() {
+  local health_url="${s3_endpoint%/}/minio/health/live"
+  for _ in $(seq 1 300); do
+    if [[ "$s3_endpoint" == https://* && -n "$s3_ca_file" ]]; then
+      curl -fsS --max-time 2 --cacert "$s3_ca_file" "$health_url" >/dev/null 2>&1 && return 0
+    else
+      curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1 && return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
 
 ssh_options=(-o BatchMode=no -o StrictHostKeyChecking=yes)
 if [[ -n "${LASO_SSH_CONTROL_PATH:-}" ]]; then
@@ -196,7 +284,8 @@ remote_root=$(remote_has 'mktemp -d /tmp/laso-m3-cross.XXXXXX')
 remote_server_pid=
 remote_b_root=
 remote_b_server_pid=
-remote_db_interrupt_pid=
+postgres_container_stopped=0
+s3_test_container_stopped=0
 artifact_tunnel_pid=
 s3_tunnel_pid=
 artifact_tunnel_active=0
@@ -205,6 +294,14 @@ run_root=$(mktemp -d)
 owner_pid=
 cleanup() {
   local status=$?
+  if [[ "${postgres_container_stopped:-0}" == 1 ]]; then
+    "$container_runtime" start "$postgres_container" >/dev/null 2>&1 || true
+    postgres_container_stopped=0
+  fi
+  if [[ "${s3_test_container_stopped:-0}" == 1 ]]; then
+    "$container_runtime" start "$s3_test_container" >/dev/null 2>&1 || true
+    s3_test_container_stopped=0
+  fi
   if [[ "$status" != 0 ]]; then
     echo "cross-machine acceptance diagnostics (sanitized)" >&2
     if [[ -f "${run_root:-}/owner.stderr" ]]; then
@@ -219,14 +316,13 @@ cleanup() {
   if [[ -n "${owner_pid:-}" ]]; then kill -TERM "$owner_pid" 2>/dev/null || true; wait "$owner_pid" 2>/dev/null || true; fi
   if [[ -n "${remote_server_pid:-}" ]]; then remote_stop_process_tree "$remote_server_pid"; fi
   if [[ -n "${remote_b_server_pid:-}" ]]; then remote_stop_process_tree "$remote_b_server_pid"; fi
-  if [[ -n "${remote_db_interrupt_pid:-}" ]]; then kill "$remote_db_interrupt_pid" 2>/dev/null || true; wait "$remote_db_interrupt_pid" 2>/dev/null || true; fi
   if [[ -n "${artifact_tunnel_pid:-}" ]]; then kill "$artifact_tunnel_pid" 2>/dev/null || true; wait "$artifact_tunnel_pid" 2>/dev/null || true; fi
   if [[ -n "${s3_tunnel_pid:-}" ]]; then kill "$s3_tunnel_pid" 2>/dev/null || true; wait "$s3_tunnel_pid" 2>/dev/null || true; fi
   if [[ "${artifact_tunnel_active:-0}" == 1 && -n "${LASO_SSH_CONTROL_PATH:-}" ]]; then
-    ssh "${ssh_options[@]}" -O cancel -R "127.0.0.1:${remote_artifact_port}" "$target" >/dev/null 2>&1 || true
+    ssh "${ssh_options[@]}" -O cancel -R "$artifact_forward" "$target" >/dev/null 2>&1 || true
   fi
   if [[ "${s3_tunnel_active:-0}" == 1 && -n "${LASO_SSH_CONTROL_PATH:-}" ]]; then
-    ssh "${ssh_options[@]}" -O cancel -R "127.0.0.1:${remote_s3_port}" "$target" >/dev/null 2>&1 || true
+    ssh "${ssh_options[@]}" -O cancel -R "$s3_forward" "$target" >/dev/null 2>&1 || true
   fi
   if [[ -n "${s3_release_file:-}" ]]; then touch "$s3_release_file" 2>/dev/null || true; fi
   if [[ -n "${fault_release_file:-}" ]]; then touch "$fault_release_file" 2>/dev/null || true; fi
@@ -256,10 +352,33 @@ remote_signal_process_tree() {
       done
       printf '%s\\n' \"\$1\"
     }
-    if kill -0 '$pid' 2>/dev/null; then
-      owned_pids=\$(descend '$pid' | sort -rn | uniq)
-      kill -$signal \$owned_pids 2>/dev/null || true
-    fi" || true
+    if ! kill -0 '$pid' 2>/dev/null; then
+      printf '%s\\n' \"remote_process_tree_target_missing=1 pid=$pid\" >&2
+      exit 1
+    fi
+    owned_pids=\$(descend '$pid' | sort -rn | uniq)
+    kill -$signal \$owned_pids 2>/dev/null || true
+    if [ '$signal' = KILL ]; then
+      for _ in \$(seq 1 100); do
+        remaining=
+        for process in \$owned_pids; do
+          state=\$(ps -o stat= -p \"\$process\" 2>/dev/null | awk 'NR==1 {print \$1}')
+          case \"\$state\" in
+            ''|Z*) ;;
+            *) remaining=\"\$remaining \$process\" ;;
+          esac
+        done
+        if [ -z \"\$remaining\" ]; then
+          printf '%s\\n' \"remote_process_tree_kill_verified=1 pid=$pid pids=\$owned_pids\"
+          exit 0
+        fi
+        sleep 0.05
+      done
+      printf '%s\\n' \"remote_process_tree_kill_incomplete=1 pid=$pid remaining=\$remaining\" >&2
+      exit 1
+    fi
+    printf '%s\\n' \"remote_process_tree_signal_sent=1 pid=$pid signal=$signal pids=\$owned_pids\"
+  "
 }
 wait_remote_file() {
   local remote_path=$1
@@ -289,6 +408,7 @@ mkdir -p "$owner_data/distributed-workspaces"
 sed -e "s|@DATA_DIR@|$(escape_sed "$owner_data")|g" \
     -e "s|@POSTGRES_DSN@|$(escape_sed "$owner_dsn")|g" \
     -e "s|@POSTGRES_SCHEMA@|$(escape_sed "$schema")|g" \
+    -e "s|@LEASE_TTL_MS@|$lease_ttl_ms|g" \
     -e "s|@ARTIFACT_SERVICE_PORT@|$owner_artifact_port|g" \
     -e "s|@ARTIFACT_SERVICE_URL@||g" \
     -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
@@ -328,13 +448,6 @@ remote_data="$remote_root/data"
 remote_worker_root="$remote_data/distributed-workspaces"
 remote_config="$remote_root/worker.yaml"
 remote_connection_dsn="$remote_dsn"
-if [[ "$scenario" == "db-interruption" ]]; then
-  if [[ "$remote_connection_dsn" == *"?"* ]]; then
-    remote_connection_dsn="${remote_connection_dsn}&application_name=laso-m3-worker"
-  else
-    remote_connection_dsn="${remote_connection_dsn}?application_name=laso-m3-worker"
-  fi
-fi
 remote_has "mkdir -p '$remote_worker_root' '$remote_data'"
 if [[ -z "$remote_ready_path" ]]; then
   remote_ready_path="$remote_root/provider-output.ready"
@@ -348,6 +461,7 @@ remote_template="$run_root/worker-template.yaml"
 sed -e "s|@DATA_DIR@|$(escape_sed "$remote_data")|g" \
     -e "s|@POSTGRES_DSN@|$(escape_sed "$remote_connection_dsn")|g" \
     -e "s|@POSTGRES_SCHEMA@|$(escape_sed "$schema")|g" \
+    -e "s|@LEASE_TTL_MS@|$lease_ttl_ms|g" \
     -e "s|@ARTIFACT_SERVICE_URL@|$(escape_sed "$remote_artifact_url")|g" \
     -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
     -e "s|@CODEX_WORKER@|$(escape_sed "$remote_build/bin/laso-codex-worker")|g" \
@@ -381,7 +495,7 @@ write_remote_env() {
   umask 077
   {
     printf 'PGPASSWORD=%q\n' "${LASO_REMOTE_PGPASSWORD:-}"
-    printf 'LASO_INSTANCE_STALE_AFTER_MS=%q\n' 5000
+    printf 'LASO_INSTANCE_STALE_AFTER_MS=%q\n' "$instance_stale_after_ms"
     if [[ -n "$remote_fixture_mode" ]]; then
       printf 'LASO_CODEX_FIXTURE_MODE=%q\n' "$remote_fixture_mode"
       printf 'LASO_CODEX_FIXTURE_MARKER=%q\n' "${ready_path:-$remote_ready_path}"
@@ -415,7 +529,7 @@ owner_env_local="$run_root/owner.env"
 umask 077
 {
   printf 'PGPASSWORD=%q\n' "$owner_pgpassword"
-  printf 'LASO_INSTANCE_STALE_AFTER_MS=%q\n' 5000
+  printf 'LASO_INSTANCE_STALE_AFTER_MS=%q\n' "$instance_stale_after_ms"
 } > "$owner_env_local"
 chmod 600 "$owner_env_local"
 cat > "$remote_launcher_local" <<'LAUNCHER'
@@ -548,6 +662,7 @@ if [[ "$scenario" == "stale-worker" ]]; then
   sed -e "s|@DATA_DIR@|$(escape_sed "$remote_b_data")|g" \
       -e "s|@POSTGRES_DSN@|$(escape_sed "$remote_dsn")|g" \
       -e "s|@POSTGRES_SCHEMA@|$(escape_sed "$schema")|g" \
+      -e "s|@LEASE_TTL_MS@|$lease_ttl_ms|g" \
       -e "s|@ARTIFACT_SERVICE_URL@|$(escape_sed "$remote_artifact_url")|g" \
       -e "s|@ARTIFACT_SERVICE_TOKEN@|$(escape_sed "$artifact_token")|g" \
       -e "s|@CODEX_WORKER@|$(escape_sed "$remote_build/bin/laso-codex-worker")|g" \
@@ -683,7 +798,8 @@ for iteration in $(seq 1 "$runs"); do
       state=$(jq -r '.state' <<<"$run")
       jobs=$(curl -fsS "$base/worker-jobs?limit=100")
       active_job=$(jq -r --arg run "$run_id" '[.[] | select(.run_id == $run and (.status == "Submitting" or .status == "Running"))] | first // empty | .id // empty' <<<"$jobs")
-      if [[ -n "$active_job" ]]; then
+      if [[ -n "$active_job" || "$scenario" == "worker-death-during-publication" ||
+            "$scenario" == "worker-death-after-publication" ]]; then
         case "$scenario" in
           worker-death-before-publication)
             if ! remote_has "test -s '$remote_ready_path'" >/dev/null 2>&1; then
@@ -707,7 +823,7 @@ for iteration in $(seq 1 "$runs"); do
               sleep 0.1
               continue
             fi
-            echo "cross_machine_s3_upload_active=1 bytes_sent=$progress_bytes expected_bytes=$expected_upload_bytes worker_job=$active_job"
+            echo "cross_machine_s3_upload_active=1 bytes_sent=$progress_bytes expected_bytes=$expected_upload_bytes worker_job=${active_job:-server-process-only}"
             ;;
           worker-death-after-publication)
             [[ "$remote_artifact_mode" == "s3" && -n "$s3_published_marker" &&
@@ -720,7 +836,7 @@ for iteration in $(seq 1 "$runs"); do
             ;;
         esac
         remote_signal_process_tree KILL "$remote_server_pid"
-        echo "cross_machine_worker_process_tree_killed=1 worker_job=$active_job"
+        echo "cross_machine_worker_process_tree_killed=1 pid=$remote_server_pid worker_job=${active_job:-server-process-only}"
         if [[ -n "$fault_release_file" ]]; then
           echo "cross_machine_fault_inspection_ready=1 scenario=$scenario run_id=$run_id"
           wait_local_file "$fault_release_file" || {
@@ -761,6 +877,7 @@ for iteration in $(seq 1 "$runs"); do
           sleep 0.1
           continue
         fi
+        stale_worker_job_id=$active_job
         remote_signal_process_tree STOP "$remote_server_pid"
         echo "cross_machine_stale_worker_suspended=1 worker_job=$active_job"
         # Instance staleness is 5 seconds in this fixture. Leave a margin so
@@ -807,10 +924,6 @@ for iteration in $(seq 1 "$runs"); do
   if [[ "$scenario" == "db-interruption" ]]; then
     db_interruption_sent=0
     provider_observed=0
-    [[ -n "${LASO_REMOTE_SUDO_PASSWORD:-}" ]] || {
-      echo "LASO_REMOTE_SUDO_PASSWORD is required for the bounded database interruption scenario" >&2
-      exit 77
-    }
     for _ in $(seq 1 900); do
       run=$(curl -fsS "$base/runs/$run_id")
       state=$(jq -r '.state' <<<"$run")
@@ -820,13 +933,37 @@ for iteration in $(seq 1 "$runs"); do
         provider_observed=1
       fi
       if [[ "$provider_observed" == 1 && -n "$active_job" ]]; then
-        printf '%s\n' "$LASO_REMOTE_SUDO_PASSWORD" |
-          ssh "${ssh_options[@]}" "$target" \
-            "sudo -S -p '' -u postgres sh -c 'for i in \$(seq 1 4); do psql -d laso_m3_validation -Atqc \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = chr(108)||chr(97)||chr(115)||chr(111)||chr(45)||chr(109)||chr(51)||chr(45)||chr(119)||chr(111)||chr(114)||chr(107)||chr(101)||chr(114) AND datname = current_database() AND pid <> pg_backend_pid();\" >/dev/null 2>&1; sleep 0.1; done'" \
-            >/dev/null 2>&1 &
-        remote_db_interrupt_pid=$!
-        echo "cross_machine_db_interruption=1 worker_job=$active_job"
+        postgres_container_stopped=1
+        "$container_runtime" stop --time 0 "$postgres_container" >/dev/null
         db_interruption_sent=1
+        echo "cross_machine_test_postgres_stopped=1 worker_job=$active_job"
+        sleep "$outage_seconds"
+        "$container_runtime" start "$postgres_container" >/dev/null
+        postgres_container_stopped=0
+        wait_for_postgres || { echo "disposable PostgreSQL did not recover" >&2; exit 1; }
+        echo "cross_machine_test_postgres_recovered=1 outage_seconds=$outage_seconds"
+        # PostgreSQL can accept connections before the owner API has cleared
+        # transient database errors. Require sustained health across both routes
+        # used to observe run state and worker recovery before polling resumes.
+        api_recovery_successes=0
+        for _ in $(seq 1 300); do
+          if curl -fsS --max-time 2 "$base/health" >/dev/null 2>&1 &&
+             run=$(curl -fsS --max-time 2 "$base/runs/$run_id" 2>/dev/null) &&
+             jq -e --arg run "$run_id" '.id == $run' <<<"$run" >/dev/null 2>&1 &&
+             jobs=$(curl -fsS --max-time 2 "$base/worker-jobs?limit=100" 2>/dev/null) &&
+             jq -e 'type == "array"' <<<"$jobs" >/dev/null 2>&1; then
+            api_recovery_successes=$((api_recovery_successes + 1))
+            if [[ "$api_recovery_successes" -ge 20 ]]; then break; fi
+          else
+            api_recovery_successes=0
+          fi
+          sleep 0.2
+        done
+        [[ "$api_recovery_successes" -ge 20 ]] || {
+          echo "owner API did not sustain run and worker-job reads after disposable PostgreSQL interruption" >&2
+          exit 1
+        }
+        echo "cross_machine_owner_api_recovered=1 stable_api_cycles=$api_recovery_successes"
         break
       fi
       [[ "$state" == "Completed" || "$state" == "Failed" || "$state" == "Cancelled" || "$state" == "TimedOut" ]] && break
@@ -834,11 +971,45 @@ for iteration in $(seq 1 "$runs"); do
     done
     [[ "$provider_observed" == 1 ]] || { echo "remote provider was not observed before database interruption" >&2; exit 1; }
     [[ "$db_interruption_sent" == 1 ]] || { echo "active remote worker was not observed before database interruption" >&2; exit 1; }
-    wait "$remote_db_interrupt_pid" 2>/dev/null || true
-    remote_db_interrupt_pid=
+  fi
+  if [[ "$scenario" == "s3-outage-during-transfer" ]]; then
+    s3_outage_injected=0
+    for _ in $(seq 1 900); do
+      run=$(curl -fsS "$base/runs/$run_id")
+      state=$(jq -r '.state' <<<"$run")
+      jobs=$(curl -fsS "$base/worker-jobs?limit=100")
+      active_job=$(jq -r --arg run "$run_id" '[.[] | select(.run_id == $run and (.status == "Submitting" or .status == "Running"))] | first // empty | .id // empty' <<<"$jobs")
+      progress_bytes=0
+      if [[ -r "$s3_progress_marker" ]]; then read -r progress_bytes < "$s3_progress_marker" || progress_bytes=0; fi
+      if [[ -s "$s3_started_marker" &&
+            "$progress_bytes" =~ ^[0-9]+$ && "$progress_bytes" -gt 0 &&
+            "$progress_bytes" -lt "$expected_upload_bytes" ]]; then
+        echo "cross_machine_s3_upload_active=1 bytes_sent=$progress_bytes expected_bytes=$expected_upload_bytes worker_job=${active_job:-server-process-only}"
+        s3_test_container_stopped=1
+        "$container_runtime" stop --time 0 "$s3_test_container" >/dev/null
+        echo "cross_machine_test_s3_stopped=1 worker_job=$active_job"
+        sleep "$outage_seconds"
+        "$container_runtime" start "$s3_test_container" >/dev/null
+        s3_test_container_stopped=0
+        wait_for_s3 || { echo "disposable S3 service did not recover" >&2; exit 1; }
+        echo "cross_machine_test_s3_recovered=1 outage_seconds=$outage_seconds"
+        s3_outage_injected=1
+        break
+      fi
+      [[ "$state" == "Completed" || "$state" == "Failed" || "$state" == "Cancelled" || "$state" == "TimedOut" ]] && break
+      sleep 0.1
+    done
+    [[ "$s3_outage_injected" == 1 ]] || { echo "active S3 upload was not observed before outage injection" >&2; exit 1; }
   fi
   for _ in $(seq 1 1800); do
-    run=$(curl -fsS "$base/runs/$run_id")
+    if ! run=$(curl -fsS --max-time 2 "$base/runs/$run_id" 2>/dev/null); then
+      if [[ "$scenario" == "db-interruption" ]]; then
+        sleep 0.2
+        continue
+      fi
+      echo "owner run-state API read failed" >&2
+      exit 1
+    fi
     state=$(jq -r '.state' <<<"$run")
     if [[ "$state" == "Completed" || "$state" == "Failed" || "$state" == "Cancelled" || "$state" == "TimedOut" ]]; then break; fi
     if [[ "$observed_remote" == 0 ]] && remote_has "pgrep -f '$remote_build/bin/laso-codex-worker' >/dev/null" >/dev/null 2>&1; then
@@ -856,7 +1027,20 @@ for iteration in $(seq 1 "$runs"); do
     attempts=$(curl -fsS "$base/runs/$run_id/attempts?limit=100")
     codex_attempts=$(jq -r '[.[] | select(.node_id == "codex")] | length' <<<"$attempts")
     [[ "$codex_attempts" -ge 2 ]] || { echo "replacement worker did not create a distinct attempt" >&2; exit 1; }
-    echo "STALE_RESULT_REJECTED codex_attempts=$codex_attempts"
+    [[ -n "${stale_worker_job_id:-}" ]] || { echo "stale worker job identity was not retained" >&2; exit 1; }
+    jobs=$(curl -fsS "$base/worker-jobs?limit=100")
+    stale_job=$(jq -ce --arg id "$stale_worker_job_id" '[.[] | select(.id == $id)] | first // empty' <<<"$jobs") || {
+      echo "stale worker job disappeared before rejection was recorded" >&2
+      exit 1
+    }
+    stale_status=$(jq -r '.status' <<<"$stale_job")
+    stale_error=$(jq -r '.error' <<<"$stale_job")
+    [[ "$stale_status" == Failed && "$stale_error" == *"superseded or lost its node lease"* ]] || {
+      echo "stale worker job was not rejected after losing authority" >&2
+      jq -c '{id,status,error}' <<<"$stale_job" >&2
+      exit 1
+    }
+    echo "STALE_RESULT_REJECTED worker_job=$stale_worker_job_id status=$stale_status codex_attempts=$codex_attempts"
   fi
   [[ "$state" == "Completed" ]] || {
     echo "cross-machine run $iteration reached $state" >&2
@@ -925,6 +1109,27 @@ PY
   ctest --test-dir "$run_root/accepted-$iteration/build" --output-on-failure >/dev/null
   attempts=$(curl -fsS "$base/runs/$run_id/attempts?limit=100")
   jq -c '[.[] | {id,node_id,state,attempt,worker_job_id,started_at,finished_at,fencing_token}]' <<<"$attempts"
+  if [[ "$scenario" == "stale-worker" ]]; then
+    winning_attempt_id=$(jq -r '.manifest.provenance.attempt_id' "$run_root/result-manifest.json")
+    winning_attempt=$(jq -ce --arg id "$winning_attempt_id" \
+      '[.[] | select(.node_id == "codex" and .id == $id and .state == "Completed")] | first // empty' \
+      <<<"$attempts") || {
+      echo "authoritative manifest does not name a completed worker attempt" >&2
+      exit 1
+    }
+    winning_job_id=$(jq -r '.worker_job_id' <<<"$winning_attempt")
+    [[ -n "$winning_job_id" && "$winning_job_id" != "$stale_worker_job_id" ]] || {
+      echo "authoritative result did not come from the replacement worker job" >&2
+      exit 1
+    }
+    stale_attempt=$(jq -ce --arg job "$stale_worker_job_id" \
+      '[.[] | select(.node_id == "codex" and .worker_job_id == $job and .state == "Failed")] | first // empty' \
+      <<<"$attempts") || {
+      echo "superseded worker attempt remained nonterminal in durable history" >&2
+      exit 1
+    }
+    echo "cross_machine_stale_fencing=passed rejected_job=$stale_worker_job_id winner_job=$winning_job_id winning_attempt=$winning_attempt_id stale_attempt_state=$(jq -r '.state' <<<"$stale_attempt")"
+  fi
   provenance=$(jq -c '.manifest.provenance | {run_id,node_work_id,attempt_id,worker_id,fencing_token}' \
     "$run_root/result-manifest.json")
   echo "cross_machine_artifact_provenance=$provenance"

@@ -629,6 +629,7 @@ edges:
   std::uint64_t old_token = 0;
   std::string old_attempt_id;
   std::string work_id;
+  bool old_attempt_persisted = false;
   for (unsigned i = 0; i < 300; ++i) {
     for (const auto &value : seed.list(RecordKind::NodeWork, run_id)) {
       const auto work = value.get<NodeWork>();
@@ -639,11 +640,19 @@ edges:
         old_attempt_id = work.attempt_id;
       }
     }
-    if (!work_id.empty())
+    if (!old_attempt_id.empty()) {
+      try {
+        (void)seed.get(RecordKind::Attempt, old_attempt_id).get<NodeExecution>();
+        old_attempt_persisted = true;
+      } catch (const Error &) {
+      }
+    }
+    if (!work_id.empty() && old_attempt_persisted)
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
   ASSERT_FALSE(work_id.empty());
+  ASSERT_TRUE(old_attempt_persisted);
   ASSERT_EQ(kill(owner, SIGKILL), 0);
   int owner_status = 0;
   ASSERT_EQ(waitpid(owner, &owner_status, 0), owner);
@@ -660,6 +669,12 @@ edges:
   ASSERT_EQ(waitpid(recovery, &recovery_status, 0), recovery);
   EXPECT_TRUE(WIFEXITED(recovery_status));
   ASSERT_EQ(result.state, RunState::Completed) << result.error;
+  const auto interrupted_attempt =
+      seed.get(RecordKind::Attempt, old_attempt_id).get<NodeExecution>();
+  EXPECT_EQ(interrupted_attempt.state, NodeState::Failed);
+  EXPECT_EQ(interrupted_attempt.error,
+            "Distributed node work lease expired before attempt completed");
+  EXPECT_FALSE(interrupted_attempt.finished_at.empty());
   const auto works = seed.list(RecordKind::NodeWork, run_id);
   ASSERT_EQ(works.size(), 2U);
   bool retaken = false;

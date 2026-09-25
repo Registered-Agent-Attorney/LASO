@@ -21,7 +21,7 @@ tools, general remote shell commands, or cluster scheduling.
 
 ### M4.1 — optional S3-compatible shared artifact store
 
-Status: in progress.
+Status: physical acceptance complete; hosted CI and merge pending.
 
 Add an optional S3-compatible object-store backend so owners and workers can
 access content-addressed artifacts directly from shared object storage. The
@@ -29,8 +29,10 @@ filesystem backend remains the default and must not require cloud SDKs,
 accounts, or credentials. Validation uses an isolated disposable S3-compatible
 service, never production cloud credentials.
 
-M4.1 is complete only after backend conformance, bounded streaming and failure
-tests, distributed owner/worker acceptance, stale-fence validation, owner
-recovery, and the default cloud-independent build all pass. Remote garbage
-collection must remain disabled unless it can be proven namespace-scoped,
-reference-aware, and safe under pagination and concurrent writers.
+Physical acceptance has passed for backend failure handling, separate-machine
+owner/worker execution, stale fencing, owner recovery, PostgreSQL interruption,
+and trusted and untrusted TLS. The implementation and regression evidence are
+recorded in [VALIDATION.md](../VALIDATION.md). Hosted CI and PR review remain
+before M4.1 can be closed. Remote garbage collection remains disabled unless it
+can be proven namespace-scoped, reference-aware, and safe under pagination and
+concurrent writers.
