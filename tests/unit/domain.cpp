@@ -352,6 +352,16 @@ TEST(Configuration, RejectsZeroConcurrency) {
   c.max_runs = 0;
   EXPECT_THROW(c.validate(), Error);
 }
+TEST(Configuration, BoundsSessionSseStreamCapacity) {
+  Config c;
+  EXPECT_NO_THROW(c.validate());
+  c.max_session_sse_streams = 0;
+  EXPECT_THROW(c.validate(), Error);
+  c.max_session_sse_streams = 129;
+  EXPECT_THROW(c.validate(), Error);
+  c.max_session_sse_streams = 128;
+  EXPECT_NO_THROW(c.validate());
+}
 TEST(Configuration, ValidatesPerRunNodeLimit) {
   Config c;
   c.max_nodes_per_run = 0;

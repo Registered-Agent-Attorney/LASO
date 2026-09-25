@@ -41,6 +41,7 @@ credentials and binds the development API to loopback.
 | `postgres_pool_min_connections` | `1` | Minimum PostgreSQL pool size. |
 | `postgres_pool_max_connections` | `4` | Maximum PostgreSQL pool size. |
 | `postgres_pool_acquisition_timeout_ms` | `1000` | Bounded pool acquisition wait. |
+| `max_session_sse_streams` | `32` | Maximum session event streams per LASO process (1–128). Admission is immediate; excess streams receive HTTP 429 and `Retry-After: 1`. See [session SSE](session-sse.md) for replay and reconnect behavior. |
 
 SQLite is deliberately single-instance. Do not run multiple LASO processes
 against the same SQLite state. PostgreSQL multi-instance mode uses database

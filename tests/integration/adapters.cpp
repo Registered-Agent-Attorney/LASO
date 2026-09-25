@@ -1188,6 +1188,168 @@ TEST(Api, SessionSseResumesAfterCursorAndEndsAfterClose) {
   server.stop();
   server_thread.join();
 }
+TEST(Api, SessionSseAdmissionRejectsAndReconnectsWithReplayCursor) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  service.register_pipeline(fixture("hello-pipeline"));
+  const auto session = service.create_session("hello@1");
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  HttpServer server(io, api, "127.0.0.1", 0,
+                    HttpServerOptions{1, std::chrono::seconds(1), std::chrono::seconds(10)});
+  server.start();
+  std::jthread server_thread([&] { io.run(); });
+  auto open = [&](auto &socket, std::uint64_t cursor) {
+    socket.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+    const auto request = "GET /api/v1/sessions/" + session.id +
+                         "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                         "text/event-stream\r\nLast-Event-ID: " +
+                         std::to_string(cursor) + "\r\n\r\n";
+    asio::write(socket, asio::buffer(request));
+  };
+  auto read_header = [](auto &socket, asio::streambuf &buffer) {
+    asio::read_until(socket, buffer, "\r\n\r\n");
+    return std::string(asio::buffers_begin(buffer.data()), asio::buffers_end(buffer.data()));
+  };
+  asio::io_context first_io;
+  boost::beast::tcp_stream first(first_io);
+  first.expires_after(std::chrono::seconds(5));
+  open(first, 0);
+  asio::streambuf first_buffer;
+  const auto first_response = read_header(first, first_buffer);
+  EXPECT_NE(first_response.find("200 OK"), std::string::npos);
+  ASSERT_EQ(server.metrics().active_session_streams, 1U);
+  EXPECT_EQ(server.metrics().session_stream_limit, 1U);
+
+  asio::io_context rejected_io;
+  boost::beast::tcp_stream rejected(rejected_io);
+  rejected.expires_after(std::chrono::seconds(5));
+  open(rejected, 0);
+  asio::streambuf rejected_buffer;
+  const auto rejected_response = read_header(rejected, rejected_buffer);
+  const auto headers_end = rejected_response.find("\r\n\r\n");
+  const auto rejected_headers = rejected_response.substr(0, headers_end);
+  EXPECT_NE(rejected_headers.find("429 Too Many Requests"), std::string::npos);
+  EXPECT_NE(rejected_headers.find("Retry-After: 1"), std::string::npos);
+  EXPECT_EQ(rejected_headers.find("text/event-stream"), std::string::npos);
+  EXPECT_EQ(server.metrics().active_session_streams, 1U);
+  EXPECT_EQ(server.metrics().rejected_session_streams, 1U);
+  EXPECT_TRUE(service.session_events(session.id, 0, 10).empty());
+
+  const auto accepted = service.submit_session_turn(session.id, "sse-admission-replay",
+                                                    Json{{"text", "replay after admission"}});
+  ASSERT_EQ(accepted.at("sequence"), 1U);
+  boost::system::error_code ec;
+  first.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+  first.socket().close(ec);
+  for (int i = 0; i < 200 && server.metrics().active_session_streams != 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  ASSERT_EQ(server.metrics().active_session_streams, 0U);
+
+  asio::io_context resumed_io;
+  boost::beast::tcp_stream resumed(resumed_io);
+  resumed.expires_after(std::chrono::seconds(5));
+  open(resumed, 0);
+  asio::streambuf resumed_buffer;
+  const auto resumed_headers = read_header(resumed, resumed_buffer);
+  ASSERT_NE(resumed_headers.find("200 OK"), std::string::npos);
+  resumed.expires_after(std::chrono::seconds(2));
+  asio::read_until(resumed, resumed_buffer, "\n\n");
+  const std::string frame(asio::buffers_begin(resumed_buffer.data()),
+                          asio::buffers_end(resumed_buffer.data()));
+  EXPECT_NE(frame.find("id: 1\ndata: "), std::string::npos);
+  EXPECT_NE(frame.find("replay after admission"), std::string::npos);
+  resumed.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+  resumed.socket().close(ec);
+  server.stop();
+  server_thread.join();
+  EXPECT_EQ(server.metrics().active_session_streams, 0U);
+  EXPECT_EQ(server.metrics().accepted_session_streams, 2U);
+  EXPECT_EQ(server.metrics().closed_session_streams, 2U);
+}
+TEST(Api, SessionSseSlotReleasesPromptlyOnIdleClientDisconnect) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  service.register_pipeline(fixture("hello-pipeline"));
+  const auto session = service.create_session("hello@1");
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  HttpServer server(io, api, "127.0.0.1", 0,
+                    HttpServerOptions{1, std::chrono::seconds(15), std::chrono::minutes(30)});
+  server.start();
+  std::jthread server_thread([&] { io.run(); });
+  asio::io_context peer_io;
+  boost::beast::tcp_stream client(peer_io);
+  client.expires_after(std::chrono::seconds(5));
+  client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+  const auto request = "GET /api/v1/sessions/" + session.id +
+                       "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                       "text/event-stream\r\n\r\n";
+  asio::write(client, asio::buffer(request));
+  asio::streambuf response;
+  asio::read_until(client, response, "\r\n\r\n");
+  ASSERT_EQ(server.metrics().active_session_streams, 1U);
+  boost::system::error_code ec;
+  client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+  client.socket().close(ec);
+  for (int i = 0; i < 100 && server.metrics().active_session_streams != 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(server.metrics().active_session_streams, 0U);
+  EXPECT_EQ(server.metrics().closed_session_streams, 1U);
+  server.stop();
+  server_thread.join();
+}
+TEST(Api, SessionSseSlotIsReleasedAfterConfiguredLifetimeAndShutdown) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  service.register_pipeline(fixture("hello-pipeline"));
+  const auto session = service.create_session("hello@1");
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  HttpServer server(io, api, "127.0.0.1", 0,
+                    HttpServerOptions{1, std::chrono::seconds(1), std::chrono::seconds(1)});
+  server.start();
+  std::jthread server_thread([&] { io.run(); });
+  asio::io_context peer_io;
+  boost::beast::tcp_stream client(peer_io);
+  client.expires_after(std::chrono::seconds(3));
+  client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+  const auto request = "GET /api/v1/sessions/" + session.id +
+                       "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                       "text/event-stream\r\n\r\n";
+  asio::write(client, asio::buffer(request));
+  asio::streambuf buffer;
+  asio::read_until(client, buffer, "\r\n\r\n");
+  ASSERT_EQ(server.metrics().active_session_streams, 1U);
+  client.expires_after(std::chrono::seconds(3));
+  char byte{};
+  boost::system::error_code read_error;
+  (void)client.read_some(asio::buffer(&byte, 1), read_error);
+  EXPECT_TRUE(read_error == asio::error::eof || read_error == asio::error::connection_reset);
+  for (int i = 0; i < 100 && server.metrics().active_session_streams != 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(server.metrics().active_session_streams, 0U);
+  EXPECT_EQ(server.metrics().rejected_session_streams, 0U);
+  asio::io_context shutdown_io;
+  boost::beast::tcp_stream active(shutdown_io);
+  active.expires_after(std::chrono::seconds(3));
+  active.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+  const auto active_request = "GET /api/v1/sessions/" + session.id +
+                              "/events/stream HTTP/1.1\r\nHost: localhost\r\nAccept: "
+                              "text/event-stream\r\n\r\n";
+  asio::write(active, asio::buffer(active_request));
+  asio::streambuf active_buffer;
+  asio::read_until(active, active_buffer, "\r\n\r\n");
+  ASSERT_EQ(server.metrics().active_session_streams, 1U);
+  server.stop();
+  server_thread.join();
+  EXPECT_EQ(server.metrics().active_session_streams, 0U);
+  EXPECT_EQ(server.metrics().accepted_session_streams, 2U);
+  EXPECT_EQ(server.metrics().closed_session_streams, 2U);
+}
 TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
 #if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
