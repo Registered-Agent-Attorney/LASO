@@ -94,10 +94,10 @@ creates a second run for that turn.
 
 Run terminal state, the terminal SessionTurn, its safe result reference, the
 session active-turn release, any new continuation record, and the corresponding
-session event must be committed atomically under the current run fence. Storage
-will provide an operation that verifies the unexpired run lease in the same
-transaction as these writes. A stale owner cannot publish a result or
-continuation after takeover or cancellation.
+session event are committed atomically under the current run fence. Storage
+verifies the unexpired run lease in the same transaction as these writes. A
+stale owner cannot publish a result or continuation after takeover or
+cancellation.
 
 ## Close, cancellation, and races
 
@@ -131,23 +131,29 @@ configured database and its existing access controls remain the trusted storage
 boundary.
 
 A continuation-capable adapter receives the previous opaque payload and returns
-a replacement payload with its result. LASO commits the replacement only in the
-same fenced transaction that makes that turn's result authoritative. A
-stateless adapter is allowed only when the session explicitly selects stateless
-mode. Unsupported continuation, missing required state, invalid state, or lost
-state produces an explicit durable failure; LASO never silently starts a new
-provider conversation and calls it a continuation. Timeouts follow the existing
-attempt timeout and retry policy and cannot create a successful turn.
+a replacement payload with its result. LASO first checkpoints that candidate
+with the successful provider-node result under the run fence. It promotes the
+candidate only in the same fenced transaction that makes the turn result
+authoritative. Failed and cancelled runs clear the candidate without changing
+the last successful continuation. A crash before the node checkpoint may repeat
+the provider attempt; that remains at-least-once behavior. Stateless providers
+must declare stateless operation in their provider metadata. Unsupported
+continuation, missing required state, invalid state, or lost state produces an
+explicit durable failure; LASO never silently starts a new provider conversation
+and calls it a continuation. Timeouts follow the existing attempt timeout and
+retry policy and cannot create a successful turn.
 
-The current `ModelProvider::generate` contract is stateless. `mock` will be the
-first deterministic continuation-capable provider for core acceptance tests;
-`local-openai` has no resume contract today. The optional coding-worker adapters
-are distinct from ModelProvider: Codex documents `thread/resume`, Claude Code
-documents CLI `--resume`, and OpenCode reuses a session ID. Their identifiers
-currently travel in worker metadata/results, and OpenCode documents ambiguous
-in-flight recovery as `Unknown`. M5.2 will declare continuation support
-explicitly per adapter and keep handles out of session-facing records. No
-adapter will be advertised as resumable beyond its tested behavior.
+`ModelProvider` advertises one of three modes: unsupported, stateless, or opaque
+continuation. The deterministic mock provider exercises opaque continuation for
+core acceptance tests; `local-openai` declares stateless behavior because its
+current request protocol has no resume state. The Codex, Claude Code, and
+OpenCode integrations are worker adapters rather than ModelProvider
+implementations. Their current worker protocols carry provider-specific session
+identifiers, but the session dispatcher does not yet map those identifiers into
+the opaque continuation record. They therefore are not advertised as
+continuation-capable for durable session turns, and worker nodes fail closed in
+session runs until that mapping is implemented. No adapter will be advertised as
+resumable beyond its tested behavior.
 
 ## Persistence and migration
 

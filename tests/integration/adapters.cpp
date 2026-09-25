@@ -15,6 +15,90 @@
 
 using namespace laso;
 using namespace laso::test;
+
+namespace {
+struct ContinuationObservation {
+  std::string input_tag;
+  std::optional<std::string> received_state;
+};
+
+struct ContinuationFixtureState {
+  std::mutex mutex;
+  std::vector<ContinuationObservation> observed;
+  std::string secret_prefix;
+  bool reject_state = false;
+  bool timeout = false;
+};
+
+class SessionContinuationFixture final : public ModelProvider {
+public:
+  SessionContinuationFixture(std::shared_ptr<ContinuationFixtureState> state,
+                             ContinuationMode mode = ContinuationMode::Opaque)
+      : state_(std::move(state)), mode_(mode) {}
+
+  Task<ModelResponse> generate(const ModelRequest &request, ExecutionContext &context) override {
+    context.check();
+    const auto tag = request.input.value("tag", std::string{"untagged"});
+    const auto previous = request.continuation
+                              ? std::optional<std::string>{request.continuation->state}
+                              : std::nullopt;
+    bool reject = false;
+    bool timeout = false;
+    {
+      std::lock_guard lock(state_->mutex);
+      state_->observed.push_back({tag, previous});
+      reject = state_->reject_state;
+      timeout = state_->timeout;
+    }
+    if (reject && previous)
+      throw Error(ErrorCode::Provider, "Fixture rejected stored continuation");
+    if (timeout)
+      throw Error(ErrorCode::Timeout, "Fixture provider timed out");
+    ModelResponse response{Json{{"tag", tag}, {"text", "fixture-result"}}, request.model,
+                           "continuation-fixture"};
+    if (mode_ == ContinuationMode::Opaque) {
+      const auto next = previous ? *previous + ":" + tag : state_->secret_prefix + ":" + tag;
+      response.continuation = OpaqueProviderContinuation{"continuation-fixture", "1", next};
+    }
+    co_return response;
+  }
+
+  ProviderHealth health() const override {
+    return {true, "deterministic fixture"};
+  }
+
+  ProviderMetadata metadata() const override {
+    ProviderMetadata result;
+    result.name = "continuation-fixture";
+    result.version = "1";
+    result.continuation_mode = mode_;
+    return result;
+  }
+
+private:
+  std::shared_ptr<ContinuationFixtureState> state_;
+  ContinuationMode mode_;
+};
+
+Config continuation_config(const std::filesystem::path &path) {
+  auto options = config(path);
+  options.models["session-model"] =
+      ModelBinding{"continuation-fixture", "deterministic", Json::object()};
+  return options;
+}
+
+std::string continuation_pipeline() {
+  return single("type: agent\n    model: session-model\n    prompt: Continue the test session.");
+}
+
+void register_continuation_fixture(Service &service,
+                                   const std::shared_ptr<ContinuationFixtureState> &state,
+                                   ContinuationMode mode = ContinuationMode::Opaque) {
+  service.provider_registry().add("continuation-fixture",
+                                  std::make_shared<SessionContinuationFixture>(state, mode));
+}
+} // namespace
+
 TEST(Storage, PersistsAcrossConnections) {
   for_each_storage_backend([](const auto &backend) {
     TemporaryDirectory dir;
@@ -58,7 +142,11 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
                                   RecordKind::ExternalEventClaim,
                                   RecordKind::WorkerJob,
                                   RecordKind::WorkerInteraction,
-                                  RecordKind::NodeWork};
+                                  RecordKind::NodeWork,
+                                  RecordKind::AgentSession,
+                                  RecordKind::SessionTurn,
+                                  RecordKind::SessionEvent,
+                                  RecordKind::SessionContinuation};
     std::vector<Record> records;
     for (std::size_t i = 0; i < kinds.size(); ++i)
       records.push_back({kinds[i], "record-" + std::to_string(i), "run-1", {{"index", i}}});
@@ -547,6 +635,340 @@ TEST(Sessions, DifferentSessionsExecuteConcurrently) {
   EXPECT_GE(maximum_active.load(), 2U);
 }
 
+TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
+  TemporaryDirectory dir;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  trace->secret_prefix = "opaque-session-secret-" + uuid();
+  std::string pipeline_id;
+  std::string session_a;
+  std::string session_b;
+  std::string first_a_state;
+  std::string first_b_state;
+  {
+    asio::io_context io;
+    Service service(io, continuation_config(dir.path));
+    register_continuation_fixture(service, trace);
+    pipeline_id = service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+    session_a = service.create_session(pipeline_id).id;
+    session_b = service.create_session(pipeline_id).id;
+    const auto turn_a = service.submit_session_turn(session_a, "A-first", Json{{"tag", "A1"}});
+    const auto turn_b = service.submit_session_turn(session_b, "B-first", Json{{"tag", "B1"}});
+    io.run();
+    EXPECT_EQ(service.get(RecordKind::SessionTurn, turn_a.at("id").get<std::string>()).at("state"),
+              "succeeded");
+    EXPECT_EQ(service.get(RecordKind::SessionTurn, turn_b.at("id").get<std::string>()).at("state"),
+              "succeeded");
+    const auto stored_a = service.list(RecordKind::SessionContinuation, session_a);
+    const auto stored_b = service.list(RecordKind::SessionContinuation, session_b);
+    ASSERT_EQ(stored_a.size(), 1U);
+    ASSERT_EQ(stored_b.size(), 1U);
+    first_a_state = stored_a.front().at("state").get<std::string>();
+    first_b_state = stored_b.front().at("state").get<std::string>();
+    EXPECT_EQ(first_a_state, trace->secret_prefix + ":A1");
+    EXPECT_EQ(first_b_state, trace->secret_prefix + ":B1");
+  }
+
+  {
+    asio::io_context io;
+    Service service(io, continuation_config(dir.path));
+    register_continuation_fixture(service, trace);
+    LocalDevelopmentIdentity identity;
+    Api api(service, identity);
+    const auto turn_a = service.submit_session_turn(session_a, "A-second", Json{{"tag", "A2"}});
+    const auto turn_b = service.submit_session_turn(session_b, "B-second", Json{{"tag", "B2"}});
+    io.run();
+    EXPECT_EQ(service.get(RecordKind::SessionTurn, turn_a.at("id").get<std::string>()).at("state"),
+              "succeeded");
+    EXPECT_EQ(service.get(RecordKind::SessionTurn, turn_b.at("id").get<std::string>()).at("state"),
+              "succeeded");
+
+    std::map<std::string, std::optional<std::string>> received;
+    {
+      std::lock_guard lock(trace->mutex);
+      for (const auto &observation : trace->observed)
+        received[observation.input_tag] = observation.received_state;
+    }
+    ASSERT_TRUE(received.contains("A2"));
+    ASSERT_TRUE(received.contains("B2"));
+    EXPECT_EQ(received.at("A2"), first_a_state);
+    EXPECT_EQ(received.at("B2"), first_b_state);
+
+    Json public_views = Json::array();
+    for (const auto &id : {session_a, session_b}) {
+      public_views.push_back(api.handle("GET", "/api/v1/sessions/" + id, "").body);
+      public_views.push_back(api.handle("GET", "/api/v1/sessions/" + id + "/turns", "").body);
+      public_views.push_back(
+          api.handle("GET", "/api/v1/sessions/" + id + "/events?after=0", "").body);
+      const auto turns = service.list(RecordKind::SessionTurn, id);
+      ASSERT_EQ(turns.size(), 2U);
+      const auto run_id = turns.back().at("run_id").get<std::string>();
+      public_views.push_back(api.handle("GET", "/api/v1/runs/" + run_id, "").body);
+    }
+    EXPECT_EQ(public_views.dump().find(trace->secret_prefix), std::string::npos);
+
+    const auto events = service.session_events(session_a, 0, 100);
+    ASSERT_FALSE(events.empty());
+    HttpServer server(io, api, "127.0.0.1", 0);
+    server.start();
+    io.restart();
+    std::jthread server_thread([&] { io.run(); });
+    asio::io_context peer_io;
+    boost::beast::tcp_stream client(peer_io);
+    client.expires_after(std::chrono::seconds(5));
+    client.connect({asio::ip::make_address("127.0.0.1"), server.port()});
+    const auto request = "GET /api/v1/sessions/" + session_a +
+                         "/events/stream HTTP/1.1\r\nHost: localhost\r\n"
+                         "Accept: text/event-stream\r\nLast-Event-ID: 0\r\n\r\n";
+    asio::write(client, asio::buffer(request));
+    asio::streambuf response_buffer;
+    asio::read_until(client, response_buffer, "\r\n\r\n");
+    {
+      std::istream headers(&response_buffer);
+      std::string line;
+      while (std::getline(headers, line) && line != "\r") {
+      }
+    }
+    std::string streamed_frames;
+    for (std::size_t i = 0; i < events.size(); ++i) {
+      client.expires_after(std::chrono::seconds(5));
+      asio::read_until(client, response_buffer, "\n\n");
+      std::istream frame(&response_buffer);
+      for (std::string line; std::getline(frame, line) && !line.empty() && line != "\r";) {
+        streamed_frames += line;
+        streamed_frames.push_back('\n');
+      }
+      streamed_frames.push_back('\n');
+    }
+    EXPECT_EQ(streamed_frames.find(trace->secret_prefix), std::string::npos);
+    boost::system::error_code ec;
+    client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+    client.socket().close(ec);
+    server.stop();
+    server_thread.join();
+  }
+}
+
+TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto schema = "laso_session_continuation_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  struct SchemaCleanup {
+    std::string dsn;
+    std::string schema;
+    ~SchemaCleanup() {
+      try {
+        pqxx::connection connection(dsn);
+        pqxx::work transaction(connection);
+        transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+        transaction.commit();
+      } catch (...) {
+      }
+    }
+  } cleanup{dsn, schema};
+
+  TemporaryDirectory dir;
+  auto options = continuation_config(dir.path);
+  options.storage_backend = "postgres";
+  options.postgres_dsn = dsn;
+  options.postgres_schema = schema;
+  options.validate();
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  trace->secret_prefix = "postgres-opaque-session-secret-" + uuid();
+  std::string session_a;
+  std::string session_b;
+  std::string continuation_a;
+  std::string continuation_b;
+  {
+    asio::io_context io;
+    Service service(io, options);
+    register_continuation_fixture(service, trace);
+    const auto pipeline =
+        service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+    session_a = service.create_session(pipeline).id;
+    session_b = service.create_session(pipeline).id;
+    const auto first_a = service.submit_session_turn(session_a, "postgres-A1", Json{{"tag", "A1"}});
+    const auto first_b = service.submit_session_turn(session_b, "postgres-B1", Json{{"tag", "B1"}});
+    io.run();
+    EXPECT_EQ(service.get(RecordKind::SessionTurn, first_a.at("id").get<std::string>()).at("state"),
+              "succeeded");
+    EXPECT_EQ(service.get(RecordKind::SessionTurn, first_b.at("id").get<std::string>()).at("state"),
+              "succeeded");
+    const auto stored_a = service.list(RecordKind::SessionContinuation, session_a);
+    const auto stored_b = service.list(RecordKind::SessionContinuation, session_b);
+    ASSERT_EQ(stored_a.size(), 1U);
+    ASSERT_EQ(stored_b.size(), 1U);
+    continuation_a = stored_a.front().at("state").get<std::string>();
+    continuation_b = stored_b.front().at("state").get<std::string>();
+  }
+
+  {
+    asio::io_context io;
+    Service service(io, options);
+    register_continuation_fixture(service, trace);
+    const auto second_a =
+        service.submit_session_turn(session_a, "postgres-A2", Json{{"tag", "A2"}});
+    const auto second_b =
+        service.submit_session_turn(session_b, "postgres-B2", Json{{"tag", "B2"}});
+    io.run();
+    EXPECT_EQ(
+        service.get(RecordKind::SessionTurn, second_a.at("id").get<std::string>()).at("state"),
+        "succeeded");
+    EXPECT_EQ(
+        service.get(RecordKind::SessionTurn, second_b.at("id").get<std::string>()).at("state"),
+        "succeeded");
+    std::map<std::string, std::optional<std::string>> received;
+    {
+      std::lock_guard lock(trace->mutex);
+      for (const auto &observation : trace->observed)
+        received[observation.input_tag] = observation.received_state;
+    }
+    ASSERT_TRUE(received.contains("A2"));
+    ASSERT_TRUE(received.contains("B2"));
+    EXPECT_EQ(received.at("A2"), continuation_a);
+    EXPECT_EQ(received.at("B2"), continuation_b);
+    LocalDevelopmentIdentity identity;
+    Api api(service, identity);
+    for (const auto &id : {session_a, session_b}) {
+      const auto public_session = api.handle("GET", "/api/v1/sessions/" + id, "").body;
+      const auto public_turns = api.handle("GET", "/api/v1/sessions/" + id + "/turns", "").body;
+      const auto public_events =
+          api.handle("GET", "/api/v1/sessions/" + id + "/events?after=0", "").body;
+      EXPECT_EQ(public_session.dump().find(trace->secret_prefix), std::string::npos);
+      EXPECT_EQ(public_turns.dump().find(trace->secret_prefix), std::string::npos);
+      EXPECT_EQ(public_events.dump().find(trace->secret_prefix), std::string::npos);
+    }
+  }
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
+
+TEST(Sessions, InvalidAndTimedOutContinuationDoNotAdvanceState) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  trace->secret_prefix = "opaque-failure-secret-" + uuid();
+  Service service(io, continuation_config(dir.path));
+  register_continuation_fixture(service, trace);
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto pipeline =
+      service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+  const auto session = service.create_session(pipeline);
+  const auto first = service.submit_session_turn(session.id, "first", Json{{"tag", "first"}});
+  io.run();
+  const auto first_state = service.list(RecordKind::SessionContinuation, session.id)
+                               .front()
+                               .at("state")
+                               .get<std::string>();
+
+  trace->reject_state = true;
+  io.restart();
+  const auto invalid = service.submit_session_turn(session.id, "invalid", Json{{"tag", "invalid"}});
+  io.run();
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, invalid.at("id").get<std::string>()).at("state"),
+            "failed");
+  EXPECT_EQ(service.list(RecordKind::SessionContinuation, session.id).front().at("state"),
+            first_state);
+
+  trace->reject_state = false;
+  trace->timeout = true;
+  io.restart();
+  const auto timed_out =
+      service.submit_session_turn(session.id, "timeout", Json{{"tag", "timeout"}});
+  io.run();
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, timed_out.at("id").get<std::string>()).at("state"),
+            "failed");
+  EXPECT_EQ(service.list(RecordKind::SessionContinuation, session.id).front().at("state"),
+            first_state);
+
+  const auto turns = api.handle("GET", "/api/v1/sessions/" + session.id + "/turns", "").body;
+  const auto events =
+      api.handle("GET", "/api/v1/sessions/" + session.id + "/events?after=0", "").body;
+  EXPECT_EQ(turns.dump().find(trace->secret_prefix), std::string::npos);
+  EXPECT_EQ(events.dump().find(trace->secret_prefix), std::string::npos);
+  EXPECT_EQ(api.handle("GET", "/api/v1/sessions/" + session.id + "/turns", "").status, 200U);
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, first.at("id").get<std::string>()).at("state"),
+            "succeeded");
+}
+
+TEST(Sessions, UnsupportedContinuationProviderFailsClosed) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  Service service(io, continuation_config(dir.path));
+  register_continuation_fixture(service, trace, ContinuationMode::Unsupported);
+  const auto pipeline =
+      service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+  const auto session = service.create_session(pipeline);
+  const auto accepted =
+      service.submit_session_turn(session.id, "unsupported", Json{{"tag", "unsupported"}});
+  io.run();
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, accepted.at("id").get<std::string>()).at("state"),
+            "failed");
+  EXPECT_TRUE(trace->observed.empty());
+  EXPECT_TRUE(service.list(RecordKind::SessionContinuation, session.id).empty());
+  EXPECT_EQ(service.providers().at(0).at("continuation_mode"), "unsupported");
+}
+
+TEST(Sessions, OpaqueProviderInParallelBranchFailsClosed) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  Service service(io, continuation_config(dir.path));
+  register_continuation_fixture(service, trace);
+  const auto yaml = R"(laso: "1"
+name: session-parallel-provider
+version: 1
+nodes:
+  fork: {type: parallel, join: join}
+  branch_a: {type: agent, model: session-model, prompt: Continue safely.}
+  branch_b: {type: function, function: identity}
+  join: {type: join}
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: branch_a}
+  - {from: fork, to: branch_b}
+  - {from: branch_a, to: join}
+  - {from: branch_b, to: join}
+  - {from: join, to: output}
+)";
+  const auto pipeline = service.register_pipeline(yaml).at("id").get<std::string>();
+  const auto session = service.create_session(pipeline);
+  const auto accepted =
+      service.submit_session_turn(session.id, "parallel-provider", Json{{"value", "test"}});
+  io.run();
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, accepted.at("id").get<std::string>()).at("state"),
+            "failed");
+  EXPECT_TRUE(trace->observed.empty());
+  EXPECT_TRUE(service.list(RecordKind::SessionContinuation, session.id).empty());
+}
+
+TEST(Sessions, DeclaredStatelessProviderDoesNotInventContinuation) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  Service service(io, continuation_config(dir.path));
+  register_continuation_fixture(service, trace, ContinuationMode::Stateless);
+  const auto pipeline =
+      service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+  const auto session = service.create_session(pipeline);
+  const auto first = service.submit_session_turn(session.id, "stateless-1", Json{{"tag", "one"}});
+  const auto second = service.submit_session_turn(session.id, "stateless-2", Json{{"tag", "two"}});
+  io.run();
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, first.at("id").get<std::string>()).at("state"),
+            "succeeded");
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, second.at("id").get<std::string>()).at("state"),
+            "succeeded");
+  EXPECT_TRUE(service.list(RecordKind::SessionContinuation, session.id).empty());
+  ASSERT_EQ(trace->observed.size(), 2U);
+  EXPECT_FALSE(trace->observed[0].received_state);
+  EXPECT_FALSE(trace->observed[1].received_state);
+}
+
 TEST(Sessions, QueuedSessionsDispatchWhenRunCapacityFrees) {
   TemporaryDirectory dir;
   asio::io_context io;
@@ -681,15 +1103,19 @@ TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
     EXPECT_EQ(accepted + conflicts, 1U);
     EXPECT_EQ(closed, 1U);
     const auto events = storage->session_events(session.id, 0, 10);
-    ASSERT_EQ(events.size(), accepted ? 3U : 2U);
+    ASSERT_EQ(events.size(), accepted ? 4U : 2U);
     if (accepted) {
       EXPECT_EQ(events[0].at("type"), "input.accepted");
       EXPECT_EQ(events[0].at("sequence"), 1U);
       EXPECT_EQ(events[1].at("type"), "session.closing");
       EXPECT_EQ(events[1].at("sequence"), 2U);
-      EXPECT_EQ(events[2].at("type"), "session.closed");
+      EXPECT_EQ(events[2].at("type"), "turn.execution.cancelled");
       EXPECT_EQ(events[2].at("sequence"), 3U);
+      EXPECT_EQ(events[3].at("type"), "session.closed");
+      EXPECT_EQ(events[3].at("sequence"), 4U);
       EXPECT_EQ(storage->list(RecordKind::SessionTurn, session.id).size(), 1U);
+      EXPECT_EQ(storage->list(RecordKind::SessionTurn, session.id).front().at("state"),
+                "cancelled");
     } else {
       EXPECT_EQ(events[0].at("type"), "session.closing");
       EXPECT_EQ(events[0].at("sequence"), 1U);
