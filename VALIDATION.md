@@ -776,5 +776,4 @@ normal CTest suite listed 251 tests: 245 passed, 6 opt-in S3/Codex fixtures were
 skipped, and none failed. The separate physical `distributed_m3_acceptance` test
 was not repeated for M5.1 because M5.1's cross-instance requirement is covered
 by independent services sharing PostgreSQL. `clang-format-18 --dry-run
---Werror` and `git diff --check` passed. Hosted CI for the final PR revision is
-required before merge.
+--Werror` and `git diff --check` passed. Hosted CI on PR #13 head `0fef776` passed all 7 checks: GCC, Clang, Release, PostgreSQL, S3, Debian, and ASan/UBSan.

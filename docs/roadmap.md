@@ -46,7 +46,7 @@ session authorization policy.
 
 ### M5.1 — durable input journal and replay
 
-Status: acceptance validated; PR #13 merge pending.
+Status: closed. M5.1 acceptance and hosted CI passed on PR #13; the merge records this closeout.
 
 Provide durable session creation, bounded idempotent input acceptance, ordered
 per-session events, close semantics, event replay, and resumable SSE. Acceptance
