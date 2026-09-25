@@ -46,7 +46,7 @@ session authorization policy.
 
 ### M5.1 — durable input journal and replay
 
-Status: local validation complete; PR #13 review pending.
+Status: acceptance validated; PR #13 merge pending.
 
 Provide durable session creation, bounded idempotent input acceptance, ordered
 per-session events, close semantics, event replay, and resumable SSE. Acceptance

@@ -19,8 +19,16 @@
   and AWS SDK credential-chain integration. Remote S3 garbage collection is
   intentionally unsupported. Physical owner/worker acceptance, fault recovery,
   stale-result fencing, and trusted/untrusted TLS validation have passed using
-  disposable infrastructure. Hosted CI remains before M4.1 closure; see
+  disposable infrastructure. M4.1 merged after physical acceptance and green hosted CI; see
   `VALIDATION.md` for the sanitized evidence.
+
+- Added durable agent session identity, idempotent ordered input acceptance,
+  close semantics, event replay, and resumable SSE for SQLite and PostgreSQL.
+  PostgreSQL supports cross-instance event observation; SQLite remains
+  single-instance. Inputs remain journaled rather than executed until M5.2.
+  Acceptance covers concurrent ordering, idempotent conflict behavior, service
+  restart, close races, cursor resume, and final close-event delivery; see
+  `VALIDATION.md` for the evidence.
 
 - Preserve expired PostgreSQL lease rows so fencing tokens remain monotonic, and
   mark a superseded running node attempt failed in the same fenced transaction

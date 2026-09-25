@@ -25,7 +25,7 @@ per-session sequence numbers and are accepted as `Last-Event-ID` on reconnect.
 The stream polls the durable database journal; it is a delivery mechanism only.
 A client can always replay after its last observed sequence. PostgreSQL polling
 also makes events written through another LASO instance visible without sticky
-sessions or a process-local notification bus.
+sessions or a process-local notification bus. A closed session's `session.closed` event is the final stream event; the stream then ends. Reconnecting after the final event returns an empty stream that ends immediately. Open streams have a 30-minute maximum lifetime and end on client disconnect or server shutdown.
 Each LASO HTTP process accepts at most 32 concurrent session streams; excess
 connections receive HTTP 429. The existing HTTP server also has a total
 connection limit. External applications can fan out to their clients above
