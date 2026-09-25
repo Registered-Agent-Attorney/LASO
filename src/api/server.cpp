@@ -46,7 +46,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
       if (event_stream) {
         const auto marker = std::string("/events/stream");
         const auto marker_pos = target.find(marker);
-        const auto base = target.substr(0, marker_pos) + "/events";
+        const auto session_path = target.substr(0, marker_pos);
+        const auto base = session_path + "/events";
         const auto check = co_await asio::co_spawn(
             api_strand,
             [this, target, authorization]() -> Task<ApiResponse> {
@@ -112,6 +113,7 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
           if (page.status != 200)
             break;
           bool sent = false;
+          bool closed_event_sent = false;
           if (page.body.is_array())
             for (const auto &event : page.body) {
               const auto sequence = event.value("sequence", std::uint64_t{0});
@@ -123,7 +125,34 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
                                          asio::use_awaitable);
               cursor = sequence;
               sent = true;
+              closed_event_sent =
+                  closed_event_sent || event.value("type", std::string{}) == "session.closed";
             }
+          if (closed_event_sent)
+            break;
+          if (!sent) {
+            auto session = co_await asio::co_spawn(
+                api_strand,
+                [this, session_path, authorization]() -> Task<ApiResponse> {
+                  co_return api.handle("GET", session_path, "", authorization);
+                },
+                asio::use_awaitable);
+            if (session.status != 200)
+              break;
+            if (session.body.value("state", std::string{}) == "closed") {
+              auto final_events = co_await asio::co_spawn(
+                  api_strand,
+                  [this, poll_target, authorization]() -> Task<ApiResponse> {
+                    co_return api.handle("GET", poll_target, "", authorization);
+                  },
+                  asio::use_awaitable);
+              if (final_events.status != 200)
+                break;
+              if (final_events.body.is_array() && !final_events.body.empty())
+                continue;
+              break;
+            }
+          }
           const auto now = std::chrono::steady_clock::now();
           if (!sent && now - last_keepalive >= std::chrono::seconds(15)) {
             const std::string heartbeat = ": keepalive\n\n";
