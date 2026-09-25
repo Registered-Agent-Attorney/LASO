@@ -375,96 +375,102 @@ TEST(Storage, SessionTurnsAreOrderedIdempotentReplayableAndDurable) {
   });
 }
 TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
-  TemporaryDirectory dir;
-  SQLiteStorage storage(dir.path / "session-dispatch.db");
-  AgentSession session;
-  session.pipeline_id = "example@1";
-  storage.commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+  for_each_storage_backend([](const auto &backend) {
+    SCOPED_TRACE(backend.name);
+    TemporaryDirectory dir;
+    auto storage = backend.open(dir.path / "session-dispatch.db");
+    AgentSession session;
+    session.pipeline_id = "example@1";
+    storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
 
-  const auto first_id = "turn-first";
-  const auto second_id = "turn-second";
-  for (const auto &[id, key] :
-       {std::pair{first_id, "key-first"}, std::pair{second_id, "key-second"}}) {
-    Event accepted;
-    accepted.type = "input.accepted";
-    ASSERT_TRUE(storage.submit_session_turn(session.id, id,
-                                            Json{{"idempotency_key", key},
-                                                 {"input", {{"text", id}}},
-                                                 {"pipeline_id", "example@1"},
-                                                 {"state", "queued"}},
-                                            Json(accepted)));
-  }
+    const auto first_id = "turn-first";
+    const auto second_id = "turn-second";
+    for (const auto &[id, key] :
+         {std::pair{first_id, "key-first"}, std::pair{second_id, "key-second"}}) {
+      Event accepted;
+      accepted.type = "input.accepted";
+      ASSERT_TRUE(storage->submit_session_turn(session.id, id,
+                                               Json{{"idempotency_key", key},
+                                                    {"input", {{"text", id}}},
+                                                    {"pipeline_id", "example@1"},
+                                                    {"state", "queued"}},
+                                               Json(accepted)));
+    }
 
-  Event claimed_event;
-  const auto claimed = storage.claim_next_session_turn(session.id, "instance-a", 0, timestamp(),
-                                                       Json(claimed_event));
-  ASSERT_TRUE(claimed);
-  EXPECT_EQ(claimed->at("id"), first_id);
-  EXPECT_EQ(claimed->at("state"), "claimed");
-  const auto fence = claimed->at("dispatch_fencing_token").get<std::uint64_t>();
+    Event claimed_event;
+    const auto claimed = storage->claim_next_session_turn(session.id, "instance-a", 0, timestamp(),
+                                                          Json(claimed_event));
+    ASSERT_TRUE(claimed);
+    EXPECT_EQ(claimed->at("id"), first_id);
+    EXPECT_EQ(claimed->at("state"), "claimed");
+    const auto fence = claimed->at("dispatch_fencing_token").template get<std::uint64_t>();
 
-  EXPECT_EQ(storage.list(RecordKind::SessionTurn, session.id).size(), 2U);
-  EXPECT_EQ(storage.get(RecordKind::SessionTurn, first_id).at("id"), first_id);
-  std::optional<Json> repeated_claim;
-  EXPECT_NO_THROW(repeated_claim = storage.claim_next_session_turn(session.id, "instance-a", 0,
-                                                                   timestamp(), Json::object()));
-  ASSERT_TRUE(repeated_claim);
-  EXPECT_EQ(repeated_claim->at("id"), first_id);
-  EXPECT_EQ(storage.session_events(session.id, 0, 20).size(), 3U);
+    EXPECT_EQ(storage->list(RecordKind::SessionTurn, session.id).size(), 2U);
+    EXPECT_EQ(storage->get(RecordKind::SessionTurn, first_id).at("id"), first_id);
+    std::optional<Json> repeated_claim;
+    EXPECT_NO_THROW(repeated_claim = storage->claim_next_session_turn(session.id, "instance-a", 0,
+                                                                      timestamp(), Json::object()));
+    ASSERT_TRUE(repeated_claim);
+    EXPECT_EQ(repeated_claim->at("id"), first_id);
+    EXPECT_EQ(storage->session_events(session.id, 0, 20).size(), 3U);
 
-  laso::Run run;
-  run.id = "run-for-first-turn";
-  run.pipeline_id = "example";
-  run.session_id = session.id;
-  run.session_turn_id = first_id;
-  Event run_event;
-  run_event.run_id = run.id;
-  run_event.type = "run.created";
-  Event session_event;
+    laso::Run run;
+    run.id = "run-for-first-turn";
+    run.pipeline_id = "example";
+    run.session_id = session.id;
+    run.session_turn_id = first_id;
+    Event run_event;
+    run_event.run_id = run.id;
+    run_event.type = "run.created";
+    Event session_event;
 
-  EXPECT_THROW(storage.bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
-                                             "instance-a", fence + 1, Json(session_event)),
-               Error);
-  EXPECT_THROW(storage.get(RecordKind::Run, run.id), Error);
+    EXPECT_THROW(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
+                                                "instance-a", fence + 1, Json(session_event)),
+                 Error);
+    EXPECT_THROW(storage->get(RecordKind::Run, run.id), Error);
 
-  const auto recovered =
-      storage.claim_next_session_turn(session.id, "instance-b", 0, timestamp(), Json::object());
-  ASSERT_TRUE(recovered);
-  EXPECT_EQ(recovered->at("id"), first_id);
-  const auto recovered_fence = recovered->at("dispatch_fencing_token").get<std::uint64_t>();
-  EXPECT_GT(recovered_fence, fence);
-  EXPECT_THROW(storage.bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
-                                             "instance-a", fence, Json::object()),
-               Error);
-  EXPECT_TRUE(storage.bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
-                                            "instance-b", recovered_fence, Json(session_event)));
-  EXPECT_FALSE(storage.bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
-                                             "instance-a", fence, Json::object()));
+    const auto recovered =
+        storage->claim_next_session_turn(session.id, "instance-b", 0, timestamp(), Json::object());
+    ASSERT_TRUE(recovered);
+    EXPECT_EQ(recovered->at("id"), first_id);
+    const auto recovered_fence =
+        recovered->at("dispatch_fencing_token").template get<std::uint64_t>();
+    EXPECT_GT(recovered_fence, fence);
+    const auto binding_fence = backend.name == "postgres" ? 0 : recovered_fence;
+    EXPECT_THROW(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
+                                                "instance-a", fence, Json::object()),
+                 Error);
+    EXPECT_TRUE(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
+                                               "instance-b", binding_fence, Json(session_event)));
+    EXPECT_FALSE(storage->bind_session_turn_run(session.id, first_id, Json(run), Json(run_event),
+                                                "instance-a", fence, Json::object()));
 
-  const auto stored_turn = storage.get(RecordKind::SessionTurn, first_id);
-  EXPECT_EQ(stored_turn.at("state"), "running");
-  EXPECT_EQ(stored_turn.at("run_id"), run.id);
-  EXPECT_FALSE(stored_turn.contains("dispatch_owner"));
-  EXPECT_FALSE(stored_turn.contains("dispatch_fencing_token"));
-  EXPECT_EQ(storage.get(RecordKind::Run, run.id).at("session_turn_id"), first_id);
+    const auto stored_turn = storage->get(RecordKind::SessionTurn, first_id);
+    EXPECT_EQ(stored_turn.at("state"), "running");
+    EXPECT_EQ(stored_turn.at("run_id"), run.id);
+    EXPECT_FALSE(stored_turn.contains("dispatch_owner"));
+    EXPECT_FALSE(stored_turn.contains("dispatch_fencing_token"));
+    EXPECT_EQ(storage->get(RecordKind::Run, run.id).at("session_turn_id"), first_id);
 
-  const auto stored_session = storage.get(RecordKind::AgentSession, session.id).get<AgentSession>();
-  EXPECT_EQ(stored_session.active_turn_id, first_id);
-  EXPECT_EQ(stored_session.active_run_id, run.id);
+    const auto stored_session =
+        storage->get(RecordKind::AgentSession, session.id).template get<AgentSession>();
+    EXPECT_EQ(stored_session.active_turn_id, first_id);
+    EXPECT_EQ(stored_session.active_run_id, run.id);
 
-  std::optional<Json> next_claim;
-  EXPECT_NO_THROW(next_claim = storage.claim_next_session_turn(session.id, "instance-a", 0,
-                                                               timestamp(), Json::object()));
-  EXPECT_FALSE(next_claim);
-  const auto events = storage.session_events(session.id, 0, 20);
-  ASSERT_EQ(events.size(), 5U);
-  EXPECT_EQ(events[0].at("type"), "input.accepted");
-  EXPECT_EQ(events[1].at("type"), "input.accepted");
-  EXPECT_EQ(events[2].at("type"), "turn.execution.claimed");
-  EXPECT_EQ(events[3].at("type"), "turn.execution.claimed");
-  EXPECT_EQ(events[4].at("type"), "turn.execution.started");
-  for (std::size_t i = 0; i < events.size(); ++i)
-    EXPECT_EQ(events[i].at("sequence").get<std::uint64_t>(), i + 1);
+    std::optional<Json> next_claim;
+    EXPECT_NO_THROW(next_claim = storage->claim_next_session_turn(session.id, "instance-a", 0,
+                                                                  timestamp(), Json::object()));
+    EXPECT_FALSE(next_claim);
+    const auto events = storage->session_events(session.id, 0, 20);
+    ASSERT_EQ(events.size(), 5U);
+    EXPECT_EQ(events[0].at("type"), "input.accepted");
+    EXPECT_EQ(events[1].at("type"), "input.accepted");
+    EXPECT_EQ(events[2].at("type"), "turn.execution.claimed");
+    EXPECT_EQ(events[3].at("type"), "turn.execution.claimed");
+    EXPECT_EQ(events[4].at("type"), "turn.execution.started");
+    for (std::size_t i = 0; i < events.size(); ++i)
+      EXPECT_EQ(events[i].at("sequence").template get<std::uint64_t>(), i + 1);
+  });
 }
 TEST(Sessions, AcceptedTurnsExecuteDurablyInAcceptanceOrder) {
   TemporaryDirectory dir;
