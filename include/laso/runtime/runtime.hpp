@@ -38,7 +38,9 @@ public:
                   std::string actor = "local", std::string parent_id = "",
                   std::string parent_node_id = "", unsigned subpipeline_depth = 0,
                   std::string parent_message_id = "", Json origin = Json::object(),
-                  Json message_metadata = Json::object());
+                  Json message_metadata = Json::object(), std::string session_id = {},
+                  std::string session_turn_id = {}, std::string session_owner = {},
+                  std::uint64_t session_fencing_token = 0);
   void resume(const std::string &id);
   void cancel(const std::string &id);
   void decide(const std::string &approval_id, bool approve, const std::string &actor,
@@ -46,6 +48,7 @@ public:
   void shutdown();
   bool idle() const;
   void start_distributed();
+  void dispatch_session(const std::string &session_id);
 
 private:
   struct ParallelState;
@@ -70,11 +73,14 @@ private:
   std::map<std::string, ActiveNode> active_nodes_;
   bool stopping_ = false;
   bool distributed_started_ = false;
-  std::shared_ptr<asio::steady_timer> claim_timer_, lease_timer_;
+  std::shared_ptr<asio::steady_timer> claim_timer_, lease_timer_, session_timer_;
   Task<void> claim_loop();
   Task<void> lease_loop();
   Task<void> supervise_claim_loop();
   Task<void> supervise_lease_loop();
+  Task<void> session_loop();
+  Task<void> supervise_session_loop();
+  void dispatch_sessions();
   Task<void> execute_distributed_work(NodeWork work, LeaseRecord work_lease,
                                       std::optional<LeaseRecord> global_slot,
                                       std::optional<LeaseRecord> run_slot, std::stop_token stop);

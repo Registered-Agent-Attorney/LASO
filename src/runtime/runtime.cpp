@@ -36,20 +36,21 @@ Runtime::Runtime(asio::io_context &io, Config config, RuntimeDependencies depend
     : io_(io), config_(std::move(config)), deps_(dependencies), nodes_(config_.max_nodes),
       models_(config_.max_models), tools_(config_.max_tools),
       claim_timer_(std::make_shared<asio::steady_timer>(io)),
-      lease_timer_(std::make_shared<asio::steady_timer>(io)) {}
+      lease_timer_(std::make_shared<asio::steady_timer>(io)),
+      session_timer_(std::make_shared<asio::steady_timer>(io)) {}
 Runtime::~Runtime() = default; // Owner must drain the executor before destruction.
 void Runtime::start_distributed() {
-  if (!deps_.coordination || distributed_started_)
+  if (distributed_started_)
     return;
-  deps_.coordination->register_instance(version, capability_advertisement(deps_.workers).dump());
   distributed_started_ = true;
-  // Database connectivity is allowed to fail transiently.  These loops own
-  // claims and leases, so an unexpected exception must not escape a detached
-  // coroutine and terminate the LASO process.  Restarting the loop lets the
-  // normal database-authoritative lease checks fence stale work after the
-  // connection returns.
+  if (!deps_.coordination) {
+    dispatch_sessions();
+    return;
+  }
+  deps_.coordination->register_instance(version, capability_advertisement(deps_.workers).dump());
   asio::co_spawn(io_, supervise_claim_loop(), asio::detached);
   asio::co_spawn(io_, supervise_lease_loop(), asio::detached);
+  asio::co_spawn(io_, supervise_session_loop(), asio::detached);
 }
 Task<void> Runtime::supervise_claim_loop() {
   for (;;) {
@@ -93,6 +94,142 @@ Task<void> Runtime::supervise_lease_loop() {
       co_return;
   }
 }
+Task<void> Runtime::supervise_session_loop() {
+  for (;;) {
+    try {
+      co_await session_loop();
+      co_return;
+    } catch (...) {
+      log_diagnostic("runtime.session_loop_failed");
+    }
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        co_return;
+    }
+    asio::steady_timer retry(io_);
+    retry.expires_after(Milliseconds{100});
+    boost::system::error_code error;
+    co_await retry.async_wait(asio::redirect_error(asio::use_awaitable, error));
+    if (error)
+      co_return;
+  }
+}
+
+Task<void> Runtime::session_loop() {
+  for (;;) {
+    session_timer_->expires_after(Milliseconds{100});
+    boost::system::error_code error;
+    co_await session_timer_->async_wait(asio::redirect_error(asio::use_awaitable, error));
+    if (error)
+      co_return;
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        co_return;
+    }
+    dispatch_sessions();
+  }
+}
+
+void Runtime::dispatch_sessions() {
+  for (const auto &record : list_all(deps_.storage, RecordKind::AgentSession, "")) {
+    try {
+      dispatch_session(record.at("id").get<std::string>());
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::Conflict && error.code != ErrorCode::Capacity)
+        log_diagnostic("runtime.session_dispatch_failed");
+    } catch (...) {
+      log_diagnostic("runtime.session_dispatch_failed");
+    }
+  }
+}
+
+void Runtime::dispatch_session(const std::string &session_id) {
+  if (session_id.empty())
+    return;
+  {
+    std::lock_guard lock(mutex_);
+    if (stopping_)
+      return;
+  }
+  AgentSession session;
+  try {
+    session = deps_.storage.get(RecordKind::AgentSession, session_id).get<AgentSession>();
+  } catch (const Error &error) {
+    if (error.code == ErrorCode::NotFound)
+      return;
+    throw;
+  }
+  if (session.state == "closing" && !session.active_run_id.empty()) {
+    try {
+      cancel(session.active_run_id);
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::Conflict && error.code != ErrorCode::NotFound)
+        throw;
+    }
+    return;
+  }
+  if (!session.active_run_id.empty()) {
+    if (!deps_.coordination) {
+      const auto active = deps_.storage.get(RecordKind::Run, session.active_run_id).get<Run>();
+      if (active.state == RunState::Queued || active.state == RunState::Paused) {
+        try {
+          resume(active.id);
+        } catch (const Error &error) {
+          if (error.code != ErrorCode::Conflict && error.code != ErrorCode::Capacity)
+            throw;
+        }
+      }
+    }
+    return;
+  }
+  if (session.state != "open")
+    return;
+
+  std::optional<LeaseRecord> lease;
+  std::string owner = deps_.instance_id;
+  std::uint64_t fence = 0;
+  std::string expires_at = timestamp();
+  if (deps_.coordination) {
+    lease = deps_.coordination->acquire("session:" + session_id, config_.coordination_lease_ttl_ms);
+    if (!lease)
+      return;
+    owner = lease->owner_instance;
+    fence = lease->fencing_token;
+    expires_at = lease->expires_at;
+  }
+  auto release = [&] {
+    if (lease && deps_.coordination) {
+      try {
+        deps_.coordination->release(*lease);
+      } catch (const Error &) {
+      }
+      lease.reset();
+    }
+  };
+  try {
+    Event claim_event;
+    const auto turn = deps_.storage.claim_next_session_turn(session_id, owner, fence, expires_at,
+                                                            Json(claim_event));
+    if (!turn) {
+      release();
+      return;
+    }
+    const auto turn_fence = turn->value("dispatch_fencing_token", std::uint64_t{0});
+    if (deps_.coordination && turn_fence != fence)
+      throw Error(ErrorCode::Conflict, "Session claim fencing token changed");
+    const auto pipeline_id = turn->value("pipeline_id", session.pipeline_id);
+    const auto pipeline = deps_.resolve_pipeline(pipeline_id);
+    run(pipeline, turn->at("input"), "session", "", "", 0, "", Json::object(), Json::object(),
+        session_id, turn->at("id").get<std::string>(), owner, fence);
+  } catch (...) {
+    release();
+    throw;
+  }
+  release();
+}
+
 void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> records) {
   std::lock_guard lock(mutex_);
   try {
@@ -136,10 +273,15 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
   records.push_back({RecordKind::Run, r.id, r.id, Json(r)});
   records.push_back({RecordKind::Event, event.id, r.id, Json(event)});
   try {
-    if (deps_.coordination && !r.owner_instance_id.empty())
+    if (!r.session_id.empty() && terminal(r.state)) {
+      Event session_event;
+      deps_.storage.commit_session_run(records, r.owner_instance_id, r.fencing_token,
+                                       Json(session_event));
+    } else if (deps_.coordination && !r.owner_instance_id.empty()) {
       deps_.storage.commit_owned(records, "run:" + r.id, r.owner_instance_id, r.fencing_token);
-    else
+    } else {
       deps_.storage.commit(records);
+    }
   } catch (const Error &error) {
     if (deps_.coordination && error.code == ErrorCode::Conflict) {
       auto active = active_.find(r.id);
@@ -433,7 +575,8 @@ void Runtime::transition(Run &r, RunState state, const std::string &event,
 std::string Runtime::run(const PipelineDefinition &p, Json input, std::string actor,
                          std::string parent_id, std::string parent_node_id,
                          unsigned subpipeline_depth, std::string parent_message_id, Json origin,
-                         Json message_metadata) {
+                         Json message_metadata, std::string session_id, std::string session_turn_id,
+                         std::string session_owner, std::uint64_t session_fencing_token) {
   std::lock_guard lock(mutex_);
   if (stopping_ || (!deps_.coordination && active_.size() >= config_.max_runs))
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
@@ -467,6 +610,8 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
   r.pipeline_version = checked.version;
   r.definition = checked.source;
   r.actor = std::move(actor);
+  r.session_id = std::move(session_id);
+  r.session_turn_id = std::move(session_turn_id);
   r.parent_id = std::move(parent_id);
   r.parent_node_id = std::move(parent_node_id);
   r.parent_message_id = std::move(parent_message_id);
@@ -488,7 +633,28 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
   if (!r.parent_message_id.empty())
     r.message.provenance.push_back(
         {r.parent_node_id, "", "", "", "", r.parent_message_id, "", timestamp(), ""});
-  checkpoint(r, "run.created");
+  if (r.session_id.empty()) {
+    checkpoint(r, "run.created");
+  } else {
+    Event event;
+    event.run_id = r.id;
+    event.pipeline_id = r.pipeline_id;
+    event.node_id = "input";
+    event.type = "run.created";
+    event.metadata["state"] = r.state;
+    event.metadata["pipeline_version"] = r.pipeline_version;
+    event.metadata["initiation_type"] = r.initiation_type;
+    event.causation_id = r.id;
+    event.root_event_id = r.root_event_id;
+    event.trigger_depth = r.trigger_depth;
+    Event session_event;
+    if (!deps_.storage.bind_session_turn_run(r.session_id, r.session_turn_id, Json(r), Json(event),
+                                             session_owner, session_fencing_token,
+                                             Json(session_event)))
+      throw Error(ErrorCode::Conflict, "Session run is already bound");
+    deps_.events.publish(event);
+    log_event(event);
+  }
   auto id = r.id;
   if (!deps_.coordination)
     schedule(std::move(r));
@@ -508,7 +674,7 @@ void Runtime::schedule(Run r, std::optional<LeaseRecord> lease) {
   (void)inserted;
   auto stop = it->second.stop.get_token();
   asio::co_spawn(io_, execute(std::move(r), stop), [this, id](const std::exception_ptr &error) {
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     bool ownership_lost = false;
     std::optional<LeaseRecord> lease;
     if (const auto active = active_.find(id); active != active_.end()) {
@@ -531,6 +697,10 @@ void Runtime::schedule(Run r, std::optional<LeaseRecord> lease) {
       }
       if (lease && deps_.coordination)
         deps_.coordination->release(*lease);
+      if (!stopping_ && terminal(ended.state) && !ended.session_id.empty()) {
+        lock.unlock();
+        dispatch_sessions();
+      }
     } catch (...) {
       log_diagnostic("runtime.persistence_or_resume_failure", {{"run_id", id}});
     }
@@ -1026,12 +1196,36 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
     }
     if (const auto found = active_.find(id); found != active_.end()) {
       found->second.stop.request_stop();
+      if (r.state == RunState::WaitingApproval || r.state == RunState::Paused ||
+          r.state == RunState::Queued)
+        transition(r, RunState::Cancelled, "run.cancelled");
     } else if (r.state == RunState::WaitingApproval || r.state == RunState::Paused ||
                r.state == RunState::Queued) {
       r.cancellation_requested = true;
-      r.state = RunState::Cancelled;
-      r.updated_at = timestamp();
-      deps_.storage.commit({{RecordKind::Run, r.id, r.id, Json(r)}});
+      if (r.session_id.empty()) {
+        r.state = RunState::Cancelled;
+        r.updated_at = timestamp();
+        deps_.storage.commit({{RecordKind::Run, r.id, r.id, Json(r)}});
+      } else {
+        auto lease = deps_.coordination->acquire("run:" + id, config_.coordination_lease_ttl_ms);
+        if (!lease)
+          return;
+        r.owner_instance_id = lease->owner_instance;
+        r.fencing_token = lease->fencing_token;
+        try {
+          transition(r, RunState::Cancelled, "run.cancelled");
+        } catch (...) {
+          try {
+            deps_.coordination->release(*lease);
+          } catch (const Error &) {
+          }
+          throw;
+        }
+        try {
+          deps_.coordination->release(*lease);
+        } catch (const Error &) {
+        }
+      }
     }
     return;
   }
@@ -1072,7 +1266,8 @@ void Runtime::cancel_locked(const std::string &id, std::set<std::string> &visite
   auto found = active_.find(id);
   if (found != active_.end()) {
     found->second.stop.request_stop();
-    if (r.state == RunState::WaitingApproval || r.state == RunState::Paused)
+    if (r.state == RunState::WaitingApproval || r.state == RunState::Paused ||
+        r.state == RunState::Queued)
       transition(r, RunState::Cancelled, "run.cancelled");
   } else
     transition(r, RunState::Cancelled, "run.cancelled");
@@ -1082,6 +1277,7 @@ void Runtime::shutdown() {
   stopping_ = true;
   claim_timer_->cancel();
   lease_timer_->cancel();
+  session_timer_->cancel();
   if (deps_.coordination && distributed_started_) {
     try {
       deps_.coordination->set_instance_state("DRAINING");

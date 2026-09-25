@@ -548,6 +548,14 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
   try {
     {
       std::lock_guard lock(mutex_);
+      const auto current = deps_.storage.get(RecordKind::Run, r.id).get<Run>();
+      if (terminal(current.state))
+        co_return;
+      r = current;
+      if (r.cancellation_requested) {
+        transition(r, RunState::Cancelled, "run.cancelled");
+        co_return;
+      }
       transition(r, RunState::Starting, "run.starting");
       transition(r, RunState::Running, "run.started");
       reconcile_distributed_parallel(r, pipeline);

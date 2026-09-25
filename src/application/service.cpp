@@ -371,6 +371,18 @@ void Service::close_session(const std::string &id) {
   event.run_id = id;
   event.type = "session.closed";
   storage_->close_agent_session(id, Json(event));
+  const auto session = agent_session(id);
+  if (session.state == "closing" && !session.active_run_id.empty()) {
+    try {
+      runtime_.cancel(session.active_run_id);
+    } catch (const Error &error) {
+      if (error.code != ErrorCode::Conflict && error.code != ErrorCode::NotFound)
+        throw;
+      const auto current = agent_session(id);
+      if (current.state == "closing" && current.active_run_id == session.active_run_id)
+        throw;
+    }
+  }
 }
 Json Service::submit_session_turn(const std::string &id, const std::string &idempotency_key,
                                   const Json &input) {
@@ -393,7 +405,13 @@ Json Service::submit_session_turn(const std::string &id, const std::string &idem
   event.run_id = id;
   event.type = "input.accepted";
   storage_->submit_session_turn(id, turn_id.str(), turn, Json(event));
-  return storage_->get(RecordKind::SessionTurn, turn_id.str());
+  const auto accepted = storage_->get(RecordKind::SessionTurn, turn_id.str());
+  try {
+    runtime_.dispatch_session(id);
+  } catch (...) {
+    log_diagnostic("service.session_dispatch_deferred");
+  }
+  return accepted;
 }
 std::vector<Json> Service::session_events(const std::string &id, std::uint64_t after,
                                           std::size_t limit) const {
