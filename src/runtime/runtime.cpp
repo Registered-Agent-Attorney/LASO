@@ -127,7 +127,10 @@ Task<void> Runtime::supervise_session_loop() {
 
 Task<void> Runtime::session_loop() {
   for (;;) {
-    session_timer_->expires_after(Milliseconds{100});
+    // Submissions and terminal runs dispatch immediately. Keep this periodic
+    // sweep as a recovery fallback without repeatedly scanning every session
+    // while the queue is idle.
+    session_timer_->expires_after(Milliseconds{1000});
     boost::system::error_code error;
     co_await session_timer_->async_wait(asio::redirect_error(asio::use_awaitable, error));
     if (error)
