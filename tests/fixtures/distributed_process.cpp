@@ -51,13 +51,13 @@ int main() {
     config.validate();
     Executor executor(config.workers);
     Service service(executor.context(), config);
-    const auto hold = std::make_shared<Function>([delay](ExecutionContext &context,
-                                                         const Json &input) -> Task<Json> {
-      if (const auto *marker = required("LASO_DISTRIBUTED_TEST_MARKER"))
-        std::ofstream(marker, std::ios::trunc) << "entered";
-      co_await context.delay(delay);
-      co_return input;
-    });
+    const auto hold = std::make_shared<Function>(
+        [delay](ExecutionContext &context, const Json &input) -> Task<Json> {
+          if (const auto *marker = required("LASO_DISTRIBUTED_TEST_MARKER"))
+            std::ofstream(marker, std::ios::trunc) << "entered";
+          co_await context.delay(delay);
+          co_return input;
+        });
     service.functions().add("distributed_hold", hold);
     service.functions().add("session_process_hold", hold);
     if (required("LASO_DISTRIBUTED_TEST_WORKER_HOST")) {

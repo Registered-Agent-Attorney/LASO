@@ -726,9 +726,10 @@ edges:
   {
     asio::io_context io;
     Service seed(io, configuration);
-    seed.functions().add("session_process_hold",
-                          std::make_shared<Function>([](ExecutionContext &, const Json &input)
-                                                         -> Task<Json> { co_return input; }));
+    seed.functions().add(
+        "session_process_hold",
+        std::make_shared<Function>(
+            [](ExecutionContext &, const Json &input) -> Task<Json> { co_return input; }));
     pipeline_id = seed.register_pipeline(pipeline).at("id").get<std::string>();
     session = seed.create_session(pipeline_id);
     seed.shutdown();
@@ -824,15 +825,18 @@ edges:
   EXPECT_EQ(run.state, RunState::Completed);
   EXPECT_EQ(run.session_turn_id, turn_id);
   const auto runs = storage->list(RecordKind::Run, "", 10000, 0);
-  EXPECT_EQ(std::count_if(runs.begin(), runs.end(), [&](const Json &record) {
-              return record.value("session_turn_id", std::string{}) == turn_id;
-            }),
+  EXPECT_EQ(std::count_if(runs.begin(), runs.end(),
+                          [&](const Json &record) {
+                            return record.value("session_turn_id", std::string{}) == turn_id;
+                          }),
             1);
   const auto events = storage->session_events(session.id, 0, 100);
-  EXPECT_EQ(std::count_if(events.begin(), events.end(), [&](const Json &event) {
-              return event.value("type", std::string{}) == "turn.execution.completed" &&
-                     event.value("turn_id", std::string{}) == turn_id;
-            }),
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) ==
+                                       "turn.execution.completed" &&
+                                   event.value("turn_id", std::string{}) == turn_id;
+                          }),
             1);
 #endif
 }
