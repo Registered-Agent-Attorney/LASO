@@ -298,9 +298,12 @@ if(BUILD_TESTING)
   if(LASO_ENABLE_POSTGRES)
     # The integration DSN is protected by a database-wide single-owner lease.
     # Keep independent CTest processes out of that shared fixture while leaving
-    # concurrency inside each multi-instance acceptance test unchanged.
+    # concurrency inside each multi-instance acceptance test unchanged. Bound a
+    # stuck GoogleTest case so it reports diagnostics instead of occupying CI
+    # for the runner's long default timeout.
     gtest_discover_tests(laso_tests DISCOVERY_TIMEOUT 60
-                         PROPERTIES RESOURCE_LOCK laso_postgres_test_database)
+                         PROPERTIES RESOURCE_LOCK laso_postgres_test_database
+                                    TIMEOUT 120)
   else()
     gtest_discover_tests(laso_tests DISCOVERY_TIMEOUT 60)
   endif()

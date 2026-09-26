@@ -5,6 +5,7 @@
 #include <boost/beast.hpp>
 #include <condition_variable>
 #include <fstream>
+#include <iostream>
 #include <laso/api/api.hpp>
 #include <laso/artifacts/artifacts.hpp>
 #include <laso/artifacts/server.hpp>
@@ -1850,13 +1851,16 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
   bool provider_entered = false;
   bool release_provider = false;
   std::atomic<unsigned> calls{0};
+  std::atomic<bool> provider_hold_timed_out{false};
   auto function =
       std::make_shared<Function>([&](ExecutionContext &context, const Json &input) -> Task<Json> {
         calls.fetch_add(1);
         std::unique_lock lock(mutex);
         provider_entered = true;
         condition.notify_all();
-        condition.wait(lock, [&] { return release_provider; });
+        // Ten lease periods bound a broken test controller.
+        if (!condition.wait_for(lock, std::chrono::seconds(10), [&] { return release_provider; }))
+          provider_hold_timed_out.store(true);
         lock.unlock();
         context.check();
         co_return input;
@@ -1926,6 +1930,7 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
     std::unique_lock lock(mutex);
     entered = condition.wait_for(lock, std::chrono::seconds(5), [&] { return provider_entered; });
   }
+  std::cerr << "[session-pg-idempotency] provider barrier entered=" << entered << std::endl;
   if (!entered) {
     const auto state = first.get(RecordKind::SessionTurn, response_a.at("id").get<std::string>())
                            .value("state", "<missing>");
@@ -1945,12 +1950,35 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
     return;
   }
 
+  std::cerr << "[session-pg-idempotency] running retry begin" << std::endl;
+  const auto running_retry_started = std::chrono::steady_clock::now();
   const auto duplicate_running =
       second.submit_session_turn(session.id, "same-idempotency-key", input);
+  const auto running_retry_elapsed = std::chrono::steady_clock::now() - running_retry_started;
+  std::cerr << "[session-pg-idempotency] running retry returned in "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(running_retry_elapsed).count()
+            << " ms; provider hold expired=" << provider_hold_timed_out.load() << std::endl;
+  EXPECT_FALSE(provider_hold_timed_out.load())
+      << "provider watchdog released the test before the running retry returned";
   EXPECT_EQ(duplicate_running.at("id"), response_a.at("id"));
+  EXPECT_EQ(
+      first.get(RecordKind::SessionTurn, response_a.at("id").get<std::string>()).value("state", ""),
+      "running");
+
+  std::cerr << "[session-pg-idempotency] conflicting retry begin" << std::endl;
+  const auto conflict_retry_started = std::chrono::steady_clock::now();
   EXPECT_THROW(second.submit_session_turn(session.id, "same-idempotency-key",
                                           Json{{"tag", "conflicting-input"}}),
                Error);
+  const auto conflict_retry_elapsed = std::chrono::steady_clock::now() - conflict_retry_started;
+  std::cerr << "[session-pg-idempotency] conflicting retry returned in "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(conflict_retry_elapsed).count()
+            << " ms" << std::endl;
+  EXPECT_FALSE(provider_hold_timed_out.load())
+      << "provider watchdog released the test before conflicting reuse returned";
+  EXPECT_EQ(
+      first.get(RecordKind::SessionTurn, response_a.at("id").get<std::string>()).value("state", ""),
+      "running");
   EXPECT_EQ(calls.load(), 1U);
 
   {
