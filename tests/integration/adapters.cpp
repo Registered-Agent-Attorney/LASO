@@ -1855,13 +1855,26 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
   auto function =
       std::make_shared<Function>([&](ExecutionContext &context, const Json &input) -> Task<Json> {
         calls.fetch_add(1);
-        std::unique_lock lock(mutex);
-        provider_entered = true;
+        {
+          std::lock_guard lock(mutex);
+          provider_entered = true;
+        }
         condition.notify_all();
-        // Ten lease periods bound a broken test controller.
-        if (!condition.wait_for(lock, std::chrono::seconds(10), [&] { return release_provider; }))
-          provider_hold_timed_out.store(true);
-        lock.unlock();
+        // Suspend the provider coroutine instead of blocking the service's
+        // io_context while the test observes idempotent retries.
+        const auto hold_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        for (;;) {
+          {
+            std::lock_guard lock(mutex);
+            if (release_provider)
+              break;
+          }
+          if (std::chrono::steady_clock::now() >= hold_deadline) {
+            provider_hold_timed_out.store(true);
+            break;
+          }
+          co_await context.delay(Milliseconds{10});
+        }
         context.check();
         co_return input;
       });
