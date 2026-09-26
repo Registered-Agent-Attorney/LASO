@@ -1238,7 +1238,7 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
   if (!dsn || !*dsn)
     GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
-  auto schema = "laso_session_claim_recovery_" + uuid();
+  auto schema = "laso_claim_recovery_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
     std::string dsn;
