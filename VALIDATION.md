@@ -777,3 +777,65 @@ skipped, and none failed. The separate physical `distributed_m3_acceptance` test
 was not repeated for M5.1 because M5.1's cross-instance requirement is covered
 by independent services sharing PostgreSQL. `clang-format-18 --dry-run
 --Werror` and `git diff --check` passed. Hosted CI on PR #13 head `0fef776` passed all 7 checks: GCC, Clang, Release, PostgreSQL, S3, Debian, and ASan/UBSan.
+
+## M5.2 physical worker recovery and stale fencing retest (2026-09-26)
+
+This is targeted recovery evidence, not M5.2 closure. Both valid cases used
+separate physical test hosts, a disposable PostgreSQL backend, and the
+side-effect-free continuation fixture. Hostnames, account names, process IDs,
+run identifiers, continuation sentinels, and private log paths are omitted.
+
+| Case | Controlled fault and observation | Result |
+|---|---|---|
+| Worker death after durable binding and provider start | The worker was held after entering the deterministic provider, then only its verified test process received `SIGKILL`. Its bound run was reclaimed under a newer fence. The session remained open, cancellation stayed false, one logical run and one completion event remained authoritative, and only the recovery result's continuation was stored. The next queued turn also succeeded. | **PASS: 1/1 fresh physical run** |
+| Stale worker while replacement is active | The original worker was paused after acquiring the run lease. A replacement acquired a newer fence and was held in its provider call. The original then resumed and reached the real fenced checkpoint rejection while the replacement was still active. At that barrier the durable turn remained running with no completion event or continuation. After release, the replacement completed; its output and continuation were authoritative. | **PASS: 1/1 fresh physical run** |
+
+The earlier worker-death symptom was not reproduced by either the fresh hard-kill
+run or the two retained controlled hard-kill runs. The earlier diagnostic logs
+were not retained, so the exact historical caller cannot be attributed
+conclusively. Source review did identify a concrete fixture path capable of
+producing the reported `Execution cancelled`: the previous process fixture
+called `Service::shutdown()` after its fixed polling deadline; shutdown stops
+active execution tokens, and the execution cancellation path may persist a
+cancelled run without an explicit session cancellation request. Explicit
+session close and recovery of a persisted closing session route through
+`Runtime::cancel()` / `Runtime::cancel_locked()`, which records durable
+cancellation. The revised fixture verifies the held process and barrier, refuses
+graceful teardown before a terminal state, and uses hard process death for this
+gate. The physical run showed no cancellation request or cancelled event.
+
+Run-binding and pre-completion crash recovery passed in an earlier controlled
+block on the then-current recovered source tree; the retained snapshots do not
+embed a Git SHA or executable hash, so they remain historical rather than
+fresh exact-candidate evidence. The physical PostgreSQL interruption result is
+also retained only as historical evidence without an embedded tested SHA.
+Neither case was repeated in this retest. M5.2 closure status and remaining
+gates are summarized in the following ledger; PR #14 stays Draft.
+
+
+
+## M5.2 bounded acceptance closure review (2026-09-26)
+
+This ledger maps the acceptance boundary in `docs/m5-2-design.md`, the M5.2 roadmap entry, and PR #14. PR #14 remains open and Draft. The executable candidate `8132de1` passed both exact-SHA hosted workflows: pull-request run `36276098931` and push run `36276095925`. Since the inherited physical runtime candidate, `d5bb982` changed close handling; later commits `9c40e65` and `8132de1` changed the test harness and validation docs. Worker-death and stale-fence execution paths were not changed.
+
+Earlier candidate `d5bb982` exposed an intermittent PostgreSQL test hang. Its pull-request full CTest run passed 256 tests with 3 skips, but its separate three-repeat contention step timed out on `Sessions.PostgresTwoInstancesDeduplicateConcurrentSubmissions` after 1,500 seconds. The push full CTest run timed out on the same test. Candidate `9c40e65` bounded the fixture and recorded stages, but its PR repeat failed on the second test repetition and its push full CTest failed the case. Both traces showed the provider watchdog expiring before the retry returned, followed by extra provider calls. Source inspection identified the fixture's synchronous condition-variable wait inside an async provider coroutine; that fixture blocked the service executor during the retry observation. This was a fixture defect; those results did not establish a runtime idempotency defect.
+
+Commit `8132de1` changes only that fixture to cooperatively suspend through `ExecutionContext::delay`, preserving the 10-second watchdog and assertions. Pull-request CTest passed 256, failed 0, skipped 3 in 94.03 seconds; push CTest passed 256, failed 0, skipped 3 in 106.50 seconds. On each workflow, both dispatch/order and concurrent-idempotency tests passed all three dedicated repetitions (3/3 each). All eight hosted jobs passed on both events: GCC Debug/Release, Clang Debug/Release, PostgreSQL, S3-enabled, ASan/UBSan, and Debian. The two S3-disabled configuration tests and opt-in `distributed_m3_acceptance` were skipped; the dedicated S3-enabled job passed. The M3 test requires its separate DSN and is outside the deterministic M5.2 core suite.
+
+No local build/test or physical fault injection was run in this closure pass. A fresh read-only owner-host preflight found an active backup workload and unrelated compute/storage/monitoring activity; GPU telemetry again failed NVML initialization. The other physical host was not preflighted because cross-host fault injection was unsafe without a safe owner-host window.
+
+| Requirement and source | Implementation / focused test | Backend, topology, and evidence | Result and smallest action |
+|---|---|---|---|
+| Durable accepted-to-run dispatch, sequence order, one run binding, cross-session progress (`docs/m5-2-design.md`) | `Sessions.AcceptedTurnsExecuteDurablyInAcceptanceOrder`, `Sessions.QueuedRunRecoversAfterServiceRestartWithoutDuplicateRun`, `Sessions.DifferentSessionsExecuteConcurrently` | Exact 8132de1 pull-request PostgreSQL CTest, run `36276098931`; SQLite and PostgreSQL-enabled build. | **PASS**: full suite passed; run binding, restart reclaim, ordering, and cross-session progress tests were included. |
+| Identical and conflicting idempotency retries, including concurrent submissions across service instances (roadmap; PR acceptance) | `Sessions.PostgresTwoInstancesDeduplicateConcurrentSubmissions`; queued/running/completed retries, conflicting reuse, one event/run lineage, conflict preservation | Exact 8132de1 full PostgreSQL CTest passed in both workflow events; dedicated contention step passed this test 3/3 in each. Two independent LASO instances shared only the test's isolated schema. | **PASS** for deterministic PostgreSQL acceptance. |
+| Opaque continuation persistence, restart, isolation, invalid/unsupported state, timeout/cancellation, stale promotion, and secrecy (`docs/m5-2-design.md`) | SQLite/PostgreSQL continuation restart tests, invalid/timeout, unsupported/stateless, stale-completion and close-after-provider tests; runtime canary checks API/run/event/SSE/log/error surfaces | Exact 8132de1 full PostgreSQL CTest passed on both workflow events; deterministic fixtures on SQLite and disposable PostgreSQL. Codex/Claude/OpenCode worker adapters remain non-continuation-capable; no live provider call is required by this contract. | **PASS** for fixture and client-boundary coverage; no real continuation handle or credential used. |
+| PostgreSQL multi-instance ownership/fencing and same-session ordered completion (`docs/m5-2-design.md`, roadmap) | `Sessions.PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering`, `Sessions.PostgresStaleCompletionCannotReplaceContinuation` | Exact 8132de1 full PostgreSQL CTest passed on both events; dispatch/order repeat passed 3/3 in each, and concurrent idempotency passed 3/3. | **PASS** for deterministic multi-instance ordering/fencing coverage. |
+| Claim/run-binding crash boundaries, process owner/worker death, PostgreSQL claim interruption and recovery (design acceptance) | `Sessions.ClaimedTurnRecoversAfterInterruptionBeforeRunBinding`, `Sessions.QueuedRunRecoversAfterServiceRestartWithoutDuplicateRun`, `Sessions.PostgresClaimInterruptionIsRecoveredByAnotherInstance`, deterministic owner/worker death and session crash-boundary tests | All listed deterministic tests passed in exact 8132de1 pull-request CTest. Run insertion and turn binding are one atomic transaction, so an after-insert/before-bind committed half-state is impossible. | **PASS** for deterministic CI coverage. Older physical run-binding/pre-completion snapshots have no embedded tested SHA and remain historical. |
+| Close/submit/claim/completion/cancellation arbitration and continuation preservation (`docs/m5-2-design.md`) | `Storage.SessionCloseRacesInputAcceptanceTransactionally`, `Storage.SessionCloseRacesTurnClaimTransactionally`, `Sessions.CloseAfterProviderCallDoesNotAdvanceContinuation` | Exact 8132de1 pull-request CTest passed the SQLite/PostgreSQL close and continuation tests. The close fix cancels claimed pre-run work only when no run is bound; active-run cancellation and fencing remain covered. | **PASS** for deterministic races; no physical close/cancel fault injection was performed. |
+| Durable lifecycle journal, independent clients, SSE cursor reconnect and service restart (design acceptance) | `Api.SessionSseTwoClientsReplayExecutionAcrossRestart`, `Api.SessionSseResumesAfterCursorAndEndsAfterClose`, PostgreSQL cross-instance stream tests | Exact 8132de1 pull-request CTest passed; replay uses durable events and the documented cursor. | **PASS** for the core/API replay contract; this does not claim LASO-Web integration. |
+| Database test-resource collision handling and regression matrix | PostgreSQL fixtures use isolated schemas where supported. The PostgreSQL CTest configuration uses a database-wide `RESOURCE_LOCK` to serialize independent GoogleTest processes against the shared disposable DSN; the two LASO service instances within contention tests remain concurrent. | Both 8132de1 hosted workflows passed all eight jobs. Each PostgreSQL CTest run had 256 passed, 0 failed, 3 skipped; each dedicated contention step passed dispatch/order 3/3 and idempotency 3/3. Skips: two S3-disabled configuration tests and `distributed_m3_acceptance` without its opt-in DSN. The dedicated S3-enabled job passed. TSAN is not configured in the supported matrix. | **PASS** for the configured regression matrix and shared-resource protection; CTest does not claim independent PostgreSQL cases ran concurrently. |
+| Physical cross-host worker death and stale-worker fencing (PR acceptance record) | Retained private timelines show hard worker death after durable binding/provider start; stale completion rejected through the real fenced path while the replacement owner remained active, then replacement completion became authoritative. | Inherited evidence attributed by the prior run report to the 739 runtime candidate: latest worker-death block 1/1, 3/3 valid controlled worker-death runs in combined evidence; stale-worker run 1/1. Private snapshots/timelines are retained in the restricted recovery archive, but do not embed a binary SHA. Changes since the physical runtime candidate were limited to close handling and test harness/docs; worker-death and stale-fence execution paths were not changed. | **PASS, inherited with explicit provenance and scope**; no binary-SHA provenance is claimed. |
+| Other physical cross-host recovery cases from the documented M5.2 scope | Physical owner death, PostgreSQL outage/recovery, and continuation after physical service restart have no exact-candidate physical evidence. Older physical PostgreSQL interruption and run-binding/pre-completion snapshots lack a tested SHA. | Fresh owner-host preflight found an active backup workload, unrelated compute/storage/monitoring activity, and unavailable GPU telemetry. The other host was not preflighted, and no physical fault was injected. | **GAP / BLOCKED** for physical confirmation. Repeat only when both-host preflight supports a safe window; deterministic CI does not replace these documented physical gates. |
+
+
+The d5, 9c40e65, and 8132de1 CI summaries and failed logs are retained in a restricted private archive. No test resources or production services were changed. PR #14 remains Draft. M5.2 is **not acceptance-ready** because physical owner-death, PostgreSQL outage/recovery, and continuation-after-restart remain unvalidated for an exact candidate, and the physical host safety preflight did not permit fault injection.

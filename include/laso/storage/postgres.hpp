@@ -18,6 +18,12 @@ public:
   void request_cancellation(const std::string &) override;
   bool claim(const Record &, const std::vector<Record> &associated = {}) override;
   bool submit_session_turn(const std::string &, const std::string &, const Json &, Json) override;
+  std::optional<Json> claim_next_session_turn(const std::string &, const std::string &,
+                                              std::uint64_t, const std::string &, Json) override;
+  bool bind_session_turn_run(const std::string &, const std::string &, Json, Json,
+                             const std::string &, std::uint64_t, Json) override;
+  void commit_session_run(const std::vector<Record> &, const std::string &, std::uint64_t,
+                          Json) override;
   bool close_agent_session(const std::string &, Json) override;
   std::vector<Json> session_events(const std::string &, std::uint64_t, std::size_t) const override;
   Json get(RecordKind, const std::string &) const override;
