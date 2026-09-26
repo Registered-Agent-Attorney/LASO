@@ -1233,6 +1233,108 @@ TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
 #endif
 }
 
+TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto schema = "laso_session_startup_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  struct SchemaCleanup {
+    std::string dsn;
+    std::string schema;
+    ~SchemaCleanup() {
+      try {
+        pqxx::connection connection(dsn);
+        pqxx::work transaction(connection);
+        transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+        transaction.commit();
+      } catch (...) {
+      }
+    }
+  } cleanup{dsn, schema};
+
+  TemporaryDirectory directory;
+  auto options = config(directory.path);
+  options.storage_backend = "postgres";
+  options.postgres_dsn = dsn;
+  options.postgres_schema = schema;
+  options.execution_mode = "multi_instance";
+  options.coordination_lease_ttl_ms = 1000;
+  options.coordination_heartbeat_interval_ms = 100;
+  options.validate();
+
+  const auto function = std::make_shared<Function>(
+      [](ExecutionContext &, const Json &input) -> Task<Json> { co_return input; });
+  AgentSession session;
+  std::string pipeline_id;
+  {
+    asio::io_context seed_io;
+    Service seed(seed_io, options);
+    seed.functions().add("session_startup_recovery", function);
+    pipeline_id =
+        seed.register_pipeline(single("type: function\n    function: session_startup_recovery"))
+            .at("id")
+            .get<std::string>();
+    session = seed.create_session(pipeline_id);
+    seed.shutdown();
+  }
+
+  // Model a process exit after the acceptance transaction commits but before
+  // its immediate in-process dispatch is durably reflected in turn state.
+  StorageOptions storage_options;
+  storage_options.backend = "postgres";
+  storage_options.postgres_dsn = dsn;
+  storage_options.postgres_schema = schema;
+  storage_options.allow_multiple_processes = true;
+  auto storage = create_storage(storage_options);
+  const auto turn_id = session.id + "-turn-startup-recovery";
+  Json queued_turn{{"idempotency_key", "startup-recovery"},
+                   {"input", {{"value", "durable"}}},
+                   {"state", "queued"},
+                   {"accepted_at", timestamp()},
+                   {"pipeline_id", pipeline_id}};
+  ASSERT_TRUE(storage->submit_session_turn(session.id, turn_id, queued_turn, Json::object()));
+  storage.reset();
+
+  asio::io_context recovery_io;
+  Service recovery(recovery_io, options);
+  recovery.functions().add("session_startup_recovery", function);
+  std::jthread recovery_thread([&] { recovery_io.run(); });
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  std::string state;
+  while (std::chrono::steady_clock::now() < deadline) {
+    state = recovery.get(RecordKind::SessionTurn, turn_id).value("state", "");
+    if (state == "succeeded" || state == "failed" || state == "cancelled")
+      break;
+    std::this_thread::sleep_for(Milliseconds{10});
+  }
+  recovery.shutdown();
+  recovery_io.stop();
+  recovery_thread.join();
+
+  const auto completed = recovery.get(RecordKind::SessionTurn, turn_id);
+  EXPECT_EQ(state, "succeeded");
+  EXPECT_EQ(completed.at("state"), "succeeded");
+  const auto run_id = completed.value("run_id", std::string{});
+  ASSERT_FALSE(run_id.empty());
+  const auto run = recovery.get(RecordKind::Run, run_id).get<laso::Run>();
+  EXPECT_EQ(run.session_turn_id, turn_id);
+  EXPECT_EQ(run.state, RunState::Completed);
+  EXPECT_EQ(run.message.payload.value("value", std::string{}), "durable");
+  const auto events = recovery.session_events(session.id, 0, 100);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) ==
+                                       "turn.execution.completed" &&
+                                   event.value("turn_id", std::string{}) == turn_id;
+                          }),
+            1);
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
+
 TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
 #if defined(LASO_HAS_POSTGRES) && defined(LASO_ENABLE_SESSION_TEST_HOOKS)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");

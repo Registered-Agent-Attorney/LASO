@@ -142,6 +142,16 @@ Task<void> Runtime::supervise_session_loop() {
 
 Task<void> Runtime::session_loop() {
   for (;;) {
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        co_return;
+    }
+    // Recover accepted turns that were durably queued before this instance
+    // started. The normal submission path dispatches immediately; this initial
+    // sweep closes the restart window before the periodic fallback begins.
+    dispatch_sessions();
+
     // Submissions and terminal runs dispatch immediately. Keep this periodic
     // sweep as a recovery fallback without repeatedly scanning every session
     // while the queue is idle.
