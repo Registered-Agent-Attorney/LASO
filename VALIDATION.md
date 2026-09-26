@@ -777,3 +777,34 @@ skipped, and none failed. The separate physical `distributed_m3_acceptance` test
 was not repeated for M5.1 because M5.1's cross-instance requirement is covered
 by independent services sharing PostgreSQL. `clang-format-18 --dry-run
 --Werror` and `git diff --check` passed. Hosted CI on PR #13 head `0fef776` passed all 7 checks: GCC, Clang, Release, PostgreSQL, S3, Debian, and ASan/UBSan.
+
+## M5.2 physical worker recovery and stale fencing retest (2026-09-26)
+
+This is targeted recovery evidence, not M5.2 closure. Both valid cases used
+separate physical test hosts, a disposable PostgreSQL backend, and the
+side-effect-free continuation fixture. Hostnames, account names, process IDs,
+run identifiers, continuation sentinels, and private log paths are omitted.
+
+| Case | Controlled fault and observation | Result |
+|---|---|---|
+| Worker death after durable binding and provider start | The worker was held after entering the deterministic provider, then only its verified test process received `SIGKILL`. Its bound run was reclaimed under a newer fence. The session remained open, cancellation stayed false, one logical run and one completion event remained authoritative, and only the recovery result's continuation was stored. The next queued turn also succeeded. | **PASS: 1/1 fresh physical run** |
+| Stale worker while replacement is active | The original worker was paused after acquiring the run lease. A replacement acquired a newer fence and was held in its provider call. The original then resumed and reached the real fenced checkpoint rejection while the replacement was still active. At that barrier the durable turn remained running with no completion event or continuation. After release, the replacement completed; its output and continuation were authoritative. | **PASS: 1/1 fresh physical run** |
+
+The earlier worker-death symptom was not reproduced by either the fresh hard-kill
+run or the two retained controlled hard-kill runs. The earlier diagnostic logs
+were not retained, so the exact historical caller cannot be attributed
+conclusively. Source review did identify a concrete fixture path capable of
+producing the reported `Execution cancelled`: the previous process fixture
+called `Service::shutdown()` after its fixed polling deadline; shutdown stops
+active execution tokens, and the execution cancellation path may persist a
+cancelled run without an explicit session cancellation request. Explicit
+session close and recovery of a persisted closing session route through
+`Runtime::cancel()` / `Runtime::cancel_locked()`, which records durable
+cancellation. The revised fixture verifies the held process and barrier, refuses
+graceful teardown before a terminal state, and uses hard process death for this
+gate. The physical run showed no cancellation request or cancelled event.
+
+Run-binding and pre-completion crash recovery had passed in the earlier controlled
+block on this same candidate; they were not repeated in this retest. The physical
+PostgreSQL interruption result remains historical and was not repeated here.
+Other M5.2 acceptance gates remain open; PR #14 stays Draft.
