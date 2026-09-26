@@ -664,8 +664,8 @@ TEST(Sessions, ClaimedTurnRecoversAfterInterruptionBeforeRunBinding) {
         throw std::runtime_error("injected session claim interruption");
       }
     });
-    const auto accepted = service.submit_session_turn(session.id, "claim-recovery",
-                                                       Json{{"value", "recover"}});
+    const auto accepted =
+        service.submit_session_turn(session.id, "claim-recovery", Json{{"value", "recover"}});
     turn_id = accepted.at("id").get<std::string>();
     EXPECT_TRUE(interrupted_after_claim);
     const auto claimed = service.get(RecordKind::SessionTurn, turn_id);
