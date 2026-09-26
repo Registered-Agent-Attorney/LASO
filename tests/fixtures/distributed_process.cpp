@@ -54,7 +54,7 @@ int main() {
     const auto hold = std::make_shared<Function>([delay](ExecutionContext &context,
                                                          const Json &input) -> Task<Json> {
       if (const auto *marker = required("LASO_DISTRIBUTED_TEST_MARKER"))
-        std::ofstream(*marker, std::ios::trunc) << "entered";
+        std::ofstream(marker, std::ios::trunc) << "entered";
       co_await context.delay(delay);
       co_return input;
     });
