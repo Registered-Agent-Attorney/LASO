@@ -815,7 +815,8 @@ bool SQLiteStorage::close_agent_session(const std::string &session_id, Json even
       bind(queued.get(), 1, session_id);
       while (sqlite3_step(queued.get()) == SQLITE_ROW) {
         auto turn = parse(queued.get());
-        if (turn.value("state", std::string{}) == "queued")
+        const auto state = turn.value("state", std::string{});
+        if (state == "queued" || (!has_active_run && state == "claimed"))
           persist_turn(std::move(turn));
       }
       if (!has_active_run) {

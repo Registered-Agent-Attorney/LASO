@@ -886,7 +886,8 @@ bool PostgresStorage::close_agent_session(const std::string &session_id, Json ev
           session_id);
       for (const auto &row : queued) {
         auto turn = parse_body(row);
-        if (turn.value("state", std::string{}) == "queued")
+        const auto state = turn.value("state", std::string{});
+        if (state == "queued" || (!has_active_run && state == "claimed"))
           persist_turn(std::move(turn));
       }
       if (!has_active_run) {

@@ -1986,7 +1986,7 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
   const auto run_id = completed.at("run_id").get<std::string>();
   ASSERT_FALSE(run_id.empty());
   const auto run = first.get(RecordKind::Run, run_id).get<laso::Run>();
-  EXPECT_EQ(run.session_turn_id, completed.at("id"));
+  EXPECT_EQ(run.session_turn_id, completed.at("id").get<std::string>());
   EXPECT_GT(run.fencing_token, 0U);
   EXPECT_EQ(calls.load(), 1U);
 
