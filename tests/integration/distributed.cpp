@@ -842,7 +842,7 @@ edges:
 }
 
 TEST(DistributedExecution, SessionProcessCrashBoundariesRecoverDurably) {
-#if defined(LASO_HAS_POSTGRES) && defined(LASO_ENABLE_SESSION_TEST_HOOKS) && \
+#if defined(LASO_HAS_POSTGRES) && defined(LASO_ENABLE_SESSION_TEST_HOOKS) &&                       \
     defined(LASO_DISTRIBUTED_PROCESS)
   if (test_dsn().empty())
     GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
@@ -858,8 +858,9 @@ edges:
   - {from: input, to: work}
   - {from: work, to: output}
 )yaml";
-  const std::vector<std::string> boundaries{"after-claim", "before-run-binding", "after-run-binding",
-                                             "before-completion-commit", "after-completion-commit"};
+  const std::vector<std::string> boundaries{"after-claim", "before-run-binding",
+                                            "after-run-binding", "before-completion-commit",
+                                            "after-completion-commit"};
   for (const auto &boundary : boundaries) {
     IsolatedSchema database;
     TemporaryDirectory directory;
@@ -877,9 +878,10 @@ edges:
     {
       asio::io_context io;
       Service seed(io, configuration);
-      seed.functions().add("session_process_hold",
-                           std::make_shared<Function>([](ExecutionContext &, const Json &input)
-                                                          -> Task<Json> { co_return input; }));
+      seed.functions().add(
+          "session_process_hold",
+          std::make_shared<Function>(
+              [](ExecutionContext &, const Json &input) -> Task<Json> { co_return input; }));
       pipeline_id = seed.register_pipeline(pipeline).at("id").get<std::string>();
       session = seed.create_session(pipeline_id);
       seed.shutdown();
@@ -951,9 +953,8 @@ edges:
     Service recovery(recovery_io, configuration);
     recovery.functions().add(
         "session_process_hold",
-        std::make_shared<Function>([](ExecutionContext &, const Json &input) -> Task<Json> {
-          co_return input;
-        }));
+        std::make_shared<Function>(
+            [](ExecutionContext &, const Json &input) -> Task<Json> { co_return input; }));
     std::jthread recovery_thread([&] { recovery_io.run(); });
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     std::string state;
@@ -974,16 +975,19 @@ edges:
     const auto run_id = completed.value("run_id", std::string{});
     ASSERT_FALSE(run_id.empty()) << "boundary=" << boundary;
     const auto associated_runs = storage->list(RecordKind::Run, "", 10000, 0);
-    EXPECT_EQ(std::count_if(associated_runs.begin(), associated_runs.end(), [&](const Json &record) {
-                return record.value("session_turn_id", std::string{}) == turn_id;
-              }),
+    EXPECT_EQ(std::count_if(associated_runs.begin(), associated_runs.end(),
+                            [&](const Json &record) {
+                              return record.value("session_turn_id", std::string{}) == turn_id;
+                            }),
               1)
         << "boundary=" << boundary;
     const auto events = storage->session_events(session.id, 0, 100);
-    EXPECT_EQ(std::count_if(events.begin(), events.end(), [&](const Json &event) {
-                return event.value("type", std::string{}) == "turn.execution.completed" &&
-                       event.value("turn_id", std::string{}) == turn_id;
-              }),
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [&](const Json &event) {
+                              return event.value("type", std::string{}) ==
+                                         "turn.execution.completed" &&
+                                     event.value("turn_id", std::string{}) == turn_id;
+                            }),
               1)
         << "boundary=" << boundary;
   }
