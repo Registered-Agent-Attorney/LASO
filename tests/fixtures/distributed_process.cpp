@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <laso/application/service.hpp>
 #include <laso/runtime/executor.hpp>
 #include <thread>
@@ -17,7 +18,10 @@ int main() {
   const auto *dsn = required("LASO_DISTRIBUTED_TEST_DSN");
   const auto *schema = required("LASO_DISTRIBUTED_TEST_SCHEMA");
   const auto *run_id = required("LASO_DISTRIBUTED_TEST_RUN_ID");
-  if (!dsn || !schema || !run_id)
+  const auto *session_id = required("LASO_DISTRIBUTED_TEST_SESSION_ID");
+  const auto *turn_id = required("LASO_DISTRIBUTED_TEST_TURN_ID");
+  const bool session_mode = session_id && turn_id;
+  if (!dsn || !schema || (!session_mode && !run_id))
     return 2;
   try {
     const auto hold_ms = required("LASO_DISTRIBUTED_TEST_HOLD_MS");
@@ -47,12 +51,15 @@ int main() {
     config.validate();
     Executor executor(config.workers);
     Service service(executor.context(), config);
-    service.functions().add("distributed_hold",
-                            std::make_shared<Function>([delay](ExecutionContext &context,
-                                                               const Json &input) -> Task<Json> {
-                              co_await context.delay(delay);
-                              co_return input;
-                            }));
+    const auto hold = std::make_shared<Function>([delay](ExecutionContext &context,
+                                                         const Json &input) -> Task<Json> {
+      if (const auto *marker = required("LASO_DISTRIBUTED_TEST_MARKER"))
+        std::ofstream(*marker, std::ios::trunc) << "entered";
+      co_await context.delay(delay);
+      co_return input;
+    });
+    service.functions().add("distributed_hold", hold);
+    service.functions().add("session_process_hold", hold);
     if (required("LASO_DISTRIBUTED_TEST_WORKER_HOST")) {
       service.register_pipeline(R"yaml(
 laso: '1'
@@ -78,11 +85,21 @@ edges:
     }
     executor.start();
     for (unsigned i = 0; i < 1200; ++i) {
-      const auto run = service.get(RecordKind::Run, run_id).get<Run>();
-      if (terminal(run.state)) {
-        service.shutdown();
-        executor.join();
-        return run.state == RunState::Completed ? 0 : 1;
+      if (session_mode) {
+        const auto turn = service.get(RecordKind::SessionTurn, turn_id);
+        const auto state = turn.value("state", std::string{});
+        if (state == "succeeded" || state == "failed" || state == "cancelled") {
+          service.shutdown();
+          executor.join();
+          return state == "succeeded" ? 0 : 1;
+        }
+      } else {
+        const auto run = service.get(RecordKind::Run, run_id).get<Run>();
+        if (terminal(run.state)) {
+          service.shutdown();
+          executor.join();
+          return run.state == RunState::Completed ? 0 : 1;
+        }
       }
       std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }

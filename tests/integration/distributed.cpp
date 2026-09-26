@@ -691,6 +691,152 @@ edges:
 #endif
 }
 
+TEST(DistributedExecution, SessionTurnRecoversAfterOwnerProcessDiesDuringExecution) {
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+#if !defined(LASO_DISTRIBUTED_PROCESS)
+  GTEST_SKIP() << "distributed process fixture is not built";
+#else
+  TemporaryDirectory directory;
+  Config configuration = config(directory.path);
+  configuration.storage_backend = "postgres";
+  configuration.postgres_dsn = database.dsn;
+  configuration.postgres_schema = database.schema;
+  configuration.execution_mode = "multi_instance";
+  configuration.max_runs = 1;
+  configuration.coordination_lease_ttl_ms = 1000;
+  configuration.coordination_heartbeat_interval_ms = 100;
+  configuration.validate();
+
+  const auto pipeline = R"yaml(
+laso: '1'
+name: session-owner-process-recovery
+version: 1
+nodes:
+  input: {type: input}
+  hold: {type: function, function: session_process_hold}
+  output: {type: output}
+edges:
+  - {from: input, to: hold}
+  - {from: hold, to: output}
+)yaml";
+  AgentSession session;
+  std::string pipeline_id;
+  {
+    asio::io_context io;
+    Service seed(io, configuration);
+    seed.functions().add("session_process_hold",
+                          std::make_shared<Function>([](ExecutionContext &, const Json &input)
+                                                         -> Task<Json> { co_return input; }));
+    pipeline_id = seed.register_pipeline(pipeline).at("id").get<std::string>();
+    session = seed.create_session(pipeline_id);
+    seed.shutdown();
+  }
+
+  StorageOptions storage_options;
+  storage_options.backend = "postgres";
+  storage_options.postgres_dsn = database.dsn;
+  storage_options.postgres_schema = database.schema;
+  storage_options.allow_multiple_processes = true;
+  auto storage = create_storage(storage_options);
+  const auto turn_id = session.id + "-turn-owner-process-crash";
+  const Json turn{{"idempotency_key", "owner-process-crash"},
+                  {"input", {{"value", "survives-owner-death"}}},
+                  {"state", "queued"},
+                  {"accepted_at", timestamp()},
+                  {"pipeline_id", pipeline_id}};
+  ASSERT_TRUE(storage->submit_session_turn(session.id, turn_id, turn, Json::object()));
+
+  const auto marker = (directory.path / "provider-started.marker").string();
+  const auto owner = fork();
+  ASSERT_NE(owner, -1);
+  if (owner == 0) {
+    setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_SESSION_ID", session.id.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_TURN_ID", turn_id.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_HOLD_MS", "10000", 1);
+    setenv("LASO_DISTRIBUTED_TEST_MARKER", marker.c_str(), 1);
+    execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
+    _exit(127);
+  }
+
+  bool execution_started = false;
+  bool owner_exited_early = false;
+  int owner_status = 0;
+  for (unsigned i = 0; i < 600; ++i) {
+    const auto observed = storage->get(RecordKind::SessionTurn, turn_id);
+    const auto run_id = observed.value("run_id", std::string{});
+    if (!run_id.empty() && observed.value("state", std::string{}) == "running" &&
+        std::filesystem::exists(marker) &&
+        storage->get(RecordKind::Run, run_id).get<Run>().state == RunState::Running) {
+      execution_started = true;
+      break;
+    }
+    if (waitpid(owner, &owner_status, WNOHANG) == owner) {
+      owner_exited_early = true;
+      break;
+    }
+    std::this_thread::sleep_for(Milliseconds{10});
+  }
+  if (!execution_started) {
+    if (!owner_exited_early) {
+      kill(owner, SIGKILL);
+      waitpid(owner, &owner_status, 0);
+    }
+    ADD_FAILURE() << "session worker did not enter the provider fixture before the deadline";
+    return;
+  }
+  ASSERT_EQ(kill(owner, SIGKILL), 0);
+  ASSERT_EQ(waitpid(owner, &owner_status, 0), owner);
+  ASSERT_TRUE(WIFSIGNALED(owner_status));
+  EXPECT_EQ(WTERMSIG(owner_status), SIGKILL);
+
+  asio::io_context recovery_io;
+  Service recovery(recovery_io, configuration);
+  recovery.functions().add(
+      "session_process_hold",
+      std::make_shared<Function>([](ExecutionContext &context, const Json &input) -> Task<Json> {
+        co_await context.delay(Milliseconds{20});
+        co_return input;
+      }));
+  std::jthread recovery_thread([&] { recovery_io.run(); });
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  std::string state;
+  while (std::chrono::steady_clock::now() < deadline) {
+    state = storage->get(RecordKind::SessionTurn, turn_id).value("state", "");
+    if (state == "succeeded" || state == "failed" || state == "cancelled")
+      break;
+    std::this_thread::sleep_for(Milliseconds{10});
+  }
+  recovery.shutdown();
+  recovery_io.stop();
+  recovery_thread.join();
+
+  const auto completed = storage->get(RecordKind::SessionTurn, turn_id);
+  EXPECT_EQ(state, "succeeded");
+  EXPECT_EQ(completed.at("state"), "succeeded");
+  EXPECT_EQ(completed.at("result").at("value"), "survives-owner-death");
+  const auto run_id = completed.value("run_id", std::string{});
+  ASSERT_FALSE(run_id.empty());
+  const auto run = storage->get(RecordKind::Run, run_id).get<Run>();
+  EXPECT_EQ(run.state, RunState::Completed);
+  EXPECT_EQ(run.session_turn_id, turn_id);
+  const auto runs = storage->list(RecordKind::Run, "", 10000, 0);
+  EXPECT_EQ(std::count_if(runs.begin(), runs.end(), [&](const Json &record) {
+              return record.value("session_turn_id", std::string{}) == turn_id;
+            }),
+            1);
+  const auto events = storage->session_events(session.id, 0, 100);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(), [&](const Json &event) {
+              return event.value("type", std::string{}) == "turn.execution.completed" &&
+                     event.value("turn_id", std::string{}) == turn_id;
+            }),
+            1);
+#endif
+}
+
 TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
   IsolatedSchema database;
   if (database.dsn.empty())
