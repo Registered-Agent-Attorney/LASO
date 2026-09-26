@@ -1340,15 +1340,18 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
   ASSERT_FALSE(run_id.empty());
   EXPECT_EQ(recovery.get(RecordKind::Run, run_id).get<laso::Run>().session_turn_id, turn_id);
   const auto events = recovery.session_events(session.id, 0, 100);
-  EXPECT_EQ(std::count_if(events.begin(), events.end(), [&](const Json &event) {
-              return event.value("type", std::string{}) == "turn.execution.claimed" &&
-                     event.value("turn_id", std::string{}) == turn_id;
-            }),
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) == "turn.execution.claimed" &&
+                                   event.value("turn_id", std::string{}) == turn_id;
+                          }),
             2);
-  EXPECT_EQ(std::count_if(events.begin(), events.end(), [&](const Json &event) {
-              return event.value("type", std::string{}) == "turn.execution.completed" &&
-                     event.value("turn_id", std::string{}) == turn_id;
-            }),
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) ==
+                                       "turn.execution.completed" &&
+                                   event.value("turn_id", std::string{}) == turn_id;
+                          }),
             1);
 #else
   GTEST_SKIP() << "PostgreSQL session test hooks are not enabled";
