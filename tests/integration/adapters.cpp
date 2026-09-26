@@ -14,6 +14,7 @@
 #include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 
 using namespace laso;
@@ -581,6 +582,15 @@ TEST(Sessions, QueuedRunRecoversAfterServiceRestartWithoutDuplicateRun) {
         service.register_pipeline(single("type: function\n    function: session_restart"))
             .at("id")
             .get<std::string>();
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    bool interrupted_after_binding = false;
+    service.runtime().set_session_test_hook([&](SessionTestPoint point) {
+      if (!interrupted_after_binding && point == SessionTestPoint::AfterRunBinding) {
+        interrupted_after_binding = true;
+        throw std::runtime_error("injected session run binding interruption");
+      }
+    });
+#endif
     const auto session = service.create_session(pipeline);
     session_id = session.id;
     const auto accepted =
@@ -591,6 +601,9 @@ TEST(Sessions, QueuedRunRecoversAfterServiceRestartWithoutDuplicateRun) {
     EXPECT_EQ(stored.at("state"), "running");
     EXPECT_EQ(service.get(RecordKind::Run, run_id).at("state"), "Queued");
     EXPECT_EQ(executions.load(), 0U);
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    EXPECT_TRUE(interrupted_after_binding);
+#endif
   }
 
   asio::io_context restarted_io;
@@ -622,6 +635,70 @@ TEST(Sessions, QueuedRunRecoversAfterServiceRestartWithoutDuplicateRun) {
   EXPECT_EQ(started, 1U);
   EXPECT_EQ(completed, 1U);
 }
+
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+TEST(Sessions, ClaimedTurnRecoversAfterInterruptionBeforeRunBinding) {
+  TemporaryDirectory dir;
+  std::atomic<unsigned> executions{0};
+  std::string session_id;
+  std::string turn_id;
+  {
+    asio::io_context io;
+    Service service(io, config(dir.path));
+    service.functions().add(
+        "session_claim_restart",
+        std::make_shared<Function>([&](ExecutionContext &, const Json &input) -> Task<Json> {
+          executions.fetch_add(1);
+          co_return input;
+        }));
+    const auto pipeline =
+        service.register_pipeline(single("type: function\n    function: session_claim_restart"))
+            .at("id")
+            .get<std::string>();
+    const auto session = service.create_session(pipeline);
+    session_id = session.id;
+    bool interrupted_after_claim = false;
+    service.runtime().set_session_test_hook([&](SessionTestPoint point) {
+      if (!interrupted_after_claim && point == SessionTestPoint::AfterClaim) {
+        interrupted_after_claim = true;
+        throw std::runtime_error("injected session claim interruption");
+      }
+    });
+    const auto accepted = service.submit_session_turn(session.id, "claim-recovery",
+                                                       Json{{"value", "recover"}});
+    turn_id = accepted.at("id").get<std::string>();
+    EXPECT_TRUE(interrupted_after_claim);
+    const auto claimed = service.get(RecordKind::SessionTurn, turn_id);
+    EXPECT_EQ(claimed.at("state"), "claimed");
+    EXPECT_TRUE(claimed.value("run_id", std::string{}).empty());
+    EXPECT_EQ(executions.load(), 0U);
+  }
+
+  asio::io_context restarted_io;
+  Service restarted(restarted_io, config(dir.path));
+  restarted.functions().add(
+      "session_claim_restart",
+      std::make_shared<Function>([&](ExecutionContext &, const Json &input) -> Task<Json> {
+        executions.fetch_add(1);
+        co_return input;
+      }));
+  restarted.runtime().dispatch_session(session_id);
+  restarted_io.run();
+
+  const auto recovered = restarted.get(RecordKind::SessionTurn, turn_id);
+  EXPECT_EQ(recovered.at("state"), "succeeded");
+  EXPECT_FALSE(recovered.at("run_id").get<std::string>().empty());
+  EXPECT_EQ(executions.load(), 1U);
+  const auto events = restarted.session_events(session_id, 0, 100);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) ==
+                                       "turn.execution.completed" &&
+                                   event.value("turn_id", std::string{}) == turn_id;
+                          }),
+            1);
+}
+#endif
 
 TEST(Sessions, DifferentSessionsExecuteConcurrently) {
   TemporaryDirectory dir;

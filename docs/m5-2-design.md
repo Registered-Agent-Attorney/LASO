@@ -173,9 +173,21 @@ session lifecycle after restart or disconnect.
 
 ## Deterministic fault boundaries and acceptance
 
-Tests use test-only barriers/fault hooks around claim, run insertion/binding,
-provider return, and terminal commit. Hooks are compiled or enabled only in test
-builds and are unavailable in normal runtime configuration.
+`LASO_ENABLE_SESSION_TEST_HOOKS` defaults to off and is rejected unless
+`BUILD_TESTING` is enabled. It adds in-process fault points after claim, before
+and after run binding, and before and after the authoritative completion
+transaction. The PostgreSQL CI job opts in so the recovery tests exercise these
+boundaries; normal builds do not compile the hooks. The current integration
+tests inject an exception after claim and after binding, then restart the service
+to verify recovery. These tests verify durable boundary recovery, not abrupt OS
+process death.
+
+Run insertion and turn binding are a single storage transaction, so there is no
+durable state between those operations to crash into. A crash before that
+transaction commits leaves only a reclaimable claim; a crash after commit leaves
+the queued Run and its turn association together. Process-death tests remain
+separate acceptance gates because an in-process injected exception is not a
+substitute for killing the owner or worker process.
 
 The acceptance suite will prove basic dispatch and restart persistence;
 per-session ordering with a slow first turn; cross-session concurrency;

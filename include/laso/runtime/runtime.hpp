@@ -13,6 +13,15 @@
 #include <set>
 
 namespace laso {
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+enum class SessionTestPoint {
+  AfterClaim,
+  BeforeRunBinding,
+  AfterRunBinding,
+  BeforeCompletionCommit,
+  AfterCompletionCommit
+};
+#endif
 struct RuntimeDependencies {
   Storage &storage;
   EventBus &events;
@@ -49,6 +58,10 @@ public:
   bool idle() const;
   void start_distributed();
   void dispatch_session(const std::string &session_id);
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+  // Deterministic fault injection is available only in explicit test builds.
+  void set_session_test_hook(std::function<void(SessionTestPoint)> hook);
+#endif
 
 private:
   struct ParallelState;
@@ -73,6 +86,11 @@ private:
   std::map<std::string, ActiveNode> active_nodes_;
   bool stopping_ = false;
   bool distributed_started_ = false;
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+  std::mutex session_test_hook_mutex_;
+  std::function<void(SessionTestPoint)> session_test_hook_;
+  void session_test_point(SessionTestPoint point);
+#endif
   std::shared_ptr<asio::steady_timer> claim_timer_, lease_timer_, session_timer_;
   Task<void> claim_loop();
   Task<void> lease_loop();

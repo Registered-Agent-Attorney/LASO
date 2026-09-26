@@ -48,6 +48,21 @@ Runtime::Runtime(asio::io_context &io, Config config, RuntimeDependencies depend
       lease_timer_(std::make_shared<asio::steady_timer>(io)),
       session_timer_(std::make_shared<asio::steady_timer>(io)) {}
 Runtime::~Runtime() = default; // Owner must drain the executor before destruction.
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+void Runtime::set_session_test_hook(std::function<void(SessionTestPoint)> hook) {
+  std::lock_guard lock(session_test_hook_mutex_);
+  session_test_hook_ = std::move(hook);
+}
+void Runtime::session_test_point(SessionTestPoint point) {
+  std::function<void(SessionTestPoint)> hook;
+  {
+    std::lock_guard lock(session_test_hook_mutex_);
+    hook = session_test_hook_;
+  }
+  if (hook)
+    hook(point);
+}
+#endif
 void Runtime::start_distributed() {
   if (distributed_started_)
     return;
@@ -231,6 +246,9 @@ void Runtime::dispatch_session(const std::string &session_id) {
     const auto turn_fence = turn->value("dispatch_fencing_token", std::uint64_t{0});
     if (deps_.coordination && turn_fence != fence)
       throw Error(ErrorCode::Conflict, "Session claim fencing token changed");
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    session_test_point(SessionTestPoint::AfterClaim);
+#endif
     const auto pipeline_id = turn->value("pipeline_id", session.pipeline_id);
     const auto pipeline = deps_.resolve_pipeline(pipeline_id);
     run(pipeline, turn->at("input"), "session", "", "", 0, "", Json::object(), Json::object(),
@@ -330,6 +348,10 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
   records.push_back({RecordKind::Run, r.id, r.id, Json(r)});
   records.push_back({RecordKind::Event, event.id, r.id, Json(event)});
   try {
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    if (!r.session_id.empty() && terminal(r.state))
+      session_test_point(SessionTestPoint::BeforeCompletionCommit);
+#endif
     if (!r.session_id.empty() && terminal(r.state)) {
       Event session_event;
       deps_.storage.commit_session_run(records, r.owner_instance_id, r.fencing_token,
@@ -339,6 +361,10 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
     } else {
       deps_.storage.commit(records);
     }
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    if (!r.session_id.empty() && terminal(r.state))
+      session_test_point(SessionTestPoint::AfterCompletionCommit);
+#endif
   } catch (const Error &error) {
     if (deps_.coordination && error.code == ErrorCode::Conflict) {
       auto active = active_.find(r.id);
@@ -705,10 +731,16 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
     event.root_event_id = r.root_event_id;
     event.trigger_depth = r.trigger_depth;
     Event session_event;
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    session_test_point(SessionTestPoint::BeforeRunBinding);
+#endif
     if (!deps_.storage.bind_session_turn_run(r.session_id, r.session_turn_id, Json(r), Json(event),
                                              session_owner, session_fencing_token,
                                              Json(session_event)))
       throw Error(ErrorCode::Conflict, "Session run is already bound");
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    session_test_point(SessionTestPoint::AfterRunBinding);
+#endif
     deps_.events.publish(event);
     log_event(event);
   }
