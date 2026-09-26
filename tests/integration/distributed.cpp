@@ -799,7 +799,7 @@ edges:
   recovery.functions().add(
       "session_process_hold",
       std::make_shared<Function>([](ExecutionContext &context, const Json &input) -> Task<Json> {
-        co_await context.delay(Milliseconds{20});
+        co_await context.delay(Milliseconds{5000});
         co_return input;
       }));
   std::jthread recovery_thread([&] { recovery_io.run(); });
