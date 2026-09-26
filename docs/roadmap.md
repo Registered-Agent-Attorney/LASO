@@ -63,7 +63,7 @@ recovery for sessions.
 
 ### M5.2 — durable sequential turn execution and provider continuation
 
-Status: implementation in progress; bounded acceptance closure awaits validation of the corrected PostgreSQL retry fixture and required physical recovery evidence.
+Status: implementation in progress; hosted regression matrix passes, while physical owner-death, PostgreSQL outage/recovery, and restart-continuation evidence remain blocked by host-safety preflight.
 
 The durable state machine, run-binding transaction, execution ownership,
 continuation boundary, and close/cancellation races are specified in
