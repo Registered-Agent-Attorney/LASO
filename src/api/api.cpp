@@ -110,6 +110,13 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {404, {{"error", "Endpoint not found"}}};
   auto collection = match[1].str(), id = match[2].str(), action = match[3].str();
   if (collection == "sessions") {
+    auto public_turn = [](Json turn) {
+      turn.erase("dispatch_owner");
+      turn.erase("dispatch_fencing_token");
+      turn.erase("dispatch_expires_at");
+      turn.erase("dispatch_attempt");
+      return turn;
+    };
     if (method == "POST" && id.empty()) {
       const auto session = service_.create_session(body.at("pipeline_id").get<std::string>());
       auto result = Json(session);
@@ -118,24 +125,30 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     }
     if (method == "GET" && id.empty()) {
       auto sessions = service_.list(RecordKind::AgentSession, "", limit, offset);
-      for (auto &session : sessions)
+      for (auto &session : sessions) {
         session.erase("next_sequence");
+        session.erase("dispatch_generation");
+      }
       return {200, sessions};
     }
     if (method == "GET" && !id.empty() && action.empty()) {
       auto result = Json(service_.agent_session(id));
       result.erase("next_sequence");
+      result.erase("dispatch_generation");
       return {200, result};
     }
     if (method == "POST" && !id.empty() && action == "turns") {
       if (!body.contains("idempotency_key") || !body.contains("input"))
         return {400, {{"error", "Session turn requires idempotency_key and input"}}};
-      return {202, service_.submit_session_turn(id, body.at("idempotency_key").get<std::string>(),
-                                                body.at("input"))};
+      return {202, public_turn(service_.submit_session_turn(
+                       id, body.at("idempotency_key").get<std::string>(), body.at("input")))};
     }
     if (method == "GET" && !id.empty() && action == "turns") {
       (void)service_.agent_session(id);
-      return {200, service_.list(RecordKind::SessionTurn, id, limit, offset)};
+      auto turns = service_.list(RecordKind::SessionTurn, id, limit, offset);
+      for (auto &turn : turns)
+        turn = public_turn(std::move(turn));
+      return {200, turns};
     }
     if (method == "GET" && !id.empty() && action == "events")
       return {200, service_.session_events(id, after, limit)};

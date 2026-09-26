@@ -63,7 +63,11 @@ recovery for sessions.
 
 ### M5.2 — durable sequential turn execution and provider continuation
 
-Status: planned; implementation has not started.
+Status: implementation in progress; hosted regression matrix passes, while physical owner-death, PostgreSQL outage/recovery, and restart-continuation evidence remain blocked by host-safety preflight.
+
+The durable state machine, run-binding transaction, execution ownership,
+continuation boundary, and close/cancellation races are specified in
+[m5-2-design.md](m5-2-design.md).
 
 Connect accepted turns to LASO runs and the existing worker recovery and fencing
 model. The acceptance boundary must define per-session ordering and ownership,

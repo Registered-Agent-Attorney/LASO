@@ -25,7 +25,8 @@ enum class RecordKind {
   NodeWork,
   AgentSession,
   SessionTurn,
-  SessionEvent
+  SessionEvent,
+  SessionContinuation
 };
 struct Record {
   RecordKind kind;
@@ -60,6 +61,39 @@ public:
     (void)event;
     throw Error(ErrorCode::Configuration, "Storage backend does not support agent sessions");
   }
+  virtual std::optional<Json> claim_next_session_turn(const std::string &session_id,
+                                                      const std::string &owner_instance,
+                                                      std::uint64_t fencing_token,
+                                                      const std::string &lease_expires_at,
+                                                      Json event) {
+    (void)session_id;
+    (void)owner_instance;
+    (void)fencing_token;
+    (void)lease_expires_at;
+    (void)event;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support session execution");
+  }
+  virtual bool bind_session_turn_run(const std::string &session_id, const std::string &turn_id,
+                                     Json run, Json run_event, const std::string &owner_instance,
+                                     std::uint64_t fencing_token, Json session_event) {
+    (void)session_id;
+    (void)turn_id;
+    (void)run;
+    (void)run_event;
+    (void)owner_instance;
+    (void)fencing_token;
+    (void)session_event;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support session execution");
+  }
+  virtual void commit_session_run(const std::vector<Record> &records,
+                                  const std::string &owner_instance, std::uint64_t fencing_token,
+                                  Json session_event) {
+    (void)records;
+    (void)owner_instance;
+    (void)fencing_token;
+    (void)session_event;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support session execution");
+  }
   virtual bool close_agent_session(const std::string &session_id, Json event) {
     (void)session_id;
     (void)event;
@@ -90,6 +124,12 @@ public:
   void request_cancellation(const std::string &) override;
   bool claim(const Record &, const std::vector<Record> &associated = {}) override;
   bool submit_session_turn(const std::string &, const std::string &, const Json &, Json) override;
+  std::optional<Json> claim_next_session_turn(const std::string &, const std::string &,
+                                              std::uint64_t, const std::string &, Json) override;
+  bool bind_session_turn_run(const std::string &, const std::string &, Json, Json,
+                             const std::string &, std::uint64_t, Json) override;
+  void commit_session_run(const std::vector<Record> &, const std::string &, std::uint64_t,
+                          Json) override;
   bool close_agent_session(const std::string &, Json) override;
   std::vector<Json> session_events(const std::string &, std::uint64_t, std::size_t) const override;
   Json get(RecordKind, const std::string &) const override;
