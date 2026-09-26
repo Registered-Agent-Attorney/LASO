@@ -58,6 +58,8 @@ int main() {
     config.coordination_lease_ttl_ms = 1000;
     config.coordination_heartbeat_interval_ms = 100;
     config.max_pending_runs = 16;
+    if (const auto *pool_timeout = required("LASO_DISTRIBUTED_TEST_POSTGRES_POOL_TIMEOUT_MS"))
+      config.postgres_pool_acquisition_timeout_ms = std::stoull(pool_timeout);
     if (const auto *worker_host = required("LASO_DISTRIBUTED_TEST_WORKER_HOST")) {
       ProcessWorkerConfig worker;
       worker.executable = worker_host;
