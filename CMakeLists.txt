@@ -295,13 +295,23 @@ if(BUILD_TESTING)
     add_dependencies(laso_tests laso-distributed-process)
   endif()
   include(GoogleTest)
-  gtest_discover_tests(laso_tests DISCOVERY_TIMEOUT 60)
+  if(LASO_ENABLE_POSTGRES)
+    # The integration DSN is protected by a database-wide single-owner lease.
+    # Keep independent CTest processes out of that shared fixture while leaving
+    # concurrency inside each multi-instance acceptance test unchanged.
+    gtest_discover_tests(laso_tests DISCOVERY_TIMEOUT 60
+                         PROPERTIES RESOURCE_LOCK laso_postgres_test_database)
+  else()
+    gtest_discover_tests(laso_tests DISCOVERY_TIMEOUT 60)
+  endif()
   add_test(NAME cli_validate COMMAND laso pipeline validate ${PROJECT_SOURCE_DIR}/examples/hello-pipeline/pipeline.yaml)
   add_test(NAME process_smoke COMMAND bash ${PROJECT_SOURCE_DIR}/tests/integration/process-smoke.sh ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR})
   set_tests_properties(process_smoke PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
   if(LASO_ENABLE_POSTGRES)
     add_test(NAME distributed_m3_acceptance
              COMMAND bash ${PROJECT_SOURCE_DIR}/tests/acceptance/distributed-m3.sh ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR})
-    set_tests_properties(distributed_m3_acceptance PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
+    set_tests_properties(distributed_m3_acceptance PROPERTIES
+                         TIMEOUT 600 SKIP_RETURN_CODE 77
+                         RESOURCE_LOCK laso_postgres_test_database)
   endif()
 endif()

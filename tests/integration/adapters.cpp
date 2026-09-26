@@ -14,6 +14,9 @@
 #include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
 #include <mutex>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 
@@ -115,6 +118,85 @@ void register_continuation_fixture(Service &service,
   service.provider_registry().add("continuation-fixture",
                                   std::make_shared<SessionContinuationFixture>(state, mode));
 }
+
+class DefaultLogCapture {
+public:
+  DefaultLogCapture()
+      : previous_(spdlog::default_logger()), output_(std::make_shared<std::ostringstream>()) {
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(*output_);
+    auto logger = std::make_shared<spdlog::logger>("session-test-capture", sink);
+    logger->set_level(spdlog::level::trace);
+    spdlog::set_default_logger(std::move(logger));
+  }
+  ~DefaultLogCapture() {
+    spdlog::set_default_logger(std::move(previous_));
+  }
+  std::string str() const {
+    return output_->str();
+  }
+
+private:
+  std::shared_ptr<spdlog::logger> previous_;
+  std::shared_ptr<std::ostringstream> output_;
+};
+
+class SessionSseTestClient {
+public:
+  SessionSseTestClient(std::uint16_t port, const std::string &session_id, std::uint64_t cursor)
+      : stream_(io_) {
+    stream_.expires_after(std::chrono::seconds(5));
+    stream_.connect({asio::ip::make_address("127.0.0.1"), port});
+    const auto request = "GET /api/v1/sessions/" + session_id +
+                         "/events/stream HTTP/1.1\r\nHost: localhost\r\n"
+                         "Accept: text/event-stream\r\nLast-Event-ID: " +
+                         std::to_string(cursor) + "\r\n\r\n";
+    asio::write(stream_, asio::buffer(request));
+    asio::read_until(stream_, buffer_, "\r\n\r\n");
+    std::istream headers(&buffer_);
+    std::getline(headers, status_line_);
+    for (std::string line; std::getline(headers, line) && line != "\r";) {
+    }
+  }
+
+  std::pair<std::uint64_t, Json> next() {
+    stream_.expires_after(std::chrono::seconds(5));
+    asio::read_until(stream_, buffer_, "\n\n");
+    std::istream frame(&buffer_);
+    std::uint64_t sequence = 0;
+    std::string data;
+    for (std::string line; std::getline(frame, line);) {
+      if (line.empty() || line == "\r")
+        break;
+      if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+      if (line.rfind("id: ", 0) == 0)
+        sequence = std::stoull(line.substr(4));
+      else if (line.rfind("data: ", 0) == 0)
+        data = line.substr(6);
+    }
+    if (sequence == 0 || data.empty())
+      throw std::runtime_error("SSE stream returned a frame without an event");
+    auto event = Json::parse(data);
+    event["sequence"] = sequence;
+    return {sequence, std::move(event)};
+  }
+
+  void close() {
+    boost::system::error_code error;
+    stream_.socket().shutdown(asio::ip::tcp::socket::shutdown_both, error);
+    stream_.socket().close(error);
+  }
+
+  const std::string &status_line() const {
+    return status_line_;
+  }
+
+private:
+  asio::io_context io_;
+  boost::beast::tcp_stream stream_;
+  asio::streambuf buffer_;
+  std::string status_line_;
+};
 } // namespace
 
 TEST(Storage, PersistsAcrossConnections) {
@@ -739,11 +821,14 @@ TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
   TemporaryDirectory dir;
   auto trace = std::make_shared<ContinuationFixtureState>();
   trace->secret_prefix = "opaque-session-secret-" + uuid();
+  DefaultLogCapture log_capture;
   std::string pipeline_id;
   std::string session_a;
   std::string session_b;
   std::string first_a_state;
   std::string first_b_state;
+  std::string first_a_turn_id;
+  std::string first_b_turn_id;
   {
     asio::io_context io;
     Service service(io, continuation_config(dir.path));
@@ -753,6 +838,8 @@ TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
     session_b = service.create_session(pipeline_id).id;
     const auto turn_a = service.submit_session_turn(session_a, "A-first", Json{{"tag", "A1"}});
     const auto turn_b = service.submit_session_turn(session_b, "B-first", Json{{"tag", "B1"}});
+    first_a_turn_id = turn_a.at("id").get<std::string>();
+    first_b_turn_id = turn_b.at("id").get<std::string>();
     io.run();
     EXPECT_EQ(service.get(RecordKind::SessionTurn, turn_a.at("id").get<std::string>()).at("state"),
               "succeeded");
@@ -793,6 +880,14 @@ TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
     EXPECT_EQ(received.at("A2"), first_a_state);
     EXPECT_EQ(received.at("B2"), first_b_state);
 
+    const auto authoritative_a =
+        service.list(RecordKind::SessionContinuation, session_a).front().at("state");
+    const auto duplicate_completed_a =
+        service.submit_session_turn(session_a, "A-first", Json{{"tag", "A1"}});
+    EXPECT_EQ(duplicate_completed_a.at("id"), first_a_turn_id);
+    EXPECT_EQ(service.list(RecordKind::SessionContinuation, session_a).front().at("state"),
+              authoritative_a);
+
     Json public_views = Json::array();
     for (const auto &id : {session_a, session_b}) {
       public_views.push_back(api.handle("GET", "/api/v1/sessions/" + id, "").body);
@@ -807,6 +902,26 @@ TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
     EXPECT_EQ(public_views.dump().find(trace->secret_prefix), std::string::npos);
 
     const auto events = service.session_events(session_a, 0, 100);
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [&](const Json &event) {
+                              return event.value("type", std::string{}) == "input.accepted" &&
+                                     event.value("turn_id", std::string{}) == first_a_turn_id;
+                            }),
+              1);
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [&](const Json &event) {
+                              return event.value("type", std::string{}) ==
+                                         "turn.execution.completed" &&
+                                     event.value("turn_id", std::string{}) == first_a_turn_id;
+                            }),
+              1);
+    {
+      std::lock_guard lock(trace->mutex);
+      EXPECT_EQ(
+          std::count_if(trace->observed.begin(), trace->observed.end(),
+                        [](const ContinuationObservation &item) { return item.input_tag == "A1"; }),
+          1);
+    }
     ASSERT_FALSE(events.empty());
     HttpServer server(io, api, "127.0.0.1", 0);
     server.start();
@@ -840,6 +955,7 @@ TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
       streamed_frames.push_back('\n');
     }
     EXPECT_EQ(streamed_frames.find(trace->secret_prefix), std::string::npos);
+    EXPECT_EQ(log_capture.str().find(trace->secret_prefix), std::string::npos);
     boost::system::error_code ec;
     client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
     client.socket().close(ec);
@@ -877,10 +993,12 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
   options.validate();
   auto trace = std::make_shared<ContinuationFixtureState>();
   trace->secret_prefix = "postgres-opaque-session-secret-" + uuid();
+  DefaultLogCapture log_capture;
   std::string session_a;
   std::string session_b;
   std::string continuation_a;
   std::string continuation_b;
+  std::string first_a_turn_id;
   {
     asio::io_context io;
     Service service(io, options);
@@ -891,6 +1009,7 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
     session_b = service.create_session(pipeline).id;
     const auto first_a = service.submit_session_turn(session_a, "postgres-A1", Json{{"tag", "A1"}});
     const auto first_b = service.submit_session_turn(session_b, "postgres-B1", Json{{"tag", "B1"}});
+    first_a_turn_id = first_a.at("id").get<std::string>();
     io.run();
     EXPECT_EQ(service.get(RecordKind::SessionTurn, first_a.at("id").get<std::string>()).at("state"),
               "succeeded");
@@ -929,6 +1048,36 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
     ASSERT_TRUE(received.contains("B2"));
     EXPECT_EQ(received.at("A2"), continuation_a);
     EXPECT_EQ(received.at("B2"), continuation_b);
+
+    const auto authoritative_a =
+        service.list(RecordKind::SessionContinuation, session_a).front().at("state");
+    const auto duplicate_completed_a =
+        service.submit_session_turn(session_a, "postgres-A1", Json{{"tag", "A1"}});
+    EXPECT_EQ(duplicate_completed_a.at("id"), first_a_turn_id);
+    EXPECT_EQ(service.list(RecordKind::SessionContinuation, session_a).front().at("state"),
+              authoritative_a);
+    const auto events_a = service.session_events(session_a, 0, 100);
+    EXPECT_EQ(std::count_if(events_a.begin(), events_a.end(),
+                            [&](const Json &event) {
+                              return event.value("type", std::string{}) == "input.accepted" &&
+                                     event.value("turn_id", std::string{}) == first_a_turn_id;
+                            }),
+              1);
+    EXPECT_EQ(std::count_if(events_a.begin(), events_a.end(),
+                            [&](const Json &event) {
+                              return event.value("type", std::string{}) ==
+                                         "turn.execution.completed" &&
+                                     event.value("turn_id", std::string{}) == first_a_turn_id;
+                            }),
+              1);
+    {
+      std::lock_guard lock(trace->mutex);
+      EXPECT_EQ(
+          std::count_if(trace->observed.begin(), trace->observed.end(),
+                        [](const ContinuationObservation &item) { return item.input_tag == "A1"; }),
+          1);
+    }
+
     LocalDevelopmentIdentity identity;
     Api api(service, identity);
     for (const auto &id : {session_a, session_b}) {
@@ -940,6 +1089,7 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
       EXPECT_EQ(public_turns.dump().find(trace->secret_prefix), std::string::npos);
       EXPECT_EQ(public_events.dump().find(trace->secret_prefix), std::string::npos);
     }
+    EXPECT_EQ(log_capture.str().find(trace->secret_prefix), std::string::npos);
   }
 #else
   GTEST_SKIP() << "PostgreSQL backend is not enabled";
@@ -951,6 +1101,7 @@ TEST(Sessions, InvalidAndTimedOutContinuationDoNotAdvanceState) {
   asio::io_context io;
   auto trace = std::make_shared<ContinuationFixtureState>();
   trace->secret_prefix = "opaque-failure-secret-" + uuid();
+  DefaultLogCapture log_capture;
   Service service(io, continuation_config(dir.path));
   register_continuation_fixture(service, trace);
   LocalDevelopmentIdentity identity;
@@ -988,8 +1139,17 @@ TEST(Sessions, InvalidAndTimedOutContinuationDoNotAdvanceState) {
   const auto turns = api.handle("GET", "/api/v1/sessions/" + session.id + "/turns", "").body;
   const auto events =
       api.handle("GET", "/api/v1/sessions/" + session.id + "/events?after=0", "").body;
+  Json public_errors = Json::array();
+  for (const auto &failed_turn : {invalid, timed_out}) {
+    const auto turn = service.get(RecordKind::SessionTurn, failed_turn.at("id").get<std::string>());
+    const auto run_id = turn.value("run_id", std::string{});
+    if (!run_id.empty())
+      public_errors.push_back(api.handle("GET", "/api/v1/runs/" + run_id, "").body);
+  }
   EXPECT_EQ(turns.dump().find(trace->secret_prefix), std::string::npos);
   EXPECT_EQ(events.dump().find(trace->secret_prefix), std::string::npos);
+  EXPECT_EQ(public_errors.dump().find(trace->secret_prefix), std::string::npos);
+  EXPECT_EQ(log_capture.str().find(trace->secret_prefix), std::string::npos);
   EXPECT_EQ(api.handle("GET", "/api/v1/sessions/" + session.id + "/turns", "").status, 200U);
   EXPECT_EQ(service.get(RecordKind::SessionTurn, first.at("id").get<std::string>()).at("state"),
             "succeeded");
@@ -1000,12 +1160,27 @@ TEST(Sessions, CloseAfterProviderCallDoesNotAdvanceContinuation) {
   asio::io_context io;
   auto trace = std::make_shared<ContinuationFixtureState>();
   trace->secret_prefix = "cancelled-provider-state-" + uuid();
-  trace->block_until_released = true;
   Service service(io, continuation_config(dir.path));
   register_continuation_fixture(service, trace);
   const auto pipeline =
       service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
   const auto session = service.create_session(pipeline);
+  const auto first =
+      service.submit_session_turn(session.id, "before-close", Json{{"tag", "accepted-state"}});
+  io.run();
+  const auto first_turn_id = first.at("id").get<std::string>();
+  ASSERT_EQ(service.get(RecordKind::SessionTurn, first_turn_id).at("state"), "succeeded");
+  const auto previous_continuation =
+      service.list(RecordKind::SessionContinuation, session.id).front().at("state");
+
+  {
+    std::lock_guard lock(trace->mutex);
+    trace->block_until_released = true;
+    trace->provider_entered = false;
+    trace->allow_provider_return = false;
+    trace->provider_returned = false;
+  }
+  io.restart();
   const auto accepted =
       service.submit_session_turn(session.id, "close-during-provider", Json{{"tag", "blocked"}});
   const auto turn_id = accepted.at("id").get<std::string>();
@@ -1057,14 +1232,24 @@ TEST(Sessions, CloseAfterProviderCallDoesNotAdvanceContinuation) {
   EXPECT_TRUE(close_succeeded);
   EXPECT_TRUE(trace->provider_returned);
   EXPECT_EQ(state, "cancelled");
+  EXPECT_EQ(service.get(RecordKind::SessionTurn, first_turn_id).at("state"), "succeeded");
   EXPECT_EQ(service.agent_session(session.id).state, "closed");
-  EXPECT_TRUE(service.list(RecordKind::SessionContinuation, session.id).empty());
+  const auto continuations = service.list(RecordKind::SessionContinuation, session.id);
+  ASSERT_EQ(continuations.size(), 1U);
+  EXPECT_EQ(continuations.front().at("state"), previous_continuation);
   const auto events = service.session_events(session.id, 0, 100);
   EXPECT_EQ(std::count_if(events.begin(), events.end(),
                           [&](const Json &event) {
                             return event.value("type", std::string{}) ==
                                        "turn.execution.cancelled" &&
                                    event.value("turn_id", std::string{}) == turn_id;
+                          }),
+            1);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) ==
+                                       "turn.execution.completed" &&
+                                   event.value("turn_id", std::string{}) == first_turn_id;
                           }),
             1);
   EXPECT_EQ(Json(events).dump().find(trace->secret_prefix), std::string::npos);
@@ -1629,6 +1814,222 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
   GTEST_SKIP() << "PostgreSQL backend is not enabled";
 #endif
 }
+TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
+#if defined(LASO_HAS_POSTGRES)
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  if (!dsn || !*dsn)
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  auto schema = "laso_session_idempotency_" + uuid();
+  std::replace(schema.begin(), schema.end(), '-', '_');
+  struct SchemaCleanup {
+    std::string dsn;
+    std::string schema;
+    ~SchemaCleanup() {
+      try {
+        pqxx::connection connection(dsn);
+        pqxx::work transaction(connection);
+        transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
+        transaction.commit();
+      } catch (...) {
+      }
+    }
+  } cleanup{dsn, schema};
+
+  TemporaryDirectory directory;
+  auto options = config(directory.path);
+  options.storage_backend = "postgres";
+  options.postgres_dsn = dsn;
+  options.postgres_schema = schema;
+  options.execution_mode = "multi_instance";
+  options.coordination_lease_ttl_ms = 1000;
+  options.coordination_heartbeat_interval_ms = 100;
+  options.validate();
+
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool provider_entered = false;
+  bool release_provider = false;
+  std::atomic<unsigned> calls{0};
+  auto function =
+      std::make_shared<Function>([&](ExecutionContext &context, const Json &input) -> Task<Json> {
+        calls.fetch_add(1);
+        std::unique_lock lock(mutex);
+        provider_entered = true;
+        condition.notify_all();
+        condition.wait(lock, [&] { return release_provider; });
+        lock.unlock();
+        context.check();
+        co_return input;
+      });
+
+  AgentSession session;
+  std::string pipeline_id;
+  {
+    asio::io_context bootstrap_io;
+    Service bootstrap(bootstrap_io, options);
+    bootstrap.functions().add("session_pg_idempotency", function);
+    pipeline_id =
+        bootstrap.register_pipeline(single("type: function\n    function: session_pg_idempotency"))
+            .at("id")
+            .get<std::string>();
+    session = bootstrap.create_session(pipeline_id);
+    bootstrap.shutdown();
+  }
+
+  asio::io_context first_io;
+  asio::io_context second_io;
+  Service first(first_io, options);
+  first.functions().add("session_pg_idempotency", function);
+  Service second(second_io, options);
+  second.functions().add("session_pg_idempotency", function);
+
+  const Json input{{"tag", "one-logical-turn"}};
+  std::barrier submit_start(3);
+  Json response_a;
+  Json response_b;
+  std::atomic<bool> submit_error_a{false};
+  std::atomic<bool> submit_error_b{false};
+  std::jthread submitter_a([&] {
+    submit_start.arrive_and_wait();
+    try {
+      response_a = first.submit_session_turn(session.id, "same-idempotency-key", input);
+    } catch (...) {
+      submit_error_a = true;
+    }
+  });
+  std::jthread submitter_b([&] {
+    submit_start.arrive_and_wait();
+    try {
+      response_b = second.submit_session_turn(session.id, "same-idempotency-key", input);
+    } catch (...) {
+      submit_error_b = true;
+    }
+  });
+  submit_start.arrive_and_wait();
+  submitter_a.join();
+  submitter_b.join();
+  ASSERT_FALSE(submit_error_a);
+  ASSERT_FALSE(submit_error_b);
+  ASSERT_EQ(response_a.at("id"), response_b.at("id"));
+  ASSERT_EQ(response_a.at("sequence"), response_b.at("sequence"));
+
+  EXPECT_THROW(second.submit_session_turn(session.id, "same-idempotency-key",
+                                          Json{{"tag", "conflicting-input"}}),
+               Error);
+
+  std::jthread first_thread([&] { first_io.run(); });
+  std::jthread second_thread([&] { second_io.run(); });
+  // The 5 s entry bound spans five 1 s lease periods; the 100 ms heartbeat
+  // renews ownership throughout. The 10 s completion bound stays finite.
+  bool entered = false;
+  {
+    std::unique_lock lock(mutex);
+    entered = condition.wait_for(lock, std::chrono::seconds(5), [&] { return provider_entered; });
+  }
+  if (!entered) {
+    const auto state = first.get(RecordKind::SessionTurn, response_a.at("id").get<std::string>())
+                           .value("state", "<missing>");
+    {
+      std::lock_guard lock(mutex);
+      release_provider = true;
+    }
+    condition.notify_all();
+    first.shutdown();
+    second.shutdown();
+    first_io.stop();
+    second_io.stop();
+    first_thread.join();
+    second_thread.join();
+    FAIL() << "Neither PostgreSQL service executed the committed turn; state=" << state
+           << ", provider calls=" << calls.load();
+    return;
+  }
+
+  const auto duplicate_running =
+      second.submit_session_turn(session.id, "same-idempotency-key", input);
+  EXPECT_EQ(duplicate_running.at("id"), response_a.at("id"));
+  EXPECT_THROW(second.submit_session_turn(session.id, "same-idempotency-key",
+                                          Json{{"tag", "conflicting-input"}}),
+               Error);
+  EXPECT_EQ(calls.load(), 1U);
+
+  {
+    std::lock_guard lock(mutex);
+    release_provider = true;
+  }
+  condition.notify_all();
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool terminal = false;
+  std::string last_state;
+  while (std::chrono::steady_clock::now() < deadline) {
+    last_state = first.get(RecordKind::SessionTurn, response_a.at("id").get<std::string>())
+                     .value("state", "<missing>");
+    if (last_state == "succeeded" || last_state == "failed" || last_state == "cancelled") {
+      terminal = true;
+      break;
+    }
+    std::this_thread::sleep_for(Milliseconds{10});
+  }
+  first.shutdown();
+  second.shutdown();
+  first_io.stop();
+  second_io.stop();
+  first_thread.join();
+  second_thread.join();
+  ASSERT_TRUE(terminal) << "the shared PostgreSQL turn did not reach a terminal state; last state="
+                        << last_state << ", provider calls=" << calls.load();
+
+  const auto completed = first.get(RecordKind::SessionTurn, response_a.at("id").get<std::string>());
+  EXPECT_EQ(completed.at("state"), "succeeded");
+  EXPECT_EQ(completed.at("id"), response_b.at("id"));
+  const auto run_id = completed.at("run_id").get<std::string>();
+  ASSERT_FALSE(run_id.empty());
+  const auto run = first.get(RecordKind::Run, run_id).get<laso::Run>();
+  EXPECT_EQ(run.session_turn_id, completed.at("id"));
+  EXPECT_GT(run.fencing_token, 0U);
+  EXPECT_EQ(calls.load(), 1U);
+
+  const auto duplicate_completed =
+      second.submit_session_turn(session.id, "same-idempotency-key", input);
+  EXPECT_EQ(duplicate_completed.at("id"), completed.at("id"));
+  EXPECT_EQ(duplicate_completed.at("run_id"), completed.at("run_id"));
+  const auto events = first.session_events(session.id, 0, 100);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) == "input.accepted" &&
+                                   event.value("turn_id", std::string{}) ==
+                                       completed.at("id").get<std::string>();
+                          }),
+            1);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) == "turn.execution.claimed" &&
+                                   event.value("turn_id", std::string{}) ==
+                                       completed.at("id").get<std::string>();
+                          }),
+            1);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) == "turn.execution.started" &&
+                                   event.value("turn_id", std::string{}) ==
+                                       completed.at("id").get<std::string>();
+                          }),
+            1);
+  EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                          [&](const Json &event) {
+                            return event.value("type", std::string{}) ==
+                                       "turn.execution.completed" &&
+                                   event.value("turn_id", std::string{}) ==
+                                       completed.at("id").get<std::string>();
+                          }),
+            1);
+  for (std::size_t i = 0; i < events.size(); ++i)
+    EXPECT_EQ(events[i].at("sequence"), i + 1);
+#else
+  GTEST_SKIP() << "PostgreSQL backend is not enabled";
+#endif
+}
 TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
 #if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
@@ -1838,6 +2239,84 @@ TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
       EXPECT_EQ(events[1].at("type"), "session.closed");
       EXPECT_EQ(events[1].at("sequence"), 2U);
       EXPECT_TRUE(storage->list(RecordKind::SessionTurn, session.id).empty());
+    }
+  });
+}
+TEST(Storage, SessionCloseRacesTurnClaimTransactionally) {
+  for_each_storage_backend([](const auto &backend) {
+    TemporaryDirectory dir;
+    auto storage = backend.open(dir.path / "session-close-claim-race.db");
+    AgentSession session;
+    storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+    const auto turn_id = session.id + "-close-claim";
+    const Json turn{
+        {"idempotency_key", "close-claim"}, {"input", {{"value", "work"}}}, {"state", "queued"}};
+    ASSERT_TRUE(storage->submit_session_turn(session.id, turn_id, turn, Json::object()));
+
+    std::barrier start(3);
+    std::optional<Json> claimed;
+    std::atomic<bool> close_won{false};
+    std::atomic<bool> unexpected_error{false};
+    std::jthread claimer([&] {
+      start.arrive_and_wait();
+      try {
+        claimed = storage->claim_next_session_turn(session.id, "close-claim-racer", 0, "",
+                                                   Json::object());
+      } catch (...) {
+        unexpected_error = true;
+      }
+    });
+    std::jthread closer([&] {
+      start.arrive_and_wait();
+      try {
+        close_won = storage->close_agent_session(session.id, Json::object());
+      } catch (...) {
+        unexpected_error = true;
+      }
+    });
+    start.arrive_and_wait();
+    claimer.join();
+    closer.join();
+
+    EXPECT_FALSE(unexpected_error);
+    EXPECT_TRUE(close_won);
+    const auto stored_turn = storage->get(RecordKind::SessionTurn, turn_id);
+    EXPECT_EQ(stored_turn.at("state"), "cancelled");
+    EXPECT_EQ(storage->get(RecordKind::AgentSession, session.id).at("state"), "closed");
+    const auto events = storage->session_events(session.id, 0, 10);
+    ASSERT_FALSE(events.empty());
+    for (std::size_t i = 0; i < events.size(); ++i)
+      EXPECT_EQ(events[i].at("sequence"), i + 1);
+    EXPECT_EQ(events.front().at("type"), "input.accepted");
+    EXPECT_EQ(events.back().at("type"), "session.closed");
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [](const Json &event) {
+                              return event.value("type", std::string{}) == "turn.execution.claimed";
+                            }),
+              claimed ? 1 : 0);
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [](const Json &event) {
+                              return event.value("type", std::string{}) ==
+                                     "turn.execution.cancelled";
+                            }),
+              1);
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [](const Json &event) {
+                              return event.value("type", std::string{}) == "session.closed";
+                            }),
+              1);
+    if (claimed) {
+      EXPECT_EQ(events.size(), 5U);
+      EXPECT_EQ(claimed->at("id"), turn_id);
+      EXPECT_EQ(events[1].at("type"), "turn.execution.claimed");
+      EXPECT_EQ(events[2].at("type"), "session.closing");
+      EXPECT_EQ(events[3].at("type"), "turn.execution.cancelled");
+      EXPECT_EQ(events[4].at("type"), "session.closed");
+    } else {
+      EXPECT_EQ(events.size(), 4U);
+      EXPECT_EQ(events[1].at("type"), "session.closing");
+      EXPECT_EQ(events[2].at("type"), "turn.execution.cancelled");
+      EXPECT_EQ(events[3].at("type"), "session.closed");
     }
   });
 }
@@ -2623,6 +3102,174 @@ TEST(Api, PersistentSessionsSurviveServiceRestart) {
               409U);
   }
 }
+TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
+  struct StreamCleanup {
+    HttpServer &server;
+    Service &service;
+    asio::io_context &io;
+    std::shared_ptr<ContinuationFixtureState> provider;
+    bool stopped = false;
+    void stop() {
+      if (stopped)
+        return;
+      if (provider) {
+        {
+          std::lock_guard lock(provider->mutex);
+          provider->allow_provider_return = true;
+        }
+        provider->condition.notify_all();
+      }
+      server.stop();
+      service.shutdown();
+      io.stop();
+      stopped = true;
+    }
+    ~StreamCleanup() {
+      stop();
+    }
+  };
+
+  TemporaryDirectory dir;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  trace->secret_prefix = "sse-replay-canary-" + uuid();
+  {
+    std::lock_guard lock(trace->mutex);
+    trace->block_until_released = true;
+  }
+
+  std::string session_id;
+  std::string turn_id;
+  std::vector<std::pair<std::uint64_t, Json>> first_client_prefix;
+  std::vector<std::pair<std::uint64_t, Json>> second_client_prefix;
+  {
+    asio::io_context io;
+    Service service(io, continuation_config(dir.path));
+    register_continuation_fixture(service, trace);
+    const auto pipeline =
+        service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+    const auto session = service.create_session(pipeline);
+    session_id = session.id;
+    LocalDevelopmentIdentity identity;
+    Api api(service, identity);
+    HttpServer server(io, api, "127.0.0.1", 0);
+    server.start();
+    std::jthread server_thread_a([&] { io.run(); });
+    std::jthread server_thread_b([&] { io.run(); });
+    StreamCleanup cleanup{server, service, io, trace};
+
+    SessionSseTestClient client_a(server.port(), session_id, 0);
+    SessionSseTestClient client_b(server.port(), session_id, 0);
+    EXPECT_NE(client_a.status_line().find("200 OK"), std::string::npos);
+    EXPECT_NE(client_b.status_line().find("200 OK"), std::string::npos);
+    const auto accepted = service.submit_session_turn(session_id, "two-client-replay",
+                                                      Json{{"tag", "two-client-replay"}});
+    turn_id = accepted.at("id").get<std::string>();
+
+    bool provider_entered = false;
+    {
+      std::unique_lock lock(trace->mutex);
+      provider_entered = trace->condition.wait_for(lock, std::chrono::seconds(5),
+                                                   [&] { return trace->provider_entered; });
+    }
+    if (!provider_entered) {
+      ADD_FAILURE() << "deterministic provider did not reach the active-turn barrier";
+      client_a.close();
+      client_b.close();
+      cleanup.stop();
+      server_thread_a.join();
+      server_thread_b.join();
+      return;
+    }
+
+    std::string stream_error;
+    try {
+      for (int i = 0; i < 3; ++i) {
+        first_client_prefix.push_back(client_a.next());
+        second_client_prefix.push_back(client_b.next());
+      }
+    } catch (const std::exception &error) {
+      stream_error = error.what();
+    }
+    const std::vector<std::string> expected{"input.accepted", "turn.execution.claimed",
+                                            "turn.execution.started"};
+    if (first_client_prefix.size() == expected.size() &&
+        second_client_prefix.size() == expected.size()) {
+      for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(first_client_prefix[i].first, i + 1);
+        EXPECT_EQ(second_client_prefix[i].first, i + 1);
+        EXPECT_EQ(first_client_prefix[i].second.at("type"), expected[i]);
+        EXPECT_EQ(second_client_prefix[i].second.at("type"), expected[i]);
+        EXPECT_EQ(first_client_prefix[i].second, second_client_prefix[i].second);
+      }
+    }
+
+    client_a.close();
+    client_b.close();
+    {
+      std::lock_guard lock(trace->mutex);
+      trace->allow_provider_return = true;
+    }
+    trace->condition.notify_all();
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool succeeded = false;
+    std::string final_state;
+    while (std::chrono::steady_clock::now() < deadline) {
+      final_state = service.get(RecordKind::SessionTurn, turn_id).value("state", "<missing>");
+      if (final_state == "succeeded" || final_state == "failed" || final_state == "cancelled") {
+        succeeded = final_state == "succeeded";
+        break;
+      }
+      std::this_thread::sleep_for(Milliseconds{10});
+    }
+    EXPECT_TRUE(succeeded) << "session turn failed to complete before restart; final state="
+                           << final_state;
+    EXPECT_TRUE(stream_error.empty()) << "SSE client failed: " << stream_error;
+    cleanup.stop();
+    server_thread_a.join();
+    server_thread_b.join();
+  }
+
+  {
+    asio::io_context io;
+    Service restarted(io, continuation_config(dir.path));
+    register_continuation_fixture(restarted, trace);
+    LocalDevelopmentIdentity identity;
+    Api api(restarted, identity);
+    HttpServer server(io, api, "127.0.0.1", 0);
+    server.start();
+    std::jthread server_thread_a([&] { io.run(); });
+    std::jthread server_thread_b([&] { io.run(); });
+    StreamCleanup cleanup{server, restarted, io, {}};
+
+    SessionSseTestClient client_a(server.port(), session_id, 3);
+    SessionSseTestClient client_b(server.port(), session_id, 3);
+    EXPECT_NE(client_a.status_line().find("200 OK"), std::string::npos);
+    EXPECT_NE(client_b.status_line().find("200 OK"), std::string::npos);
+    const auto completed_a = client_a.next();
+    const auto completed_b = client_b.next();
+    EXPECT_EQ(completed_a.first, 4U);
+    EXPECT_EQ(completed_b.first, 4U);
+    EXPECT_EQ(completed_a.second.at("type"), "turn.execution.completed");
+    EXPECT_EQ(completed_b.second.at("type"), "turn.execution.completed");
+    EXPECT_EQ(completed_a.second, completed_b.second);
+    EXPECT_EQ(completed_a.second.at("turn_id"), turn_id);
+    const auto replay = restarted.session_events(session_id, 3, 10);
+    EXPECT_EQ(replay.size(), 1U);
+    if (!replay.empty()) {
+      EXPECT_EQ(replay.front().at("type"), "turn.execution.completed");
+      EXPECT_EQ(replay.front().at("turn_id"), turn_id);
+    }
+    EXPECT_EQ(completed_a.second.dump().find(trace->secret_prefix), std::string::npos);
+
+    client_a.close();
+    client_b.close();
+    cleanup.stop();
+    server_thread_a.join();
+    server_thread_b.join();
+  }
+}
+
 TEST(Api, SessionSseDeliversCommittedJournalEvents) {
   TemporaryDirectory dir;
   asio::io_context io;

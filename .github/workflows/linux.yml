@@ -47,14 +47,20 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
   release:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
       - name: Install release-build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build libsqlite3-dev libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev libcli11-dev libboost-system-dev libgtest-dev curl jq
+          sudo apt-get install -y build-essential clang cmake ninja-build libsqlite3-dev libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev libcli11-dev libboost-system-dev libgtest-dev curl jq
       - name: Configure Release build
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then export CC=clang CXX=clang++; fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
       - name: Verify installed command-line tools
@@ -103,8 +109,16 @@ jobs:
         run: |
           jq -r '.[].file | select(endswith(".cpp"))' build/compile_commands.json |
             sort -u | xargs -r -n 1 clang-tidy-18 -p build
-      - name: Run SQLite and PostgreSQL storage/runtime tests
-        run: ctest --test-dir build --output-on-failure
+      - name: Run SQLite and PostgreSQL tests with parallel scheduling
+        run: ctest --test-dir build --output-on-failure --parallel 2
+        env:
+          LASO_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
+      - name: Repeat two-instance session contention tests
+        run: |
+          ctest --test-dir build --show-only=json-v1 |
+            jq -e '[.tests[].name | select(. == "Sessions.PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering" or . == "Sessions.PostgresTwoInstancesDeduplicateConcurrentSubmissions")] | length == 2'
+          ctest --test-dir build --output-on-failure --parallel 2 --repeat until-fail:3 \
+            -R '^(Sessions\.PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering|Sessions\.PostgresTwoInstancesDeduplicateConcurrentSubmissions)$'
         env:
           LASO_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
   s3:
