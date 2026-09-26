@@ -841,6 +841,157 @@ edges:
 #endif
 }
 
+TEST(DistributedExecution, SessionProcessCrashBoundariesRecoverDurably) {
+#if defined(LASO_HAS_POSTGRES) && defined(LASO_ENABLE_SESSION_TEST_HOOKS) && \
+    defined(LASO_DISTRIBUTED_PROCESS)
+  if (test_dsn().empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  const auto pipeline = R"yaml(
+laso: '1'
+name: session-process-crash-boundary
+version: 1
+nodes:
+  input: {type: input}
+  work: {type: function, function: session_process_hold}
+  output: {type: output}
+edges:
+  - {from: input, to: work}
+  - {from: work, to: output}
+)yaml";
+  const std::vector<std::string> boundaries{"after-claim", "before-run-binding", "after-run-binding",
+                                             "before-completion-commit", "after-completion-commit"};
+  for (const auto &boundary : boundaries) {
+    IsolatedSchema database;
+    TemporaryDirectory directory;
+    Config configuration = config(directory.path);
+    configuration.storage_backend = "postgres";
+    configuration.postgres_dsn = database.dsn;
+    configuration.postgres_schema = database.schema;
+    configuration.execution_mode = "multi_instance";
+    configuration.coordination_lease_ttl_ms = 1000;
+    configuration.coordination_heartbeat_interval_ms = 100;
+    configuration.validate();
+
+    AgentSession session;
+    std::string pipeline_id;
+    {
+      asio::io_context io;
+      Service seed(io, configuration);
+      seed.functions().add("session_process_hold",
+                           std::make_shared<Function>([](ExecutionContext &, const Json &input)
+                                                          -> Task<Json> { co_return input; }));
+      pipeline_id = seed.register_pipeline(pipeline).at("id").get<std::string>();
+      session = seed.create_session(pipeline_id);
+      seed.shutdown();
+    }
+
+    StorageOptions storage_options;
+    storage_options.backend = "postgres";
+    storage_options.postgres_dsn = database.dsn;
+    storage_options.postgres_schema = database.schema;
+    storage_options.allow_multiple_processes = true;
+    auto storage = create_storage(storage_options);
+    const auto turn_id = session.id + "-turn-" + boundary;
+    const Json turn{{"idempotency_key", boundary},
+                    {"input", {{"value", boundary}}},
+                    {"state", "queued"},
+                    {"accepted_at", timestamp()},
+                    {"pipeline_id", pipeline_id}};
+    ASSERT_TRUE(storage->submit_session_turn(session.id, turn_id, turn, Json::object()))
+        << "boundary=" << boundary;
+
+    const auto child = fork();
+    ASSERT_NE(child, -1) << "boundary=" << boundary;
+    if (child == 0) {
+      unsetenv("LASO_DISTRIBUTED_TEST_RUN_ID");
+      unsetenv("LASO_DISTRIBUTED_TEST_WORKER_HOST");
+      unsetenv("LASO_DISTRIBUTED_TEST_MARKER");
+      setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
+      setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
+      setenv("LASO_DISTRIBUTED_TEST_SESSION_ID", session.id.c_str(), 1);
+      setenv("LASO_DISTRIBUTED_TEST_TURN_ID", turn_id.c_str(), 1);
+      setenv("LASO_DISTRIBUTED_TEST_HOLD_MS", "0", 1);
+      setenv("LASO_DISTRIBUTED_TEST_SESSION_EXIT_AT", boundary.c_str(), 1);
+      execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
+      _exit(127);
+    }
+
+    bool exited = false;
+    int child_status = 0;
+    for (unsigned attempt = 0; attempt < 600; ++attempt) {
+      if (waitpid(child, &child_status, WNOHANG) == child) {
+        exited = true;
+        break;
+      }
+      std::this_thread::sleep_for(Milliseconds{10});
+    }
+    if (!exited) {
+      kill(child, SIGKILL);
+      waitpid(child, &child_status, 0);
+      ADD_FAILURE() << "fixture did not reach crash boundary " << boundary;
+      continue;
+    }
+    ASSERT_TRUE(WIFEXITED(child_status)) << "boundary=" << boundary;
+    ASSERT_EQ(WEXITSTATUS(child_status), 86) << "boundary=" << boundary;
+
+    const auto interrupted = storage->get(RecordKind::SessionTurn, turn_id);
+    const auto prior_run_id = interrupted.value("run_id", std::string{});
+    if (boundary == "after-claim" || boundary == "before-run-binding") {
+      EXPECT_EQ(interrupted.at("state"), "claimed") << "boundary=" << boundary;
+      EXPECT_TRUE(prior_run_id.empty()) << "boundary=" << boundary;
+    } else if (boundary == "after-run-binding" || boundary == "before-completion-commit") {
+      EXPECT_EQ(interrupted.at("state"), "running") << "boundary=" << boundary;
+      EXPECT_FALSE(prior_run_id.empty()) << "boundary=" << boundary;
+    } else {
+      EXPECT_EQ(interrupted.at("state"), "succeeded") << "boundary=" << boundary;
+      EXPECT_FALSE(prior_run_id.empty()) << "boundary=" << boundary;
+    }
+
+    asio::io_context recovery_io;
+    Service recovery(recovery_io, configuration);
+    recovery.functions().add(
+        "session_process_hold",
+        std::make_shared<Function>([](ExecutionContext &, const Json &input) -> Task<Json> {
+          co_return input;
+        }));
+    std::jthread recovery_thread([&] { recovery_io.run(); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    std::string state;
+    while (std::chrono::steady_clock::now() < deadline) {
+      state = storage->get(RecordKind::SessionTurn, turn_id).value("state", "");
+      if (state == "succeeded" || state == "failed" || state == "cancelled")
+        break;
+      std::this_thread::sleep_for(Milliseconds{10});
+    }
+    recovery.shutdown();
+    recovery_io.stop();
+    recovery_thread.join();
+
+    const auto completed = storage->get(RecordKind::SessionTurn, turn_id);
+    EXPECT_EQ(state, "succeeded") << "boundary=" << boundary;
+    EXPECT_EQ(completed.at("state"), "succeeded") << "boundary=" << boundary;
+    EXPECT_EQ(completed.at("result").at("value"), boundary) << "boundary=" << boundary;
+    const auto run_id = completed.value("run_id", std::string{});
+    ASSERT_FALSE(run_id.empty()) << "boundary=" << boundary;
+    const auto associated_runs = storage->list(RecordKind::Run, "", 10000, 0);
+    EXPECT_EQ(std::count_if(associated_runs.begin(), associated_runs.end(), [&](const Json &record) {
+                return record.value("session_turn_id", std::string{}) == turn_id;
+              }),
+              1)
+        << "boundary=" << boundary;
+    const auto events = storage->session_events(session.id, 0, 100);
+    EXPECT_EQ(std::count_if(events.begin(), events.end(), [&](const Json &event) {
+                return event.value("type", std::string{}) == "turn.execution.completed" &&
+                       event.value("turn_id", std::string{}) == turn_id;
+              }),
+              1)
+        << "boundary=" << boundary;
+  }
+#else
+  GTEST_SKIP() << "PostgreSQL session crash hooks and process fixture are not enabled";
+#endif
+}
+
 TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
   IsolatedSchema database;
   if (database.dsn.empty())

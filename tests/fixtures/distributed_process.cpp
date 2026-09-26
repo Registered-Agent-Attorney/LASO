@@ -3,6 +3,7 @@
 #include <fstream>
 #include <laso/application/service.hpp>
 #include <laso/runtime/executor.hpp>
+#include <string>
 #include <thread>
 
 using namespace laso;
@@ -12,6 +13,23 @@ const char *required(const char *name) {
   const auto *value = std::getenv(name);
   return value && *value ? value : nullptr;
 }
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+const char *test_point_name(SessionTestPoint point) {
+  switch (point) {
+  case SessionTestPoint::AfterClaim:
+    return "after-claim";
+  case SessionTestPoint::BeforeRunBinding:
+    return "before-run-binding";
+  case SessionTestPoint::AfterRunBinding:
+    return "after-run-binding";
+  case SessionTestPoint::BeforeCompletionCommit:
+    return "before-completion-commit";
+  case SessionTestPoint::AfterCompletionCommit:
+    return "after-completion-commit";
+  }
+  return "unknown";
+}
+#endif
 } // namespace
 
 int main() {
@@ -60,6 +78,15 @@ int main() {
         });
     service.functions().add("distributed_hold", hold);
     service.functions().add("session_process_hold", hold);
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+    if (const auto *exit_point = required("LASO_DISTRIBUTED_TEST_SESSION_EXIT_AT")) {
+      const std::string boundary(exit_point);
+      service.runtime().set_session_test_hook([boundary](SessionTestPoint point) {
+        if (boundary == test_point_name(point))
+          std::_Exit(86);
+      });
+    }
+#endif
     if (required("LASO_DISTRIBUTED_TEST_WORKER_HOST")) {
       service.register_pipeline(R"yaml(
 laso: '1'
