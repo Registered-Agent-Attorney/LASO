@@ -917,6 +917,10 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
           transition(r, RunState::Completed, "run.completed", std::move(records));
           co_return;
         }
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+        if (!r.session_id.empty())
+          session_test_point(SessionTestPoint::BeforeNodeCheckpointCommit);
+#endif
         checkpoint(r, "node.completed", std::move(records));
         completed = true;
         break;

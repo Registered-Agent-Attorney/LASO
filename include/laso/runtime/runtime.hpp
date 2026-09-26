@@ -16,8 +16,11 @@ namespace laso {
 #ifdef LASO_ENABLE_SESSION_TEST_HOOKS
 enum class SessionTestPoint {
   AfterClaim,
+  BeforeRunClaim,
   BeforeRunBinding,
   AfterRunBinding,
+  BeforeNodeCheckpointCommit,
+  NodeCheckpointRejected,
   BeforeCompletionCommit,
   AfterCompletionCommit
 };

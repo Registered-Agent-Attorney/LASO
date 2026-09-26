@@ -20,6 +20,40 @@ std::string test_dsn() {
   return value && *value ? value : std::string{};
 }
 
+void clear_distributed_fixture_environment() {
+  for (const auto *name : {"LASO_DISTRIBUTED_TEST_MODE",
+                           "LASO_DISTRIBUTED_TEST_DSN",
+                           "LASO_DISTRIBUTED_TEST_SCHEMA",
+                           "LASO_DISTRIBUTED_TEST_RUN_ID",
+                           "LASO_DISTRIBUTED_TEST_SESSION_ID",
+                           "LASO_DISTRIBUTED_TEST_TURN_ID",
+                           "LASO_DISTRIBUTED_TEST_HOLD_MS",
+                           "LASO_DISTRIBUTED_TEST_MAX_NODES",
+                           "LASO_DISTRIBUTED_TEST_WORKER_HOST",
+                           "LASO_DISTRIBUTED_TEST_EXTERNAL_CONTROL",
+                           "LASO_DISTRIBUTED_TEST_STOP_MARKER",
+                           "LASO_DISTRIBUTED_TEST_HOLD_POINTS",
+                           "LASO_DISTRIBUTED_TEST_BARRIER_DIR",
+                           "LASO_DISTRIBUTED_TEST_BARRIER_TIMEOUT_MS",
+                           "LASO_DISTRIBUTED_TEST_SESSION_EXIT_AT",
+                           "LASO_DISTRIBUTED_TEST_MARKER",
+                           "LASO_DISTRIBUTED_TEST_RELEASE",
+                           "LASO_DISTRIBUTED_TEST_PROVIDER_ENTERED",
+                           "LASO_DISTRIBUTED_TEST_PROVIDER_RELEASE",
+                           "LASO_DISTRIBUTED_TEST_PROVIDER_RESULT",
+                           "LASO_DISTRIBUTED_TEST_PROVIDER_CONTINUATION",
+                           "LASO_DISTRIBUTED_TEST_EXPECTED_CONTINUATION",
+                           "LASO_DISTRIBUTED_TEST_IO_THREADS",
+                           "LASO_DISTRIBUTED_TEST_COORDINATION_LEASE_TTL_MS",
+                           "LASO_DISTRIBUTED_TEST_COORDINATION_HEARTBEAT_INTERVAL_MS",
+                           "LASO_DISTRIBUTED_TEST_PG_CONNECT_TIMEOUT_MS",
+                           "LASO_DISTRIBUTED_TEST_DATA_DIR",
+                           "LASO_DISTRIBUTED_TEST_CASE",
+                           "LASO_DISTRIBUTED_TEST_TIMEOUT_MARKER",
+                           "LASO_DISTRIBUTED_TEST_ERROR_FILE"})
+    unsetenv(name);
+}
+
 struct IsolatedSchema {
   std::string dsn = test_dsn();
   std::string schema = "distributed_" + uuid();
@@ -614,6 +648,7 @@ edges:
       return pid_t{-1};
     }
     if (child == 0) {
+      clear_distributed_fixture_environment();
       setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
       setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
       setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
@@ -753,6 +788,7 @@ edges:
   const auto owner = fork();
   ASSERT_NE(owner, -1);
   if (owner == 0) {
+    clear_distributed_fixture_environment();
     setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
     setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
     setenv("LASO_DISTRIBUTED_TEST_SESSION_ID", session.id.c_str(), 1);
@@ -841,6 +877,199 @@ edges:
 #endif
 }
 
+TEST(DistributedExecution, SessionTurnRecoversAfterHardWorkerProcessDeath) {
+#if defined(LASO_HAS_POSTGRES) && defined(LASO_DISTRIBUTED_PROCESS)
+  IsolatedSchema database;
+  if (database.dsn.empty())
+    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  TemporaryDirectory directory;
+  Config configuration = config(directory.path);
+  configuration.storage_backend = "postgres";
+  configuration.postgres_dsn = database.dsn;
+  configuration.postgres_schema = database.schema;
+  configuration.execution_mode = "multi_instance";
+  configuration.coordination_lease_ttl_ms = 1000;
+  configuration.coordination_heartbeat_interval_ms = 100;
+  configuration.validate();
+
+  const auto pipeline = R"yaml(
+laso: '1'
+name: session-hard-worker-recovery
+version: 1
+nodes:
+  input: {type: input}
+  work:
+    type: function
+    function: session_process_hold
+    timeout_ms: 60000
+  output: {type: output}
+edges:
+  - {from: input, to: work}
+  - {from: work, to: output}
+)yaml";
+  AgentSession session;
+  std::string pipeline_id;
+  {
+    asio::io_context io;
+    Service seed(io, configuration);
+    seed.functions().add(
+        "session_process_hold",
+        std::make_shared<Function>(
+            [](ExecutionContext &, const Json &input) -> Task<Json> { co_return input; }));
+    pipeline_id = seed.register_pipeline(pipeline).at("id").get<std::string>();
+    session = seed.create_session(pipeline_id);
+    seed.shutdown();
+  }
+
+  StorageOptions storage_options;
+  storage_options.backend = "postgres";
+  storage_options.postgres_dsn = database.dsn;
+  storage_options.postgres_schema = database.schema;
+  storage_options.allow_multiple_processes = true;
+  auto storage = create_storage(storage_options);
+  const auto first_turn = session.id + "-turn-hard-worker-death";
+  const auto second_turn = session.id + "-turn-after-hard-worker-death";
+  const auto submit = [&](const std::string &turn_id, const std::string &key,
+                          const std::string &value) {
+    return storage->submit_session_turn(session.id, turn_id,
+                                        Json{{"idempotency_key", key},
+                                             {"input", {{"value", value}}},
+                                             {"state", "queued"},
+                                             {"accepted_at", timestamp()},
+                                             {"pipeline_id", pipeline_id}},
+                                        Json::object());
+  };
+  ASSERT_TRUE(submit(first_turn, "hard-worker-death-first", "survives-hard-worker-death"));
+  ASSERT_TRUE(submit(second_turn, "hard-worker-death-second", "next-turn-progresses"));
+
+  struct ChildProcess {
+    pid_t pid = -1;
+    ~ChildProcess() {
+      if (pid > 0) {
+        (void)kill(pid, SIGKILL);
+        int status = 0;
+        (void)waitpid(pid, &status, 0);
+      }
+    }
+    bool poll_exit(int &status) {
+      if (pid <= 0)
+        return true;
+      if (waitpid(pid, &status, WNOHANG) == pid) {
+        pid = -1;
+        return true;
+      }
+      return false;
+    }
+  };
+  ChildProcess worker;
+  const auto marker = directory.path / "worker-in-function.marker";
+  const auto release = directory.path / "worker-in-function.release";
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    clear_distributed_fixture_environment();
+    setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_SESSION_ID", session.id.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_TURN_ID", first_turn.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_HOLD_MS", "0", 1);
+    setenv("LASO_DISTRIBUTED_TEST_IO_THREADS", "3", 1);
+    setenv("LASO_DISTRIBUTED_TEST_COORDINATION_LEASE_TTL_MS", "1000", 1);
+    setenv("LASO_DISTRIBUTED_TEST_COORDINATION_HEARTBEAT_INTERVAL_MS", "100", 1);
+    setenv("LASO_DISTRIBUTED_TEST_BARRIER_TIMEOUT_MS", "60000", 1);
+    setenv("LASO_DISTRIBUTED_TEST_MARKER", marker.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_RELEASE", release.c_str(), 1);
+    execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
+    _exit(127);
+  }
+  worker.pid = child;
+
+  bool entered = false;
+  int worker_status = 0;
+  const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
+  while (std::chrono::steady_clock::now() < entered_deadline) {
+    if (std::filesystem::exists(marker)) {
+      entered = true;
+      break;
+    }
+    if (worker.poll_exit(worker_status))
+      break;
+    std::this_thread::sleep_for(Milliseconds{10});
+  }
+  ASSERT_TRUE(entered) << "worker did not enter the active function before the deadline";
+  const auto running = storage->get(RecordKind::SessionTurn, first_turn);
+  ASSERT_EQ(running.value("state", std::string{}), "running");
+  ASSERT_FALSE(running.value("cancellation_requested", false));
+  const auto run_id = running.value("run_id", std::string{});
+  ASSERT_FALSE(run_id.empty());
+  const auto run = storage->get(RecordKind::Run, run_id).get<laso::Run>();
+  ASSERT_FALSE(terminal(run.state));
+  CoordinationOptions coordination_options;
+  coordination_options.postgres_dsn = database.dsn;
+  coordination_options.postgres_schema = database.schema;
+  auto observer = create_coordination(coordination_options, "hard-worker-death-observer-" + uuid());
+  const auto lease = observer->inspect("run:" + run_id);
+  ASSERT_TRUE(lease);
+  ASSERT_TRUE(lease->active);
+  EXPECT_EQ(lease->owner_instance, run.owner_instance_id);
+  EXPECT_EQ(lease->fencing_token, run.fencing_token);
+
+  asio::io_context recovery_io;
+  Service recovery(recovery_io, configuration);
+  recovery.functions().add(
+      "session_process_hold",
+      std::make_shared<Function>(
+          [](ExecutionContext &, const Json &input) -> Task<Json> { co_return input; }));
+  std::jthread recovery_thread([&] { recovery_io.run(); });
+
+  ASSERT_EQ(kill(worker.pid, SIGKILL), 0);
+  ASSERT_EQ(waitpid(worker.pid, &worker_status, 0), worker.pid);
+  worker.pid = -1;
+  ASSERT_TRUE(WIFSIGNALED(worker_status));
+  ASSERT_EQ(WTERMSIG(worker_status), SIGKILL);
+
+  const auto recovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
+  std::string first_state;
+  std::string second_state;
+  while (std::chrono::steady_clock::now() < recovery_deadline) {
+    first_state = storage->get(RecordKind::SessionTurn, first_turn).value("state", std::string{});
+    second_state = storage->get(RecordKind::SessionTurn, second_turn).value("state", std::string{});
+    if (first_state == "succeeded" && second_state == "succeeded")
+      break;
+    std::this_thread::sleep_for(Milliseconds{10});
+  }
+  recovery.shutdown();
+  recovery_io.stop();
+  recovery_thread.join();
+
+  EXPECT_EQ(first_state, "succeeded") << "hard worker death must not become implicit cancellation";
+  EXPECT_EQ(second_state, "succeeded") << "the next queued turn must progress after recovery";
+  const auto recovered = storage->get(RecordKind::SessionTurn, first_turn);
+  EXPECT_FALSE(recovered.value("cancellation_requested", false));
+  EXPECT_EQ(recovered.at("result").at("value"), "survives-hard-worker-death");
+  for (const auto &turn_id : {first_turn, second_turn}) {
+    const auto current = storage->get(RecordKind::SessionTurn, turn_id);
+    const auto runs = storage->list(RecordKind::Run, "", 10000, 0);
+    EXPECT_EQ(std::count_if(runs.begin(), runs.end(),
+                            [&](const Json &record) {
+                              return record.value("session_turn_id", std::string{}) == turn_id;
+                            }),
+              1);
+    const auto events = storage->session_events(session.id, 0, 100);
+    EXPECT_EQ(std::count_if(events.begin(), events.end(),
+                            [&](const Json &event) {
+                              return event.value("type", std::string{}) ==
+                                         "turn.execution.completed" &&
+                                     event.value("turn_id", std::string{}) == turn_id;
+                            }),
+              1);
+    EXPECT_FALSE(current.value("cancellation_requested", false));
+  }
+#else
+  GTEST_SKIP() << "PostgreSQL process recovery fixture is not enabled";
+#endif
+}
+
 TEST(DistributedExecution, SessionProcessCrashBoundariesRecoverDurably) {
 #if defined(LASO_HAS_POSTGRES) && defined(LASO_ENABLE_SESSION_TEST_HOOKS) &&                       \
     defined(LASO_DISTRIBUTED_PROCESS)
@@ -905,9 +1134,7 @@ edges:
     const auto child = fork();
     ASSERT_NE(child, -1) << "boundary=" << boundary;
     if (child == 0) {
-      unsetenv("LASO_DISTRIBUTED_TEST_RUN_ID");
-      unsetenv("LASO_DISTRIBUTED_TEST_WORKER_HOST");
-      unsetenv("LASO_DISTRIBUTED_TEST_MARKER");
+      clear_distributed_fixture_environment();
       setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
       setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
       setenv("LASO_DISTRIBUTED_TEST_SESSION_ID", session.id.c_str(), 1);
@@ -1102,6 +1329,7 @@ edges:
   const auto child = fork();
   ASSERT_NE(child, -1);
   if (child == 0) {
+    clear_distributed_fixture_environment();
     setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
     setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
     setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
@@ -1155,10 +1383,6 @@ TEST(DistributedExecution, TimedOutWorkerAttemptReconcilesNodeWork) {
 
   asio::io_context io;
   Service controller(io, configuration);
-  setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
-  setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
-  setenv("LASO_DISTRIBUTED_TEST_WORKER_HOST", LASO_PROCESS_WORKER_HOST, 1);
-  setenv("LASO_DISTRIBUTED_TEST_MAX_NODES", "2", 1);
   const auto pipeline = R"yaml(
 laso: '1'
 name: process-worker-timeout
@@ -1182,10 +1406,15 @@ edges:
 )yaml";
   controller.register_pipeline(pipeline);
   const auto run_id = controller.start("process-worker-timeout@1", Json{{"value", "timeout"}});
-  setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
   const auto child = fork();
   ASSERT_NE(child, -1);
   if (child == 0) {
+    clear_distributed_fixture_environment();
+    setenv("LASO_DISTRIBUTED_TEST_DSN", database.dsn.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_SCHEMA", database.schema.c_str(), 1);
+    setenv("LASO_DISTRIBUTED_TEST_WORKER_HOST", LASO_PROCESS_WORKER_HOST, 1);
+    setenv("LASO_DISTRIBUTED_TEST_MAX_NODES", "2", 1);
+    setenv("LASO_DISTRIBUTED_TEST_RUN_ID", run_id.c_str(), 1);
     execl(LASO_DISTRIBUTED_PROCESS, LASO_DISTRIBUTED_PROCESS, nullptr);
     _exit(127);
   }
@@ -1202,8 +1431,6 @@ edges:
   ASSERT_TRUE(WIFEXITED(status));
   EXPECT_EQ(WEXITSTATUS(status), 1);
   result = controller.get(RecordKind::Run, run_id).get<laso::Run>();
-  unsetenv("LASO_DISTRIBUTED_TEST_WORKER_HOST");
-  unsetenv("LASO_DISTRIBUTED_TEST_MAX_NODES");
   controller.shutdown();
   ASSERT_EQ(result.state, RunState::Failed) << result.error;
   const auto work = controller.list(RecordKind::NodeWork, run_id);

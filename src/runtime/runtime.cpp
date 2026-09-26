@@ -377,6 +377,10 @@ void Runtime::checkpoint(Run &r, const std::string &type, std::vector<Record> re
 #endif
   } catch (const Error &error) {
     if (deps_.coordination && error.code == ErrorCode::Conflict) {
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+      if (!r.session_id.empty())
+        session_test_point(SessionTestPoint::NodeCheckpointRejected);
+#endif
       auto active = active_.find(r.id);
       if (active != active_.end()) {
         active->second.ownership_lost = true;
@@ -850,6 +854,9 @@ Task<void> Runtime::claim_loop() {
           continue;
         }
       }
+#ifdef LASO_ENABLE_SESSION_TEST_HOOKS
+      session_test_point(SessionTestPoint::BeforeRunClaim);
+#endif
       {
         std::lock_guard lock(mutex_);
         if (stopping_ || active_.size() >= config_.max_runs || active_.contains(run.id))
