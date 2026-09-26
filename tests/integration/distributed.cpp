@@ -770,7 +770,7 @@ edges:
     const auto run_id = observed.value("run_id", std::string{});
     if (!run_id.empty() && observed.value("state", std::string{}) == "running" &&
         std::filesystem::exists(marker) &&
-        storage->get(RecordKind::Run, run_id).get<Run>().state == RunState::Running) {
+        storage->get(RecordKind::Run, run_id).get<laso::Run>().state == RunState::Running) {
       execution_started = true;
       break;
     }
@@ -820,7 +820,7 @@ edges:
   EXPECT_EQ(completed.at("result").at("value"), "survives-owner-death");
   const auto run_id = completed.value("run_id", std::string{});
   ASSERT_FALSE(run_id.empty());
-  const auto run = storage->get(RecordKind::Run, run_id).get<Run>();
+  const auto run = storage->get(RecordKind::Run, run_id).get<laso::Run>();
   EXPECT_EQ(run.state, RunState::Completed);
   EXPECT_EQ(run.session_turn_id, turn_id);
   const auto runs = storage->list(RecordKind::Run, "", 10000, 0);
