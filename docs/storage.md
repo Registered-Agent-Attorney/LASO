@@ -34,11 +34,11 @@ boundary, not a distributed exactly-once guarantee.
 PostgreSQL uses a bounded RAII connection pool per `PostgresStorage`; each
 transaction remains bound to one acquired connection. Pool size and acquisition
 timeout are configurable and pool diagnostics are bounded. Startup creates the
-configured validated schema and applies immutable version-1 through version-9
+configured validated schema and applies immutable version-1 through version-11
 migrations in a transaction. Version 3 adds event-source state and external-event
 claim records; version 4 adds durable worker jobs; version 6 adds coordination
 lease state; version 7 adds service-instance state; version 8 adds durable
-`NodeWork` records for eligible distributed branch execution. A session-held advisory lock prevents two LASO services from owning the same schema by default. In
+`NodeWork` records for eligible distributed branch execution. Version 11 adds durable session context-generation and run-context snapshot records. Context generation creation checks the expected generation under the session row lock; turn/run binding persists the immutable run snapshot with its run/turn association. A session-held advisory lock prevents two LASO services from owning the same schema by default. In
 explicit `execution_mode: multi_instance`, schema migration uses a transaction
 advisory lock and run writes use lease/fencing predicates instead. Schema
 identifiers are validated before being quoted; table names come only from the

@@ -25,7 +25,9 @@ enum class RecordKind {
   AgentSession,
   SessionTurn,
   SessionEvent,
-  SessionContinuation
+  SessionContinuation,
+  SessionContextGeneration,
+  RunContextSnapshot
 };
 struct Record {
   RecordKind kind;
@@ -37,7 +39,7 @@ public:
   virtual ~Storage() = default;
   // An entire checkpoint commits atomically, or none of it does.
   virtual void commit(const std::vector<Record> &records) = 0;
-  // Atomically commits records only while the supplied ownership proof is current.
+  // Atomically commits records only while the PostgreSQL run lease is current.
   virtual void commit_owned(const std::vector<Record> &records, const std::string &resource_key,
                             const std::string &owner_instance, std::uint64_t fencing_token) = 0;
   // Control-plane cancellation is intentionally owner-independent and durable.
@@ -82,6 +84,22 @@ public:
     (void)session_event;
     throw Error(ErrorCode::Configuration, "Storage backend does not support session execution");
   }
+  virtual Json create_session_context_generation(const std::string &session_id,
+                                                 std::uint64_t expected_generation,
+                                                 std::uint64_t through_turn_sequence,
+                                                 const std::string &idempotency_key,
+                                                 const std::string &representation_kind,
+                                                 const std::string &representation_version,
+                                                 const Json &payload) {
+    (void)session_id;
+    (void)expected_generation;
+    (void)through_turn_sequence;
+    (void)idempotency_key;
+    (void)representation_kind;
+    (void)representation_version;
+    (void)payload;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support session context");
+  }
   virtual void commit_session_run(const std::vector<Record> &records,
                                   const std::string &owner_instance, std::uint64_t fencing_token,
                                   Json session_event) {
@@ -102,6 +120,20 @@ public:
     (void)after;
     (void)limit;
     throw Error(ErrorCode::Configuration, "Storage backend does not support agent sessions");
+  }
+  virtual std::optional<Json>
+  latest_session_context_generation(const std::string &session_id) const {
+    (void)session_id;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support session context");
+  }
+  virtual std::vector<Json> session_turns_between(const std::string &session_id,
+                                                  std::uint64_t after, std::uint64_t through,
+                                                  std::size_t limit) const {
+    (void)session_id;
+    (void)after;
+    (void)through;
+    (void)limit;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support session history");
   }
   virtual Json get(RecordKind kind, const std::string &id) const = 0;
   virtual std::vector<Json> list(RecordKind kind, const std::string &run_id = "",
