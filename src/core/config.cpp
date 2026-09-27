@@ -9,7 +9,6 @@
 #include <set>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <string_view>
 #include <yaml-cpp/yaml.h>
 
 namespace laso {
@@ -17,10 +16,12 @@ void Config::validate() {
   if (data_dir.empty())
     throw Error(ErrorCode::Configuration, "Data directory is empty");
   {
-    std::ifstream legacy(data_dir / "laso.db", std::ios::binary);
-    char signature[16]{};
-    if (legacy.read(signature, sizeof(signature)) &&
-        std::string_view(signature, sizeof(signature)) == std::string_view("SQLite format 3\0", 16))
+    std::error_code legacy_path_error;
+    const auto legacy_state = data_dir / "laso.db";
+    const bool legacy_state_exists = std::filesystem::exists(legacy_state, legacy_path_error);
+    if (legacy_path_error)
+      throw Error(ErrorCode::Configuration, "Cannot inspect legacy database state path");
+    if (legacy_state_exists)
       throw Error(ErrorCode::Configuration,
                   "Legacy SQLite state detected; preserve it and migrate it before startup");
   }
