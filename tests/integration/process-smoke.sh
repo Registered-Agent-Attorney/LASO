@@ -7,17 +7,30 @@ if [[ -z "$jq_bin" && -x "$source_dir/local-deps/root/usr/bin/jq" ]]; then
   jq_bin="$source_dir/local-deps/root/usr/bin/jq"
 fi
 [[ -n "$jq_bin" && -x "$jq_bin" ]] || { echo "jq is required" >&2; exit 77; }
+postgres_dsn=${LASO_TEST_POSTGRES_DSN:-${LASO_POSTGRES_DSN:-}}
+[[ -n "$postgres_dsn" ]] || { echo "PostgreSQL test DSN is required" >&2; exit 1; }
+command -v psql >/dev/null || { echo "psql is required for schema cleanup" >&2; exit 1; }
 jq() { "$jq_bin" "$@"; }
 temp=$(mktemp -d)
 server_pid=
+postgres_schema="laso_smoke_${$}"
 cleanup() {
+  local status=$?
   if [[ -n "$server_pid" ]]; then kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" || true; fi
+  for schema in "$postgres_schema" "${postgres_schema}_invalid"; do
+    psql "$postgres_dsn" -v ON_ERROR_STOP=1 -c \
+      "DROP SCHEMA IF EXISTS \"$schema\" CASCADE" >/dev/null || {
+      echo "could not clean up PostgreSQL test schema $schema" >&2
+      status=1
+    }
+  done
   rm -rf -- "$temp"
+  return "$status"
 }
 trap cleanup EXIT
 export LASO_DATA_DIR="$temp/state"
 unset LASO_CONFIG LASO_PLUGIN_DIR || true
-export LASO_POSTGRES_SCHEMA="laso_smoke_${$}"
+export LASO_POSTGRES_SCHEMA="$postgres_schema"
 "$build/bin/laso" pipeline validate "$source_dir/examples/hello-pipeline/pipeline.yaml"
 "$build/bin/laso" run start "$source_dir/examples/hello-pipeline/pipeline.yaml" > "$temp/hello.json"
 jq -e '.state == "Completed"' "$temp/hello.json"
