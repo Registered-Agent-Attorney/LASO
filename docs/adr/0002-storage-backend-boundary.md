@@ -1,5 +1,7 @@
 # ADR 0002: Storage is backend-neutral
 
+> Superseded for backend support by [ADR 0009](0009-postgres-only-storage.md). This records the former SQLite plus optional PostgreSQL policy; the generic `Storage` abstraction remains.
+
 ## Context
 
 LASO supports embedded SQLite and an optional PostgreSQL deployment without

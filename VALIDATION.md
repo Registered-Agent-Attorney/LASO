@@ -1,6 +1,34 @@
-> Historical validation record: entries below record the SQLite-first state at the time they were run. The PostgreSQL-only change has a separate current validation section appended after its builds and tests complete.
+> Historical validation record: dated sections below describe earlier SQLite-first work and prior PostgreSQL validation. Current PostgreSQL-only validation appears in the final section.
 
 # Validation record
+
+## PostgreSQL-only storage validation (2026-09-26)
+
+All local database tests used a fresh, disposable PostgreSQL 16.15 cluster on
+loopback with a dedicated `laso_test` database. No existing database service or
+schema was used. Tests exercised independent schemas and ran with deterministic
+session recovery hooks enabled.
+
+| Build | Configure/build/test | Result |
+|---|---|---|
+| Debug | `cmake -S . -B build-debug-final -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLASO_ENABLE_SESSION_TEST_HOOKS=ON`; `cmake --build build-debug-final --parallel 4`; `ctest --test-dir build-debug-final --output-on-failure --parallel 4` | **PASS: 263 total; 260 passed, 0 failed, 3 skipped** |
+| Release | `cmake -S . -B build-release-final -G Ninja -DCMAKE_BUILD_TYPE=Release -DLASO_ENABLE_SESSION_TEST_HOOKS=ON`; `cmake --build build-release-final --parallel 4`; `ctest --test-dir build-release-final --output-on-failure --parallel 4` | **PASS: 263 total; 260 passed, 0 failed, 3 skipped** |
+| ASan + UBSan | `cmake -S . -B build-sanitizers-final -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLASO_ENABLE_SESSION_TEST_HOOKS=ON -DLASO_ENABLE_ASAN=ON -DLASO_ENABLE_UBSAN=ON`; `cmake --build build-sanitizers-final --parallel 4`; `ctest --test-dir build-sanitizers-final --output-on-failure --parallel 3` with `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` and `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1` | **PASS: 263 total; 260 passed, 0 failed, 3 skipped** |
+
+The three skips in each suite were the two S3-only configuration checks in the
+non-S3 build and `distributed_m3_acceptance`, whose opt-in Codex/OpenCode agent
+executables were unavailable. The CTest PostgreSQL distributed, coordination,
+process-crash, session recovery, ownership, fencing, restart, CLI/API, schema
+migration/reopen, and connection failure cases all ran. The separate M3 script
+remains in CI and reports its missing optional prerequisites as a skip.
+
+The Release install completed under `/tmp/laso-postgres-only-install`, and the
+installed CLI reported `0.1.0-rc.1`. `ldd` on both `laso` and `laso-server`
+showed `libpqxx` and `libpq`, with no SQLite library. Clang 18 format validation,
+YAML parsing for the workflow and deployment examples, shell syntax checks, and
+`git diff --check` passed. Docker image build/startup/health validation could not
+run because Docker is not installed in this environment.
+
 
 ## Latest systemd deployment validation (2026-09-23)
 

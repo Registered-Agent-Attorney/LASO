@@ -1,5 +1,7 @@
 # ADR 0007: Prepare coordination primitives for opt-in distributed execution
 
+> Historical design scope. PostgreSQL coordination primitives remain active; SQLite-specific passages describe the former backend policy. See [ADR 0009](0009-postgres-only-storage.md).
+
 This ADR records the coordination primitives that preceded the distributed
 execution milestone. The single-owner defaults remain authoritative, while the
 later opt-in `execution_mode: multi_instance` uses these primitives for whole-run
