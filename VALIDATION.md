@@ -4,10 +4,10 @@
 
 ## PostgreSQL-only storage validation (2026-09-26)
 
-All local database tests used a fresh, disposable PostgreSQL 16.15 cluster on
-loopback with a dedicated `laso_test` database. No existing database service or
-schema was used. Tests exercised independent schemas and ran with deterministic
-session recovery hooks enabled.
+All local database tests used a disposable PostgreSQL 16.15 cluster on loopback
+with a dedicated `laso_pr16_qa` database. No unrelated database service or schema
+was used. Tests exercised independent schemas and ran with deterministic session
+recovery hooks enabled.
 
 | Build | Configure/build/test | Result |
 |---|---|---|
@@ -872,7 +872,7 @@ The d5, 9c40e65, and 8132de1 CI summaries and failed logs are retained in a rest
 
 ## PR #16 independent review retest (2026-09-26)
 
-On PR head `a87c60e5c5de825e4a6dab1640dce6b4c957d0d9`, the isolated PostgreSQL 16.15 cluster at port 65439 ran the full Debug, Release, and ASan+UBSan suites. Each reported 263 tests: 260 passed, 0 failed, and 3 skipped (two S3-specific tests in the non-S3 build and optional `distributed_m3_acceptance`). PostgreSQL-backed owner, lease/fencing, migration, schema reopen, persistence, crash recovery, pool, CLI/API, and connection-error cases ran in these suites. The branch remained based on `3cf8bed43d841086d58716bad223e08d6bf22a74`; upstream main had not moved.
+On PR head `f2dfe98cff19326883dd1695328f72a9f53089f5`, the isolated PostgreSQL 16.15 cluster at port 65439 ran the full Debug, Release, and ASan+UBSan suites. Each reported 263 tests: 260 passed, 0 failed, and 3 skipped (two S3-specific tests in the non-S3 build and optional `distributed_m3_acceptance`). PostgreSQL-backed owner, lease/fencing, migration, schema reopen, persistence, crash recovery, pool, CLI/API, and connection-error cases ran in these suites. The branch remained based on `3cf8bed43d841086d58716bad223e08d6bf22a74`; upstream main had not moved.
 
 The installed Release tree passed `cmake --install`; `ldd` on `laso-server` showed `libpqxx` and `libpq` and no SQLite library. The systemd user lifecycle acceptance passed against the disposable cluster after correcting stale test assumptions. This validates the invoking-user lifecycle, approvals through SIGTERM/SIGKILL restart, SIGINT, child cleanup, repeated transitions, and startup diagnostics; it does not validate a dedicated service account or system-unit sandbox. Docker/Podman and a Docker socket were unavailable, so image startup/health validation was not run. M3 remained skipped because active Codex sessions were present and its external worker adapters/prerequisites were unavailable; the acceptance was not launched to avoid interfering with those sessions.
 
