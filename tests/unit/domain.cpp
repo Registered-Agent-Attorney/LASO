@@ -403,6 +403,7 @@ TEST(Configuration, BoundsSessionSseStreamCapacity) {
 }
 TEST(Configuration, ValidatesContextReductionBudgets) {
   Config c;
+  c.postgres_dsn = "host=localhost dbname=laso_test";
   c.session_context_reduction_enabled = true;
   EXPECT_NO_THROW(c.validate());
   c.session_context_reduction_threshold_bytes = c.session_context_reduction_target_bytes;
