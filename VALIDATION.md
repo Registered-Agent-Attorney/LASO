@@ -1,3 +1,5 @@
+> Historical validation record: entries below record the SQLite-first state at the time they were run. The PostgreSQL-only change has a separate current validation section appended after its builds and tests complete.
+
 # Validation record
 
 ## Latest systemd deployment validation (2026-09-23)

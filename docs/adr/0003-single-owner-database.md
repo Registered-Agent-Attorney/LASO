@@ -26,3 +26,5 @@ fenced `NodeWork` claims. It does not provide exactly-once external effects.
 
 Superseded for PostgreSQL multi-instance mode by the distributed execution
 milestone; retained as the default ownership decision.
+
+> **Status: partially superseded** by ADR 0009. PostgreSQL single-owner mode remains; SQLite ownership no longer applies.

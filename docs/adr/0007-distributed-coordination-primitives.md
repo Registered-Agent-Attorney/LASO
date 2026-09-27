@@ -65,3 +65,5 @@ owner absolute path as portable state. Larger artifact transport, explicit
 remote cancellation acknowledgement, and worker lease-loss signalling remain
 future work. Pipeline-run ownership continues to use explicit multi-instance
 mode with fenced writes; exactly-once execution is not claimed.
+
+> **Status: partially superseded** by ADR 0009. PostgreSQL coordination remains; SQLite-specific constraints are historical.

@@ -19,3 +19,5 @@ shared behavior; backend-specific tests cover driver and deployment details.
 ## Supersedes
 
 None; this records the current architecture.
+
+> **Status: superseded** by ADR 0009. This records the former SQLite plus optional PostgreSQL policy. The generic `Storage` boundary remains; PostgreSQL is now the sole shipped implementation.
