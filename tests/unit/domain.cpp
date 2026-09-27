@@ -125,7 +125,7 @@ TEST(Configuration, RefusesUnreadableLegacySQLiteFile) {
                  "Legacy SQLite state detected; preserve it and migrate it before startup");
   }
   std::filesystem::permissions(path, std::filesystem::perms::owner_read |
-                                           std::filesystem::perms::owner_write);
+                                         std::filesystem::perms::owner_write);
 }
 TEST(Configuration, RejectsRemovedSQLiteConfigurationKeys) {
   TemporaryDirectory dir;
