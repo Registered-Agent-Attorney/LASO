@@ -90,7 +90,16 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
   if (method == "GET" && target == "/api/v1/health")
     return {200, {{"status", "ok"}, {"mode", "local-development"}}};
   if (method == "GET" && target == "/api/v1/version")
-    return {200, {{"version", version}, {"pipeline_schema", 1}, {"plugin_abi", 1}}};
+    return {200,
+            {{"version", version},
+             {"pipeline_schema", 1},
+             {"plugin_abi", 1},
+             {"capabilities",
+              {"sessions.durable",
+               "sessions.ordered_turns",
+               "sessions.sequential_execution",
+               "sessions.event_replay",
+               "sessions.sse"}}}};
   if (method == "GET" && target == "/api/v1/providers")
     return {200, service_.providers()};
   if (method == "GET" && target == "/api/v1/tools")
