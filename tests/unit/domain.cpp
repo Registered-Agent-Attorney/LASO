@@ -107,6 +107,26 @@ TEST(Configuration, RefusesToIgnoreExistingDefaultSQLiteFile) {
   c.postgres_dsn = test_dsn();
   EXPECT_THROW(c.validate(), Error);
 }
+TEST(Configuration, RefusesUnreadableLegacySQLiteFile) {
+  TemporaryDirectory dir;
+  const auto path = dir.path / "laso.db";
+  {
+    std::ofstream legacy(path, std::ios::binary);
+    legacy.write("SQLite format 3\0", 16);
+  }
+  std::filesystem::permissions(path, std::filesystem::perms::none);
+  Config c;
+  c.data_dir = dir.path;
+  try {
+    c.validate();
+    FAIL() << "configuration accepted unreadable legacy SQLite state";
+  } catch (const Error &error) {
+    EXPECT_STREQ(error.what(),
+                 "Legacy SQLite state detected; preserve it and migrate it before startup");
+  }
+  std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                           std::filesystem::perms::owner_write);
+}
 TEST(Configuration, RejectsRemovedSQLiteConfigurationKeys) {
   TemporaryDirectory dir;
   const auto path = dir.path / "laso.yaml";
