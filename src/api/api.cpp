@@ -95,11 +95,8 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
              {"pipeline_schema", 1},
              {"plugin_abi", 1},
              {"capabilities",
-              {"sessions.durable",
-               "sessions.ordered_turns",
-               "sessions.sequential_execution",
-               "sessions.event_replay",
-               "sessions.sse"}}}};
+              {"sessions.durable", "sessions.ordered_turns", "sessions.sequential_execution",
+               "sessions.event_replay", "sessions.sse"}}}};
   if (method == "GET" && target == "/api/v1/providers")
     return {200, service_.providers()};
   if (method == "GET" && target == "/api/v1/tools")
