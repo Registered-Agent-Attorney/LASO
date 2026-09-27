@@ -148,20 +148,20 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
     auto candidate = std::make_unique<Impl>();
     candidate->owner = std::make_unique<pqxx::connection>(dsn);
     pqxx::work tx(*candidate->owner);
+    const auto schema_name = quoted_schema(schema);
+    tx.exec("CREATE SCHEMA IF NOT EXISTS " + schema_name);
+    tx.exec("SET search_path TO " + schema_name + ", public");
     if (allow_multiple_processes) {
       tx.exec("SELECT pg_advisory_xact_lock(hashtextextended(current_database() || "
-              "':laso-schema-migration', 0))");
+              "':' || current_schema() || ':laso-schema-migration', 0))");
     } else {
       const auto lock =
           tx.exec_params("SELECT pg_try_advisory_lock(hashtextextended(current_database() || "
-                         "':laso-service-ownership', 0))");
+                         "':' || current_schema() || ':laso-service-ownership', 0))");
       if (lock.empty() || !lock.front()[0].as<bool>())
         throw Error(ErrorCode::Conflict, "PostgreSQL database is owned by another LASO process");
     }
 
-    const auto schema_name = quoted_schema(schema);
-    tx.exec("CREATE SCHEMA IF NOT EXISTS " + schema_name);
-    tx.exec("SET search_path TO " + schema_name + ", public");
     tx.exec("CREATE TABLE IF NOT EXISTS laso_schema_migrations ("
             "version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())");
     const auto version = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations")

@@ -9,34 +9,35 @@
 #include <set>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include <string_view>
 #include <yaml-cpp/yaml.h>
 
 namespace laso {
 void Config::validate() {
   if (data_dir.empty())
     throw Error(ErrorCode::Configuration, "Data directory is empty");
-  if (storage_backend != "sqlite" && storage_backend != "postgres")
-    throw Error(ErrorCode::Configuration, "Unsupported storage backend");
-  if (storage_backend == "postgres" && postgres_dsn.empty())
+  {
+    std::ifstream legacy(data_dir / "laso.db", std::ios::binary);
+    char signature[16]{};
+    if (legacy.read(signature, sizeof(signature)) &&
+        std::string_view(signature, sizeof(signature)) == std::string_view("SQLite format 3\0", 16))
+      throw Error(ErrorCode::Configuration,
+                  "Legacy SQLite state detected; preserve it and migrate it before startup");
+  }
+  if (postgres_dsn.empty())
     throw Error(ErrorCode::Configuration, "PostgreSQL DSN is required");
-  if (storage_backend == "postgres" &&
-      (postgres_schema.empty() || postgres_schema.size() > 63 ||
-       !std::isalpha(static_cast<unsigned char>(postgres_schema.front()))))
+  if (postgres_schema.empty() || postgres_schema.size() > 63 ||
+      !std::isalpha(static_cast<unsigned char>(postgres_schema.front())))
     throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
-  if (storage_backend == "postgres")
-    for (const auto ch : postgres_schema)
-      if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
-        throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
+  for (const auto ch : postgres_schema)
+    if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
+      throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
   if (execution_mode != "single" && execution_mode != "multi_instance")
     throw Error(ErrorCode::Configuration, "Invalid execution mode");
   if (coordination_mode == "experimental_multi_instance")
     execution_mode = "multi_instance";
-  if (execution_mode == "multi_instance" && storage_backend != "postgres")
-    throw Error(ErrorCode::Configuration, "multi_instance execution requires PostgreSQL storage");
   if (coordination_mode != "single_owner" && coordination_mode != "experimental_multi_instance")
     throw Error(ErrorCode::Configuration, "Invalid coordination mode");
-  if (db_path.empty())
-    db_path = data_dir / "laso.db";
   if (artifact_root.empty())
     artifact_root = data_dir / "artifacts";
   if (artifact_backend != "filesystem" && artifact_backend != "s3")
@@ -376,7 +377,6 @@ Config load_config(const std::filesystem::path &supplied,
     }
   }
   for (auto name : {"DATA_DIR",
-                    "DB_PATH",
                     "ARTIFACT_ROOT",
                     "ARTIFACT_BACKEND",
                     "ARTIFACT_S3_ENDPOINT",
@@ -393,7 +393,6 @@ Config load_config(const std::filesystem::path &supplied,
                     "ARTIFACT_SERVICE_TOKEN",
                     "ARTIFACT_SERVICE_HOST",
                     "ARTIFACT_SERVICE_PORT",
-                    "STORAGE_BACKEND",
                     "POSTGRES_DSN",
                     "POSTGRES_SCHEMA",
                     "EXECUTION_MODE",
@@ -517,10 +516,11 @@ Config load_config(const std::filesystem::path &supplied,
       c.artifact_service_host = v;
     else if (k == "artifact_service_port")
       c.artifact_service_port = integer(v);
-    else if (k == "storage_backend")
-      c.storage_backend = v;
     else if (k == "postgres_dsn")
       c.postgres_dsn = v;
+    else if (k == "db_path" || k == "storage_backend")
+      throw Error(ErrorCode::Configuration,
+                  "SQLite storage configuration was removed; preserve and migrate existing state");
     else if (k == "postgres_schema")
       c.postgres_schema = v;
     else if (k == "execution_mode")
@@ -537,8 +537,6 @@ Config load_config(const std::filesystem::path &supplied,
       c.coordination_lease_ttl_ms = uint64(v);
     else if (k == "coordination_heartbeat_interval_ms")
       c.coordination_heartbeat_interval_ms = uint64(v);
-    else if (k == "db_path")
-      c.db_path = v;
     else if (k == "max_artifact_bytes")
       c.max_artifact_bytes = uint64(v);
     else if (k == "max_artifact_temp_bytes")

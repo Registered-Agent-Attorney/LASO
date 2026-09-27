@@ -12,7 +12,6 @@
 #include <laso/runtime/workspace.hpp>
 #include <laso/storage/coordination.hpp>
 #include <laso/storage/factory.hpp>
-#include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
 #include <mutex>
 #include <spdlog/sinks/ostream_sink.h>
@@ -201,22 +200,22 @@ private:
 } // namespace
 
 TEST(Storage, PersistsAcrossConnections) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
     {
-      auto s = backend.open(dir.path / "state.db");
+      auto s = fixture.open(dir.path / "state.db");
       s->commit({{RecordKind::Pipeline, "example", "", {{"value", 42}}}});
     }
     {
-      auto s = backend.open(dir.path / "state.db");
+      auto s = fixture.open(dir.path / "state.db");
       EXPECT_EQ(s->get(RecordKind::Pipeline, "example").at("value"), 42);
     }
   });
 }
 TEST(Storage, TransactionRollsBackWholeCheckpoint) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::vector<Record> batch{
         {RecordKind::Run, "first", "first", {{"valid", true}}},
         {RecordKind::Message, "large", "first", std::string(4 * 1024 * 1024 + 1, 'a')}};
@@ -225,9 +224,9 @@ TEST(Storage, TransactionRollsBackWholeCheckpoint) {
   });
 }
 TEST(Storage, ConformanceStoresAllRecordKinds) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     constexpr std::array kinds = {RecordKind::Pipeline,
                                   RecordKind::Run,
                                   RecordKind::Attempt,
@@ -259,9 +258,9 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
   });
 }
 TEST(Storage, ConformancePreservesOrderAcrossUpdates) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     s->commit({{RecordKind::Message, "first", "run-1", {{"value", 1}}},
                {RecordKind::Message, "second", "run-1", {{"value", 2}}}});
     s->commit({{RecordKind::Message, "first", "run-1", {{"value", 3}}}});
@@ -272,9 +271,9 @@ TEST(Storage, ConformancePreservesOrderAcrossUpdates) {
   });
 }
 TEST(Storage, ConformanceRejectsConflictingPipelineRevision) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Record original{RecordKind::Pipeline, "hello@1", "", {{"yaml", "one"}}};
     s->commit({original});
     EXPECT_NO_THROW(s->commit({original}));
@@ -287,9 +286,9 @@ TEST(Storage, ConformanceRejectsConflictingPipelineRevision) {
   });
 }
 TEST(Storage, ConformanceSupportsPagination) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     for (int i = 0; i < 3; ++i)
       s->commit({{RecordKind::Event, "event-" + std::to_string(i), "run-1", {{"index", i}}}});
     const auto page = s->list(RecordKind::Event, "run-1", 2, 1);
@@ -299,9 +298,9 @@ TEST(Storage, ConformanceSupportsPagination) {
   });
 }
 TEST(Storage, ConformancePaginatesBeyondOnePage) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::vector<Record> records;
     records.reserve(10001);
     for (unsigned i = 0; i < 10001; ++i)
@@ -313,9 +312,9 @@ TEST(Storage, ConformancePaginatesBeyondOnePage) {
   });
 }
 TEST(Storage, ConformanceRejectsInvalidRecordInputs) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     try {
       s->commit({{static_cast<RecordKind>(99), "record", "run-1", Json::object()}});
       FAIL() << "invalid record kind should be rejected";
@@ -341,9 +340,9 @@ TEST(Storage, ConformanceRejectsInvalidRecordInputs) {
   });
 }
 TEST(Storage, ConformancePersistsStructuredOperationalRecords) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Json run = {{"id", "parent"},
                       {"state", "WaitingApproval"},
                       {"pipeline_id", "parent"},
@@ -378,9 +377,9 @@ TEST(Storage, ConformancePersistsStructuredOperationalRecords) {
   });
 }
 TEST(Storage, ConformanceSerializesConcurrentCommits) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::atomic<bool> failed = false;
     std::vector<std::jthread> writers;
     for (unsigned writer = 0; writer < 4; ++writer) {
@@ -401,12 +400,12 @@ TEST(Storage, ConformanceSerializesConcurrentCommits) {
   });
 }
 TEST(Storage, SessionTurnsAreOrderedIdempotentReplayableAndDurable) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
     const auto path = dir.path / "sessions.db";
     const auto session_id = "session-" + uuid();
     {
-      auto storage = backend.open(path);
+      auto storage = fixture.open(path);
       AgentSession session;
       session.id = session_id;
       session.pipeline_id = "example@1";
@@ -454,12 +453,12 @@ TEST(Storage, SessionTurnsAreOrderedIdempotentReplayableAndDurable) {
       EXPECT_EQ(closed_events.back().at("sequence"), 26U);
       EXPECT_EQ(closed_events.back().at("type"), "session.closed");
     }
-    auto reopened = backend.open(path);
+    auto reopened = fixture.open(path);
     EXPECT_EQ(reopened->session_events(session_id, 0, 100).size(), 26U);
   });
 }
 TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &backend) {
     SCOPED_TRACE(backend.name);
     TemporaryDirectory dir;
     auto storage = backend.open(dir.path / "session-dispatch.db");
@@ -966,10 +965,8 @@ TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
 }
 
 TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_continuation_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -988,7 +985,6 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
 
   TemporaryDirectory dir;
   auto options = continuation_config(dir.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.validate();
@@ -1092,9 +1088,6 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
     }
     EXPECT_EQ(log_capture.str().find(trace->secret_prefix), std::string::npos);
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
 TEST(Sessions, InvalidAndTimedOutContinuationDoNotAdvanceState) {
@@ -1368,10 +1361,8 @@ TEST(Sessions, QueuedSessionsDispatchWhenRunCapacityFrees) {
 }
 
 TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_exec_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1390,7 +1381,6 @@ TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
 
   TemporaryDirectory dir;
   Config options = config(dir.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   asio::io_context io;
@@ -1414,16 +1404,11 @@ TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
     if (event.at("type") == "turn.execution.completed" && event.at("turn_id") == turn_id)
       saw_completion = true;
   EXPECT_TRUE(saw_completion);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
 TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_startup_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1442,7 +1427,6 @@ TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
 
   TemporaryDirectory directory;
   auto options = config(directory.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
@@ -1469,7 +1453,6 @@ TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
   // Model a process exit after the acceptance transaction commits but before
   // its immediate in-process dispatch is durably reflected in turn state.
   StorageOptions storage_options;
-  storage_options.backend = "postgres";
   storage_options.postgres_dsn = dsn;
   storage_options.postgres_schema = schema;
   storage_options.allow_multiple_processes = true;
@@ -1516,16 +1499,12 @@ TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
                                    event.value("turn_id", std::string{}) == turn_id;
                           }),
             1);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
 TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
-#if defined(LASO_HAS_POSTGRES) && defined(LASO_ENABLE_SESSION_TEST_HOOKS)
+#if defined(LASO_ENABLE_SESSION_TEST_HOOKS)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_claim_recovery_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1544,7 +1523,6 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
 
   TemporaryDirectory directory;
   auto options = config(directory.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
@@ -1569,7 +1547,6 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
   }
 
   StorageOptions storage_options;
-  storage_options.backend = "postgres";
   storage_options.postgres_dsn = dsn;
   storage_options.postgres_schema = schema;
   storage_options.allow_multiple_processes = true;
@@ -1641,16 +1618,11 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
                                    event.value("turn_id", std::string{}) == turn_id;
                           }),
             1);
-#else
-  GTEST_SKIP() << "PostgreSQL session test hooks are not enabled";
-#endif
 }
 
 TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_claims_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1669,7 +1641,6 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
 
   TemporaryDirectory dir;
   auto options = config(dir.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
@@ -1713,7 +1684,6 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
   }
 
   StorageOptions storage_options;
-  storage_options.backend = options.storage_backend;
   storage_options.postgres_dsn = options.postgres_dsn;
   storage_options.postgres_schema = options.postgres_schema;
   storage_options.allow_multiple_processes = true;
@@ -1811,15 +1781,10 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
                             }),
               1);
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_idempotency_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1838,7 +1803,6 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
 
   TemporaryDirectory directory;
   auto options = config(directory.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
@@ -2067,15 +2031,10 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
             1);
   for (std::size_t i = 0; i < events.size(); ++i)
     EXPECT_EQ(events[i].at("sequence"), i + 1);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_stale_completion_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -2098,7 +2057,6 @@ TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
   auto owner_a = create_coordination(coordination_options, "session-owner-a");
   auto owner_b = create_coordination(coordination_options, "session-owner-b");
   StorageOptions storage_options;
-  storage_options.backend = "postgres";
   storage_options.postgres_dsn = dsn;
   storage_options.postgres_schema = schema;
   storage_options.allow_multiple_processes = true;
@@ -2211,15 +2169,12 @@ TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
                             return event.value("type", std::string{}) == "turn.execution.completed";
                           }),
             1);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
 TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto storage = backend.open(dir.path / "session-close-race.db");
+    auto storage = fixture.open(dir.path / "session-close-race.db");
     AgentSession session;
     storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
 
@@ -2284,7 +2239,7 @@ TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
   });
 }
 TEST(Storage, SessionCloseRacesTurnClaimTransactionally) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &backend) {
     TemporaryDirectory dir;
     auto storage = backend.open(dir.path / "session-close-claim-race.db");
     AgentSession session;
@@ -2363,25 +2318,24 @@ TEST(Storage, SessionCloseRacesTurnClaimTransactionally) {
 }
 TEST(Storage, IndependentSessionReadersSeeTheSameCommittedJournal) {
   TemporaryDirectory dir;
-  const auto path = dir.path / "shared-session.db";
-  SQLiteStorage writer(path);
-  SQLiteStorage first_reader(path);
-  SQLiteStorage second_reader(path);
+  auto writer = make_storage(dir.path / "shared-session.db");
+  auto first_reader = make_storage(dir.path / "shared-session.db");
+  auto second_reader = make_storage(dir.path / "shared-session.db");
   AgentSession session;
-  writer.commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+  writer->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
   const Json turn{{"idempotency_key", "input-1"}, {"input", {{"value", 1}}}};
   Event event;
-  ASSERT_TRUE(writer.submit_session_turn(session.id, "turn-1", turn, Json(event)));
-  const auto first = first_reader.session_events(session.id, 0, 10);
-  const auto second = second_reader.session_events(session.id, 0, 10);
+  ASSERT_TRUE(writer->submit_session_turn(session.id, "turn-1", turn, Json(event)));
+  const auto first = first_reader->session_events(session.id, 0, 10);
+  const auto second = second_reader->session_events(session.id, 0, 10);
   ASSERT_EQ(first.size(), 1U);
   EXPECT_EQ(first, second);
   EXPECT_EQ(second.front().at("sequence"), 1U);
 }
 TEST(Storage, ConformanceClaimsDurableOccurrenceOnce) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Record first{RecordKind::ScheduleOccurrence,
                        "schedule|due",
                        "",
@@ -2395,9 +2349,9 @@ TEST(Storage, ConformanceClaimsDurableOccurrenceOnce) {
   });
 }
 TEST(Storage, ConformanceSerializesConcurrentClaims) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::atomic<unsigned> winners = 0;
     std::vector<std::jthread> claimers;
     for (unsigned i = 0; i < 8; ++i) {
@@ -2411,9 +2365,9 @@ TEST(Storage, ConformanceSerializesConcurrentClaims) {
   });
 }
 TEST(Storage, ConformanceAtomicallyClaimsExternalEventAndDeduplicates) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Record claim{
         RecordKind::ExternalEventClaim,
         "external-event:source:event-1",
@@ -2427,9 +2381,9 @@ TEST(Storage, ConformanceAtomicallyClaimsExternalEventAndDeduplicates) {
   });
 }
 TEST(Storage, ConformanceSerializesConcurrentExternalEventClaims) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::atomic<unsigned> winners = 0;
     std::vector<std::jthread> claimers;
     for (unsigned i = 0; i < 8; ++i) {
@@ -2450,9 +2404,9 @@ TEST(Storage, ConformanceSerializesConcurrentExternalEventClaims) {
 }
 
 TEST(Storage, ConformancePersistsWorkerJobLifecycleAndRejectsInvalidUpdates) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     WorkerJob job;
     job.id = "worker-job-1";
     job.worker_id = "offline";
@@ -2502,9 +2456,9 @@ TEST(Storage, ConformancePersistsWorkerJobLifecycleAndRejectsInvalidUpdates) {
 }
 
 TEST(Storage, ConformanceClaimsWorkerJobIdentityOnce) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     WorkerJob job;
     job.id = "worker-claim";
     job.worker_id = "offline";
@@ -2537,9 +2491,9 @@ TEST(Workspace, ManifestStagesOnlyBoundedRelativeFilesWithIntegrity) {
 }
 
 TEST(Storage, ConformancePersistsAndFencesNodeWork) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     NodeWork work;
     work.id = "node-work-1";
     work.run_id = "run-1";
@@ -2578,16 +2532,13 @@ TEST(Storage, ConformancePersistsAndFencesNodeWork) {
 }
 
 TEST(Storage, PostgresRejectsSecondOwner) {
-#if defined(LASO_HAS_POSTGRES)
   if (!std::getenv("LASO_TEST_POSTGRES_DSN"))
     GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
-  for (const auto &backend : storage_backends()) {
-    if (backend.name != "postgres")
-      continue;
+  for (const auto &fixture : storage_fixtures()) {
     TemporaryDirectory dir;
-    auto first = backend.open(dir.path / "state.db");
+    auto first = fixture.open(dir.path / "state.db");
     try {
-      auto second = backend.open(dir.path / "state.db");
+      auto second = fixture.open(dir.path / "state.db");
       (void)second;
       ADD_FAILURE() << "a second PostgreSQL storage owner was accepted";
     } catch (const Error &error) {
@@ -2595,15 +2546,10 @@ TEST(Storage, PostgresRejectsSecondOwner) {
       EXPECT_STREQ(error.what(), "PostgreSQL database is owned by another LASO process");
     }
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_upgrade_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   const std::vector<std::string> prior_tables = {"pipelines",
@@ -2647,7 +2593,6 @@ TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
     transaction.commit();
 
     StorageOptions options;
-    options.backend = "postgres";
     options.postgres_dsn = dsn;
     options.postgres_schema = schema;
     options.allow_multiple_processes = true;
@@ -2673,21 +2618,15 @@ TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
   pqxx::work cleanup(cleanup_connection);
   cleanup.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
   cleanup.commit();
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Storage, PostgresRunsAndRecoversNormalRuntime) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   const auto dsn_copy = std::string(dsn);
   auto schema = "laso_runtime_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   TemporaryDirectory dir;
   Config c = config(dir.path);
-  c.storage_backend = "postgres";
   c.postgres_dsn = dsn_copy;
   c.postgres_schema = schema;
   c.validate();
@@ -2723,14 +2662,6 @@ TEST(Storage, PostgresRunsAndRecoversNormalRuntime) {
   pqxx::work transaction(connection);
   transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
   transaction.commit();
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
-}
-TEST(Storage, ProcessLeasePreventsCompetingExecutors) {
-  TemporaryDirectory dir;
-  ProcessLease first(dir.path / "state.db");
-  EXPECT_THROW(ProcessLease(dir.path / "state.db"), Error);
 }
 TEST(Artifacts, IgnoresUntrustedNamesForPath) {
   TemporaryDirectory dir;
@@ -3643,10 +3574,8 @@ TEST(Api, SessionSseSlotIsReleasedAfterConfiguredLifetimeAndShutdown) {
   EXPECT_EQ(server.metrics().closed_session_streams, 2U);
 }
 TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_sse_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -3664,7 +3593,6 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
   } cleanup{dsn, schema};
   TemporaryDirectory dir;
   Config c = config(dir.path);
-  c.storage_backend = "postgres";
   c.postgres_dsn = dsn;
   c.postgres_schema = schema;
   c.execution_mode = "multi_instance";
@@ -3769,9 +3697,6 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
     client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
     client.socket().close(ec);
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Api, RunMetadataIsPreservedForWorkerContext) {
   TemporaryDirectory dir;
@@ -3874,7 +3799,7 @@ TEST(Storage, InterruptedRunBecomesInspectablePausedCheckpoint) {
   r.pipeline_id = "hello";
   r.definition = fixture("hello-pipeline");
   {
-    auto s = make_storage(c.db_path);
+    auto s = make_storage(c.data_dir / "service");
     s->commit({{RecordKind::Run, r.id, r.id, Json(r)}});
   }
   asio::io_context io;
@@ -3888,7 +3813,7 @@ TEST(Storage, PersistedCancellationSurvivesRestart) {
   r.state = RunState::Running;
   r.cancellation_requested = true;
   {
-    auto s = make_storage(c.db_path);
+    auto s = make_storage(c.data_dir / "service");
     s->commit({{RecordKind::Run, r.id, r.id, Json(r)}});
   }
   asio::io_context io;
@@ -3904,7 +3829,7 @@ TEST(Storage, RecoveryDoesNotRewriteTerminalRuns) {
   r.pipeline_id = "completed";
   r.definition = fixture("hello-pipeline");
   {
-    auto storage = make_storage(c.db_path);
+    auto storage = make_storage(c.data_dir / "service");
     storage->commit({{RecordKind::Run, r.id, r.id, Json(r)}});
   }
   asio::io_context io;
@@ -3930,7 +3855,7 @@ TEST(Storage, RecoveryScansAttemptsBeyondOnePage) {
     records.push_back({RecordKind::Attempt, attempt.id, r.id, Json(attempt)});
   }
   {
-    auto storage = make_storage(c.db_path);
+    auto storage = make_storage(c.data_dir / "service");
     storage->commit(records);
   }
   asio::io_context io;
