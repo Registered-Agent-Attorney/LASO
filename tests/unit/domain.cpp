@@ -370,6 +370,7 @@ TEST(Configuration, RejectsZeroConcurrency) {
 }
 TEST(Configuration, BoundsSessionSseStreamCapacity) {
   Config c;
+  c.postgres_dsn = test_dsn();
   EXPECT_NO_THROW(c.validate());
   c.max_session_sse_streams = 0;
   EXPECT_THROW(c.validate(), Error);

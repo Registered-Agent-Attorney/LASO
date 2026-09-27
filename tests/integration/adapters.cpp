@@ -1620,6 +1620,8 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
             1);
 }
 
+#endif
+
 TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
   ASSERT_NE(dsn, nullptr);

@@ -272,16 +272,12 @@ if(BUILD_TESTING)
   endif()
   add_dependencies(laso_tests laso-distributed-process)
   include(GoogleTest)
-  # PostgreSQL is required; isolate each GoogleTest process and bound stuck cases.
-  gtest_discover_tests(laso_tests DISCOVERY_TIMEOUT 60
-                       PROPERTIES RESOURCE_LOCK laso_postgres_test_database
-                                  TIMEOUT 120)
+  # PostgreSQL is required; each test owns a private schema and has a bounded timeout.
+  gtest_discover_tests(laso_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 120)
   add_test(NAME cli_validate COMMAND laso pipeline validate ${PROJECT_SOURCE_DIR}/examples/hello-pipeline/pipeline.yaml)
   add_test(NAME process_smoke COMMAND bash ${PROJECT_SOURCE_DIR}/tests/integration/process-smoke.sh ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR})
   set_tests_properties(process_smoke PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
   add_test(NAME distributed_m3_acceptance
            COMMAND bash ${PROJECT_SOURCE_DIR}/tests/acceptance/distributed-m3.sh ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR})
-  set_tests_properties(distributed_m3_acceptance PROPERTIES
-                       TIMEOUT 600 SKIP_RETURN_CODE 77
-                       RESOURCE_LOCK laso_postgres_test_database)
+  set_tests_properties(distributed_m3_acceptance PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
 endif()
