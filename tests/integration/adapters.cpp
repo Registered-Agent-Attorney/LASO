@@ -2556,6 +2556,30 @@ TEST(Storage, PostgresRejectsSecondOwner) {
     }
   }
 }
+TEST(Storage, PostgresOwnerCanBeReacquiredImmediatelyAfterStorageDestruction) {
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  ASSERT_NE(dsn, nullptr);
+  TemporaryDirectory dir;
+  StorageOptions options;
+  options.postgres_dsn = dsn;
+  options.postgres_schema = schema_for(dir.path / "owner-lifecycle");
+
+  for (int attempt = 0; attempt < 25; ++attempt) {
+    {
+      auto owner = create_storage(options);
+      try {
+        auto competing = create_storage(options);
+        (void)competing;
+        ADD_FAILURE() << "a second PostgreSQL storage owner was accepted";
+      } catch (const Error &error) {
+        EXPECT_EQ(error.code, ErrorCode::Conflict);
+      }
+    }
+    std::unique_ptr<Storage> replacement;
+    EXPECT_NO_THROW(replacement = create_storage(options));
+    ASSERT_TRUE(replacement);
+  }
+}
 TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
   ASSERT_NE(dsn, nullptr);

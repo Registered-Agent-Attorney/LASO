@@ -3,6 +3,7 @@
 #include <laso/storage/postgres.hpp>
 #include <laso/workers/worker.hpp>
 #include <limits>
+#include <spdlog/spdlog.h>
 #include <version>
 // Ubuntu's libpqxx 7.8 package is built without std::source_location support,
 // while a C++20 consumer sees that library feature in <version>.  Keep the
@@ -137,6 +138,29 @@ void write_records(pqxx::work &tx, const std::vector<Record> &records) {
 struct PostgresStorage::Impl {
   std::unique_ptr<pqxx::connection> owner;
   std::unique_ptr<PostgresConnectionPool> pool;
+  std::optional<std::int64_t> owner_lock_key;
+
+  ~Impl() noexcept {
+    pool.reset();
+    if (!owner || !owner_lock_key)
+      return;
+    const auto report_unlock_failure = [](const char *reason) noexcept {
+      try {
+        spdlog::error("PostgreSQL owner lock release failed: {}", reason);
+      } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw on log failure.
+      }
+    };
+    try {
+      pqxx::nontransaction unlock(*owner);
+      const auto result = unlock.exec_params("SELECT pg_advisory_unlock($1::bigint)",
+                                             *owner_lock_key);
+      if (result.empty() || !result.front()[0].as<bool>())
+        report_unlock_failure("lock_not_held");
+    } catch (...) {
+      report_unlock_failure("connection_error");
+    }
+    owner.reset();
+  }
 };
 
 PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &schema,
@@ -155,11 +179,12 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
       tx.exec("SELECT pg_advisory_xact_lock(hashtextextended(current_database() || "
               "':' || current_schema() || ':laso-schema-migration', 0))");
     } else {
-      const auto lock =
-          tx.exec_params("SELECT pg_try_advisory_lock(hashtextextended(current_database() || "
-                         "':' || current_schema() || ':laso-service-ownership', 0))");
-      if (lock.empty() || !lock.front()[0].as<bool>())
+      const auto lock = tx.exec(
+          "SELECT key, pg_try_advisory_lock(key) FROM (SELECT hashtextextended(current_database() "
+          "|| ':' || current_schema() || ':laso-service-ownership', 0) AS key) AS owner_key");
+      if (lock.empty() || !lock.front()[1].as<bool>())
         throw Error(ErrorCode::Conflict, "PostgreSQL database is owned by another LASO process");
+      candidate->owner_lock_key = lock.front()[0].as<std::int64_t>();
     }
 
     tx.exec("CREATE TABLE IF NOT EXISTS laso_schema_migrations ("
