@@ -2931,7 +2931,11 @@ TEST(Api, HealthAndVersion) {
   LocalDevelopmentIdentity identity;
   Api api(s, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/health", "").status, 200U);
-  EXPECT_EQ(api.handle("GET", "/api/v1/version", "").body.at("version"), "0.1.0-rc.1");
+  const auto version = api.handle("GET", "/api/v1/version", "");
+  EXPECT_EQ(version.body.at("version"), "0.1.0-rc.1");
+  EXPECT_EQ(version.body.at("capabilities"),
+            (Json{"sessions.durable", "sessions.ordered_turns", "sessions.sequential_execution",
+                  "sessions.event_replay", "sessions.sse"}));
 }
 TEST(Api, RegistersAndCreatesRun) {
   TemporaryDirectory dir;
@@ -2959,6 +2963,11 @@ TEST(Api, PersistentSessionTurnsCanBeRetriedAndReplayed) {
   auto created = api.handle("POST", "/api/v1/sessions", R"({"pipeline_id":"test@1"})");
   ASSERT_EQ(created.status, 201U);
   const auto id = created.body.at("id").get<std::string>();
+  const auto listed = api.handle("GET", "/api/v1/sessions?limit=50&offset=0", "");
+  ASSERT_EQ(listed.status, 200U);
+  ASSERT_EQ(listed.body.size(), 1U);
+  EXPECT_EQ(listed.body.front().at("id"), id);
+  EXPECT_FALSE(listed.body.front().contains("next_sequence"));
   const auto inspected = api.handle("GET", "/api/v1/sessions/" + id, "").body;
   EXPECT_EQ(inspected.at("state"), "open");
   EXPECT_FALSE(inspected.contains("backend_state"));
@@ -3078,6 +3087,17 @@ TEST(Api, PersistentSessionsSurviveServiceRestart) {
     const auto open = api.handle("GET", "/api/v1/sessions/" + open_session_id, "");
     ASSERT_EQ(open.status, 200U);
     EXPECT_EQ(open.body.at("state"), "open");
+    const auto listed = api.handle("GET", "/api/v1/sessions?limit=50&offset=0", "");
+    ASSERT_EQ(listed.status, 200U);
+    bool found_open = false;
+    for (const auto &session : listed.body)
+      found_open |= session.at("id") == open_session_id;
+    EXPECT_TRUE(found_open);
+    const auto turns = api.handle("GET", "/api/v1/sessions/" + open_session_id + "/turns", "");
+    ASSERT_EQ(turns.status, 200U);
+    ASSERT_EQ(turns.body.size(), 1U);
+    EXPECT_EQ(turns.body.front().at("sequence"), 1U);
+    EXPECT_EQ(turns.body.front().at("input").at("text"), "one");
     const auto open_events =
         api.handle("GET", "/api/v1/sessions/" + open_session_id + "/events?after=0", "");
     ASSERT_EQ(open_events.body.size(), 3U);
