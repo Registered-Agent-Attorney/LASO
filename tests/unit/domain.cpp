@@ -227,6 +227,7 @@ TEST(Configuration, S3ArtifactBackendIsOptionalAndExplicit) {
 TEST(Configuration, RejectsS3NamespaceEscapeAndUntrustedPlainHttp) {
 #ifdef LASO_HAS_S3
   Config config;
+  config.postgres_dsn = test_dsn();
   config.artifact_backend = "s3";
   config.artifact_s3_bucket = "laso-test-bucket";
   config.artifact_s3_prefix = "../outside";
@@ -242,6 +243,7 @@ TEST(Configuration, RejectsS3NamespaceEscapeAndUntrustedPlainHttp) {
 TEST(Configuration, S3OwnerCanExposeAuthenticatedArtifactGateway) {
 #ifdef LASO_HAS_S3
   Config config;
+  config.postgres_dsn = test_dsn();
   config.artifact_backend = "s3";
   config.artifact_s3_bucket = "laso-test-bucket";
   config.artifact_service_port = 9090;
