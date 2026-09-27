@@ -596,7 +596,7 @@ TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
   });
 }
 TEST(Storage, ContextGenerationsAndRunSnapshotsAreImmutableAndDurable) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &backend) {
     SCOPED_TRACE(backend.name);
     TemporaryDirectory dir;
     const auto database = dir.path / "context-provenance.db";
