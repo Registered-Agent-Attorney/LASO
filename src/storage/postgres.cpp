@@ -3,7 +3,6 @@
 #include <laso/storage/postgres.hpp>
 #include <laso/workers/worker.hpp>
 #include <limits>
-#include <spdlog/spdlog.h>
 #include <version>
 // Ubuntu's libpqxx 7.8 package is built without std::source_location support,
 // while a C++20 consumer sees that library feature in <version>.  Keep the
@@ -144,20 +143,10 @@ struct PostgresStorage::Impl {
     pool.reset();
     if (!owner || !owner_lock_key)
       return;
-    const auto report_unlock_failure = [](const char *reason) noexcept {
-      try {
-        spdlog::error("PostgreSQL owner lock release failed: {}", reason);
-      } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw on log failure.
-      }
-    };
     try {
       pqxx::nontransaction unlock(*owner);
-      const auto result = unlock.exec_params("SELECT pg_advisory_unlock($1::bigint)",
-                                             *owner_lock_key);
-      if (result.empty() || !result.front()[0].as<bool>())
-        report_unlock_failure("lock_not_held");
-    } catch (...) {
-      report_unlock_failure("connection_error");
+      (void)unlock.exec_params("SELECT pg_advisory_unlock($1::bigint)", *owner_lock_key);
+    } catch (...) { // NOLINT(bugprone-empty-catch): closing this session releases any held lock.
     }
     owner.reset();
   }
