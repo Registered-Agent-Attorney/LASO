@@ -2537,6 +2537,13 @@ TEST(Storage, PostgresRejectsSecondOwner) {
   if (!std::getenv("LASO_TEST_POSTGRES_DSN"))
     GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
   for (const auto &fixture : storage_fixtures()) {
+    struct FixtureCleanup {
+      const StorageFixture &fixture;
+      ~FixtureCleanup() {
+        if (fixture.cleanup)
+          fixture.cleanup();
+      }
+    } fixture_cleanup{fixture};
     TemporaryDirectory dir;
     auto first = fixture.open(dir.path / "state.db");
     try {
@@ -3080,7 +3087,6 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
   struct StreamCleanup {
     HttpServer &server;
     Service &service;
-    asio::io_context &io;
     std::shared_ptr<ContinuationFixtureState> provider;
     bool stopped = false;
     void stop() {
@@ -3095,7 +3101,6 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
       }
       server.stop();
       service.shutdown();
-      io.stop();
       stopped = true;
     }
     ~StreamCleanup() {
@@ -3129,7 +3134,7 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
     server.start();
     std::jthread server_thread_a([&] { io.run(); });
     std::jthread server_thread_b([&] { io.run(); });
-    StreamCleanup cleanup{server, service, io, trace};
+    StreamCleanup cleanup{server, service, trace};
 
     SessionSseTestClient client_a(server.port(), session_id, 0);
     SessionSseTestClient client_b(server.port(), session_id, 0);
@@ -3214,7 +3219,7 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
     server.start();
     std::jthread server_thread_a([&] { io.run(); });
     std::jthread server_thread_b([&] { io.run(); });
-    StreamCleanup cleanup{server, restarted, io, {}};
+    StreamCleanup cleanup{server, restarted, {}};
 
     SessionSseTestClient client_a(server.port(), session_id, 3);
     SessionSseTestClient client_b(server.port(), session_id, 3);
@@ -3619,15 +3624,15 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
     std::jthread server_thread([&] { observer_io.run(); });
     struct ServerCleanup {
       HttpServer &server;
-      asio::io_context &io;
+      Service &service;
       std::jthread &thread;
       ~ServerCleanup() {
         server.stop();
-        io.stop();
+        service.shutdown();
         if (thread.joinable())
           thread.join();
       }
-    } server_cleanup{server, observer_io, server_thread};
+    } server_cleanup{server, observer, server_thread};
     asio::io_context peer_io;
     boost::beast::tcp_stream client(peer_io);
     client.expires_after(std::chrono::seconds(5));
