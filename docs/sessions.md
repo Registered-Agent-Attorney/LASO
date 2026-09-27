@@ -4,9 +4,9 @@ LASO sessions provide a stable orchestration identity, a durable ordered input l
 retry-safe input acceptance, and a durable event journal. The database assigns a
 per-session sequence while holding the session row lock. A repeated
 `idempotency_key` with the same input returns the original turn; reusing that key
-for different input is a conflict. SQLite serializes writes within its documented
-single-instance boundary. PostgreSQL uses a row lock, so independent service
-instances share the same ordering and replay history.
+for different input is a conflict. PostgreSQL assigns each sequence while holding
+the session row lock, so independent service instances share the same ordering and
+replay history.
 
 Sessions are generic runtime primitives. LASO does not define users, accounts,
 authorization policy, conversation membership, presence, or UI. An external
