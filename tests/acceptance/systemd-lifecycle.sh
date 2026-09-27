@@ -117,12 +117,6 @@ process_workers:
     startup_timeout_ms: 5000
     request_timeout_ms: 5000
 EOF
-if [[ "$backend" == postgres ]]; then
-  cat >>"$root/config.yaml" <<EOF
-postgres_dsn: "$postgres_dsn"
-postgres_schema: "$postgres_schema"
-EOF
-fi
 sed "s|/var/lib/laso|$root/installed-example-state|g" \
   "$prefix/share/laso/laso.systemd.example.yaml" >"$root/installed-example.yaml"
 "$prefix/bin/laso" --config "$root/installed-example.yaml" health >/dev/null
@@ -283,7 +277,8 @@ probe_config_failure() {
   local name=$1 config=$2 diagnostic=$3 result=0 output
   bad_units+=("$name")
   output=$(systemd-run --user --unit="$name" --wait --pipe \
-    --property=Restart=no "$server" --config "$config" 2>&1) || result=$?
+    --property=Restart=no --property="WorkingDirectory=$root" \
+    "$server" --config "$config" 2>&1) || result=$?
   [[ "$result" -ne 0 ]] || { echo "invalid config unexpectedly succeeded" >&2; return 1; }
   if ! grep -Fq -- "$diagnostic" <<<"$output"; then
     echo "systemd failure unit $name omitted its expected safe diagnostic" >&2
@@ -302,13 +297,22 @@ probe_config_failure "${bad_unit%.service}-malformed.service" "$root/invalid.yam
   "Invalid configuration YAML"
 probe_config_failure "${bad_unit%.service}-missing.service" "$root/missing.yaml" \
   "Cannot open configuration file"
-printf 'postgres_schema: public\n' >"$root/invalid-storage.yaml"
+cat >"$root/invalid-storage.yaml" <<EOF
+postgres_dsn: "$postgres_dsn"
+postgres_schema: 1invalid
+EOF
 probe_config_failure "${bad_unit%.service}-storage.service" "$root/invalid-storage.yaml" \
-  "Unable to create artifact object store"
-printf 'plugin_dirs: ["%s/missing-plugins"]\n' "$root" >"$root/invalid-plugin.yaml"
+  "Invalid PostgreSQL schema"
+cat >"$root/invalid-plugin.yaml" <<EOF
+postgres_dsn: "$postgres_dsn"
+plugin_dirs: ["$root/missing-plugins"]
+EOF
 probe_config_failure "${bad_unit%.service}-plugin.service" "$root/invalid-plugin.yaml" \
   "Configured plugin directory is unavailable"
-printf 'data_dir: "%s/readonly"\n' "$root" >"$root/unwritable.yaml"
+cat >"$root/unwritable.yaml" <<EOF
+postgres_dsn: "$postgres_dsn"
+data_dir: "$root/readonly"
+EOF
 mkdir "$root/readonly"
 chmod 0500 "$root/readonly"
 probe_config_failure "${bad_unit%.service}-state.service" "$root/unwritable.yaml" \
