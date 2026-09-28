@@ -907,3 +907,73 @@ Added `Storage.PostgresOwnerCanBeReacquiredImmediatelyAfterStorageDestruction`: 
 This is local reproduction evidence, not hosted resolution. The hosted ASan+UBSan check must pass on the corrected commit before PR #16 can leave Draft.
 
 The first pushed fix candidate (`c430221`) passed full builds but its hosted GCC and Clang Debug suites both exposed a `process_smoke` failure: run-event log lines appeared in the CLI's redirected JSON output, causing `jq` to reject it. The original hosted sanitizer failure was distinct. The new storage destructor's direct `spdlog` reference was removed to keep logging out of the storage layer; after rebuilding the local Debug CLI, `process_smoke` passed. This also avoids introducing a logger dependency above the PostgreSQL adapter's existing diagnostics boundary. A fresh hosted run is required to confirm both the smoke test and owner-lock fix on the revised candidate.
+
+## M7 release-candidate acceptance (2026-09-28)
+
+This section records release work against the current post-M6 LASO and private
+LASO-Web candidates. No validation environment identifiers or provider-native
+session identifiers are recorded.
+
+### LASO build and installation
+
+The full PostgreSQL-enabled GCC Debug, GCC Release, and ASan/UBSan suites ran on
+LASO commit `2177d5e`: each scheduled 290 tests, with 285 passed, 5 expected
+skips, and no failures. The Release run completed in 271.42 seconds and the
+ASan/UBSan run in 426.14 seconds. The only subsequent LASO runtime-tree change
+is commit `0aa9915`, which adds install rules for enabled provider worker
+executables and updates build/install documentation and CI. A clean Release
+build and install from the candidate source verified the CLI, server, and
+Codex worker are installed and executable; `laso --version` reports
+`0.1.0-rc.2`, and `systemd-analyze verify` accepted the installed unit.
+
+The first clean-install check found that enabled out-of-process provider
+workers were not installed by CMake. Commit `0aa9915` fixes this by installing
+each enabled adapter target. The install and subsequent real-provider checks
+used the corrected candidate.
+
+Native systemd preflight and the opt-in user-service lifecycle harness passed
+on the installed candidate. The lifecycle test covered startup/health, a
+PostgreSQL-backed approval checkpoint, graceful restart and SIGTERM/SIGINT,
+forced termination with restart policy, worker-child cleanup, repeated service
+transitions, malformed and unreadable configuration, invalid storage/plugin
+configuration, and clean shutdown. Its installed-example check exercises the
+documented `LASO_POSTGRES_DSN` environment path; the test harness correction is
+in the release candidate. This user-service harness does not establish the
+behavior of a dedicated system account or system-unit filesystem sandbox.
+
+### PostgreSQL state, upgrade, and real provider
+
+A clean PostgreSQL database initialized and served successfully. A logical
+`pg_dump` backup was restored into a separate disposable database; the restored
+service loaded the session, turns, events, and context provenance and completed
+another turn.
+
+The installed Codex adapter completed three real turns in one LASO durable
+session. A LASO restart between turns preserved continuation; the third run
+selected the recorded immutable context generation and snapshot. After backup
+and restore, a fresh LASO process completed a fourth turn with the same logical
+context. Provider continuation values and native identities are not exposed by
+the public API and are not included here.
+
+An upgrade test began with a durable provider-backed session created by the
+previous merged LASO main binary. The `0.1.0-rc.2` candidate read the existing
+session and turn state and continued it. The current private Go LASO-Web
+candidate then served two independent browser clients against that upgraded
+state: both observed the same LASO-owned session; follow-up turns continued
+through the provider; a Web process restart and browser refresh recovered the
+session; SSE replay delivered coherent updates; and the second observer saw
+session closure.
+
+### Regression and environmental limits
+
+The LASO TSan binary built, but the runtime failed during test discovery with
+`ThreadSanitizer: unexpected memory mapping`; no LASO test body ran under TSan.
+No security settings were changed to work around the runtime failure. The
+passing ASan/UBSan suite, PostgreSQL fencing/recovery tests, real-provider
+restart/restore path, and systemd forced-process-restart harness provide
+separate concurrency and recovery evidence; TSan is not claimed as passed.
+
+Exact-head hosted CI for the final pushed release-candidate commits is recorded
+with the corresponding pull requests. The final clean-room release gate remains
+open until that CI, post-merge validation, release artifacts, and final main
+smoke checks have completed.
