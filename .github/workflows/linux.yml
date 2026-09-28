@@ -105,14 +105,17 @@ jobs:
       - name: Configure Release build
         run: |
           if [ "${{ matrix.compiler }}" = clang ]; then export CC=clang CXX=clang++; fi
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLASO_ENABLE_SESSION_TEST_HOOKS=ON -DLASO_BUILD_CODEX_ADAPTER=ON
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/laso-install" -DLASO_ENABLE_SESSION_TEST_HOOKS=ON -DLASO_BUILD_CODEX_ADAPTER=ON
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
       - name: Verify installed command-line tools
         run: |
-          cmake --install build --prefix "$RUNNER_TEMP/laso-install"
+          cmake --install build
           test -x "$RUNNER_TEMP/laso-install/bin/laso"
+          test -x "$RUNNER_TEMP/laso-install/bin/laso-server"
+          test -x "$RUNNER_TEMP/laso-install/bin/laso-codex-worker"
           "$RUNNER_TEMP/laso-install/bin/laso" version
+          systemd-analyze verify "$RUNNER_TEMP/laso-install/lib/systemd/system/laso.service"
   debian:
     runs-on: ubuntu-24.04
     container: debian:13
