@@ -30,6 +30,13 @@ public:
   void close_session(const std::string &id);
   Json submit_session_turn(const std::string &id, const std::string &idempotency_key,
                            const Json &input);
+  Json create_session_context_generation(const std::string &id, std::uint64_t expected_generation,
+                                         std::uint64_t through_turn_sequence,
+                                         const std::string &idempotency_key,
+                                         const std::string &representation_kind,
+                                         const std::string &representation_version,
+                                         const Json &payload);
+  std::optional<Json> latest_session_context_generation(const std::string &id) const;
   std::vector<Json> session_events(const std::string &id, std::uint64_t after,
                                    std::size_t limit) const;
   Json create_schedule(const Json &spec);
@@ -88,6 +95,10 @@ public:
   ProviderRegistry &provider_registry() {
     return providers_;
   }
+  ContextReducerRegistry &context_reducer_registry() {
+    return context_reducers_;
+  }
+  bool context_reduction_available() const;
   NodeRegistry &node_registry() {
     return nodes_;
   }
@@ -109,11 +120,11 @@ public:
 private:
   Config config_;
   std::string instance_id_;
-  std::unique_ptr<ProcessLease> lease_;
   std::unique_ptr<Storage> storage_;
   std::unique_ptr<Coordination> coordination_;
   InProcessEventBus events_;
   ProviderRegistry providers_;
+  ContextReducerRegistry context_reducers_;
   ToolRegistry tools_;
   WorkerRegistry worker_registry_;
   FunctionRegistry functions_;

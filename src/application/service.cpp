@@ -47,17 +47,11 @@ std::unique_ptr<Coordination> make_coordination(const Config &config,
                                                 const std::string &instance_id) {
   if (config.execution_mode != "multi_instance")
     return nullptr;
-#ifdef LASO_HAS_POSTGRES
   return create_coordination(
-      {"postgres", config.postgres_dsn, config.postgres_schema,
-       config.postgres_pool_min_connections, config.postgres_pool_max_connections,
-       config.postgres_pool_acquisition_timeout_ms, config.instance_stale_after_ms},
+      {config.postgres_dsn, config.postgres_schema, config.postgres_pool_min_connections,
+       config.postgres_pool_max_connections, config.postgres_pool_acquisition_timeout_ms,
+       config.instance_stale_after_ms},
       instance_id);
-#else
-  (void)instance_id;
-  throw Error(ErrorCode::Configuration,
-              "multi_instance execution requires PostgreSQL support at build time");
-#endif
 }
 
 std::unique_ptr<ArtifactStore> make_artifact_store(const Config &config, Storage &storage) {
@@ -89,13 +83,10 @@ std::unique_ptr<ArtifactStore> make_artifact_store(const Config &config, Storage
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), instance_id_(generate_service_instance_id()),
-      lease_(config_.storage_backend == "sqlite" ? std::make_unique<ProcessLease>(config_.db_path)
-                                                 : nullptr),
-      storage_(create_storage({config_.storage_backend, config_.db_path, config_.postgres_dsn,
-                               config_.postgres_schema, config_.postgres_pool_min_connections,
-                               config_.postgres_pool_max_connections,
-                               config_.postgres_pool_acquisition_timeout_ms,
-                               config_.execution_mode == "multi_instance"})),
+      storage_(create_storage(
+          {config_.postgres_dsn, config_.postgres_schema, config_.postgres_pool_min_connections,
+           config_.postgres_pool_max_connections, config_.postgres_pool_acquisition_timeout_ms,
+           config_.execution_mode == "multi_instance"})),
       coordination_(make_coordination(config_, instance_id_)),
       policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
@@ -124,8 +115,8 @@ Service::Service(asio::io_context &io, Config config)
           }),
       artifacts_(make_artifact_store(config_, *storage_)),
       runtime_(io, config_,
-               {*storage_, events_, providers_, tools_, functions_, nodes_, policy_, schemas_,
-                worker_manager_,
+               {*storage_, events_, providers_, context_reducers_, tools_, functions_, nodes_,
+                policy_, schemas_, worker_manager_,
                 [this](const std::string &reference) { return resolve_pipeline(reference); },
                 coordination_.get(), artifacts_.get(), instance_id_,
                 config_.data_dir / "distributed-workspaces"}),
@@ -146,6 +137,7 @@ Service::Service(asio::io_context &io, Config config)
           std::make_shared<SystemClock>(), config_.max_pending_scheduler_launches,
           config_.max_event_trigger_depth, config_.max_event_trigger_deliveries) {
   configure_logging(config_);
+  context_reducers_.add("recent-turns", std::make_shared<RecentTurnsContextReducer>());
   providers_.add("mock", std::make_shared<MockModelProvider>());
   if (!config_.local_openai_endpoint.empty())
     providers_.add("local-openai",
@@ -321,7 +313,7 @@ Json Service::register_pipeline(const std::string &yaml) {
     storage_->commit(
         {{RecordKind::Pipeline, key, "", record}, {RecordKind::Event, e.id, "", Json(e)}});
   } catch (const Error &error) {
-    // Another registration may have won the SQLite transaction between the
+    // Another registration may have won the transaction between the
     // initial lookup and this commit. Preserve idempotence for the same
     // immutable source while still rejecting a conflicting revision.
     if (error.code != ErrorCode::Conflict)
@@ -338,6 +330,18 @@ Json Service::register_pipeline(const std::string &yaml) {
   }
   events_.publish(e);
   return record;
+}
+bool Service::context_reduction_available() const {
+  if (!config_.session_context_reduction_enabled)
+    return false;
+  try {
+    (void)context_reducers_.get(config_.session_context_reducer);
+    return true;
+  } catch (const Error &error) {
+    if (error.code == ErrorCode::NotFound)
+      return false;
+    throw;
+  }
 }
 std::string Service::start(const std::string &name_or_path, const Json &input,
                            const std::string &actor, bool allow_file, Json origin,
@@ -412,6 +416,19 @@ Json Service::submit_session_turn(const std::string &id, const std::string &idem
     log_diagnostic("service.session_dispatch_deferred");
   }
   return accepted;
+}
+Json Service::create_session_context_generation(
+    const std::string &id, std::uint64_t expected_generation, std::uint64_t through_turn_sequence,
+    const std::string &idempotency_key, const std::string &representation_kind,
+    const std::string &representation_version, const Json &payload) {
+  (void)agent_session(id);
+  return storage_->create_session_context_generation(id, expected_generation, through_turn_sequence,
+                                                     idempotency_key, representation_kind,
+                                                     representation_version, payload);
+}
+std::optional<Json> Service::latest_session_context_generation(const std::string &id) const {
+  (void)agent_session(id);
+  return storage_->latest_session_context_generation(id);
 }
 std::vector<Json> Service::session_events(const std::string &id, std::uint64_t after,
                                           std::size_t limit) const {

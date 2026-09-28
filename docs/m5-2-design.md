@@ -1,5 +1,7 @@
 # M5.2 design: durable sequential turn execution
 
+> Historical design record. SQLite-specific passages describe the former backend policy and are superseded by [ADR 0009](adr/0009-postgres-only-storage.md); PostgreSQL is now required for all LASO deployments.
+
 ## Boundary
 
 M5.2 connects an M5.1 accepted session turn to one ordinary LASO pipeline run,
@@ -82,8 +84,10 @@ creation is observable and recoverable. A claim records the current owner and
 fence. After a claim, the owner creates a validated Run from the pinned session
 pipeline revision and turn input. One storage transaction checks the session
 fence, locks the session and turn, verifies there is no active turn, inserts the
-Run, binds its ID to the turn, updates the session's active-turn pointer, and
-appends `turn.execution.started`. Repeating the bind returns the already-bound
+Run and its immutable `RunContextSnapshot`, binds its ID to the turn, updates
+the session's active-turn pointer, and appends `turn.execution.started`. The
+snapshot pins the latest applicable context generation and provider continuation
+state as of that transaction. Repeating the bind returns the already-bound
 Run. The unique turn key and locked session row prevent two authoritative runs.
 
 A crash before this transaction commits leaves no Run and no binding. A crash
@@ -130,8 +134,11 @@ strings, or public validation artifacts. No new encryption is introduced; the
 configured database and its existing access controls remain the trusted storage
 boundary.
 
-A continuation-capable adapter receives the previous opaque payload and returns
-a replacement payload with its result. LASO first checkpoints that candidate
+A continuation-capable adapter receives the exact previous opaque payload
+captured by that run's context snapshot and returns a replacement payload with
+its result. The mutable per-session continuation remains the current adapter
+state; the immutable run snapshot preserves the value supplied to a particular
+run. LASO first checkpoints that candidate
 with the successful provider-node result under the run fence. It promotes the
 candidate only in the same fenced transaction that makes the turn result
 authoritative. Failed and cancelled runs clear the candidate without changing

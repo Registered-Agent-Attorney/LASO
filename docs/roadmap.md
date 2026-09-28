@@ -54,8 +54,8 @@ requires identical retries to return the original turn, conflicting reuse of an
 idempotency key to fail, concurrent submissions to receive one ordered sequence,
 closed sessions to reject new inputs, and the journal to survive service restart.
 PostgreSQL multi-instance acceptance also requires an event written through one
-service instance to be replayed and streamed by another. SQLite remains a
-single-instance backend.
+service instance to be replayed and streamed by another. PostgreSQL is required
+for single-owner and multi-instance deployments.
 
 This milestone stores accepted inputs; it does not claim they have run. PR #13
 adds no provider continuation state, turn dispatcher, execution lease, or worker
@@ -63,21 +63,25 @@ recovery for sessions.
 
 ### M5.2 — durable sequential turn execution and provider continuation
 
-Status: implementation in progress; hosted regression matrix passes, while physical owner-death, PostgreSQL outage/recovery, and restart-continuation evidence remain blocked by host-safety preflight.
+Status: implementation merged in PR #14. The hosted regression matrix passed;
+the PR records physical owner-death, PostgreSQL outage/recovery, and
+restart-continuation cases as follow-up validation not repeated on its exact
+candidate.
 
 The durable state machine, run-binding transaction, execution ownership,
 continuation boundary, and close/cancellation races are specified in
 [m5-2-design.md](m5-2-design.md).
 
-Connect accepted turns to LASO runs and the existing worker recovery and fencing
-model. The acceptance boundary must define per-session ordering and ownership,
-turn and attempt states, cancellation and close races, provider continuation
-persistence, and emitted lifecycle events. Provider state must remain opaque to
-clients and be protected from logs and public artifacts.
+Accepted turns connect to LASO runs and the existing worker recovery and fencing
+model. Per-session ordering and ownership, turn states, cancellation and close
+races, provider continuation persistence, and lifecycle events are implemented.
+Provider state remains opaque to clients and is protected from logs and public
+artifacts. See [the M5.2 design](m5-2-design.md) and
+[the session API](sessions.md).
 
-Validation must cover duplicate submission, two-instance claim contention,
-owner and worker death at dispatch and completion boundaries, PostgreSQL
-interruption, stale-fence completion, provider timeout, and replay of every
-committed state transition. LASO may make at-least-once provider attempts with
-one authoritative fenced completion; it must not promise exactly-once external
-side effects.
+The suite covers duplicate submission, two-instance claim contention, worker
+and process recovery boundaries, stale-fence completion, provider timeout, and
+replay of committed transitions. The physical follow-up scenarios listed above
+remain evidence gaps. LASO may make at-least-once provider attempts with one
+authoritative fenced completion; it does not promise exactly-once external side
+effects.

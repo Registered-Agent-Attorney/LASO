@@ -13,30 +13,44 @@
 
 namespace laso {
 void Config::validate() {
+  if (session_context_reduction_enabled &&
+      (!std::regex_match(session_context_reducer, std::regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")) ||
+       session_context_reduction_target_bytes == 0 ||
+       session_context_reduction_target_bytes > (std::uint64_t{1024} * 1024) ||
+       session_context_reduction_threshold_bytes <= session_context_reduction_target_bytes ||
+       session_context_reduction_max_input_bytes < session_context_reduction_threshold_bytes ||
+       session_context_reduction_max_input_bytes > (std::uint64_t{16} * 1024 * 1024) ||
+       session_context_reduction_timeout_ms == 0 || session_context_reduction_timeout_ms > 300000))
+    throw Error(ErrorCode::Configuration, "Invalid session context reduction configuration");
+  if (!session_context_reducer_config.is_object() ||
+      session_context_reducer_config.dump().size() > (std::size_t{1024} * 1024))
+    throw Error(ErrorCode::Configuration, "Invalid session context reducer config");
   if (data_dir.empty())
     throw Error(ErrorCode::Configuration, "Data directory is empty");
-  if (storage_backend != "sqlite" && storage_backend != "postgres")
-    throw Error(ErrorCode::Configuration, "Unsupported storage backend");
-  if (storage_backend == "postgres" && postgres_dsn.empty())
+  {
+    std::error_code legacy_path_error;
+    const auto legacy_state = data_dir / "laso.db";
+    const bool legacy_state_exists = std::filesystem::exists(legacy_state, legacy_path_error);
+    if (legacy_path_error)
+      throw Error(ErrorCode::Configuration, "Cannot inspect legacy database state path");
+    if (legacy_state_exists)
+      throw Error(ErrorCode::Configuration,
+                  "Legacy SQLite state detected; preserve it and migrate it before startup");
+  }
+  if (postgres_dsn.empty())
     throw Error(ErrorCode::Configuration, "PostgreSQL DSN is required");
-  if (storage_backend == "postgres" &&
-      (postgres_schema.empty() || postgres_schema.size() > 63 ||
-       !std::isalpha(static_cast<unsigned char>(postgres_schema.front()))))
+  if (postgres_schema.empty() || postgres_schema.size() > 63 ||
+      !std::isalpha(static_cast<unsigned char>(postgres_schema.front())))
     throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
-  if (storage_backend == "postgres")
-    for (const auto ch : postgres_schema)
-      if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
-        throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
+  for (const auto ch : postgres_schema)
+    if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
+      throw Error(ErrorCode::Configuration, "Invalid PostgreSQL schema");
   if (execution_mode != "single" && execution_mode != "multi_instance")
     throw Error(ErrorCode::Configuration, "Invalid execution mode");
   if (coordination_mode == "experimental_multi_instance")
     execution_mode = "multi_instance";
-  if (execution_mode == "multi_instance" && storage_backend != "postgres")
-    throw Error(ErrorCode::Configuration, "multi_instance execution requires PostgreSQL storage");
   if (coordination_mode != "single_owner" && coordination_mode != "experimental_multi_instance")
     throw Error(ErrorCode::Configuration, "Invalid coordination mode");
-  if (db_path.empty())
-    db_path = data_dir / "laso.db";
   if (artifact_root.empty())
     artifact_root = data_dir / "artifacts";
   if (artifact_backend != "filesystem" && artifact_backend != "s3")
@@ -217,6 +231,31 @@ Config load_config(const std::filesystem::path &supplied,
             else
               throw Error(ErrorCode::Configuration, "Unknown coordination field");
           }
+        } else if (key == "session_context_reduction") {
+          if (!pair.second.IsMap())
+            throw Error(ErrorCode::Configuration, "session_context_reduction must be a map");
+          std::set<std::string> fields;
+          for (const auto &field : pair.second) {
+            const auto name = field.first.as<std::string>();
+            if (!fields.insert(name).second)
+              throw Error(ErrorCode::Configuration, "Duplicate context reduction field");
+            if (name == "enabled")
+              c.session_context_reduction_enabled = field.second.as<bool>();
+            else if (name == "reducer")
+              c.session_context_reducer = field.second.as<std::string>();
+            else if (name == "config")
+              c.session_context_reducer_config = detail::yaml_value(field.second);
+            else if (name == "threshold_bytes")
+              c.session_context_reduction_threshold_bytes = field.second.as<std::uint64_t>();
+            else if (name == "target_bytes")
+              c.session_context_reduction_target_bytes = field.second.as<std::uint64_t>();
+            else if (name == "max_input_bytes")
+              c.session_context_reduction_max_input_bytes = field.second.as<std::uint64_t>();
+            else if (name == "timeout_ms")
+              c.session_context_reduction_timeout_ms = field.second.as<std::uint64_t>();
+            else
+              throw Error(ErrorCode::Configuration, "Unknown context reduction field");
+          }
         } else if (key == "models") {
           c.models.clear();
           for (const auto &model : pair.second) {
@@ -376,7 +415,6 @@ Config load_config(const std::filesystem::path &supplied,
     }
   }
   for (auto name : {"DATA_DIR",
-                    "DB_PATH",
                     "ARTIFACT_ROOT",
                     "ARTIFACT_BACKEND",
                     "ARTIFACT_S3_ENDPOINT",
@@ -393,7 +431,6 @@ Config load_config(const std::filesystem::path &supplied,
                     "ARTIFACT_SERVICE_TOKEN",
                     "ARTIFACT_SERVICE_HOST",
                     "ARTIFACT_SERVICE_PORT",
-                    "STORAGE_BACKEND",
                     "POSTGRES_DSN",
                     "POSTGRES_SCHEMA",
                     "EXECUTION_MODE",
@@ -517,10 +554,11 @@ Config load_config(const std::filesystem::path &supplied,
       c.artifact_service_host = v;
     else if (k == "artifact_service_port")
       c.artifact_service_port = integer(v);
-    else if (k == "storage_backend")
-      c.storage_backend = v;
     else if (k == "postgres_dsn")
       c.postgres_dsn = v;
+    else if (k == "db_path" || k == "storage_backend")
+      throw Error(ErrorCode::Configuration,
+                  "SQLite storage configuration was removed; preserve and migrate existing state");
     else if (k == "postgres_schema")
       c.postgres_schema = v;
     else if (k == "execution_mode")
@@ -537,8 +575,6 @@ Config load_config(const std::filesystem::path &supplied,
       c.coordination_lease_ttl_ms = uint64(v);
     else if (k == "coordination_heartbeat_interval_ms")
       c.coordination_heartbeat_interval_ms = uint64(v);
-    else if (k == "db_path")
-      c.db_path = v;
     else if (k == "max_artifact_bytes")
       c.max_artifact_bytes = uint64(v);
     else if (k == "max_artifact_temp_bytes")
@@ -553,6 +589,18 @@ Config load_config(const std::filesystem::path &supplied,
       c.api_port = integer(v);
     else if (k == "max_session_sse_streams")
       c.max_session_sse_streams = integer(v);
+    else if (k == "session_context_reduction_enabled")
+      c.session_context_reduction_enabled = boolean(v);
+    else if (k == "session_context_reducer")
+      c.session_context_reducer = v;
+    else if (k == "session_context_reduction_threshold_bytes")
+      c.session_context_reduction_threshold_bytes = uint64(v);
+    else if (k == "session_context_reduction_target_bytes")
+      c.session_context_reduction_target_bytes = uint64(v);
+    else if (k == "session_context_reduction_max_input_bytes")
+      c.session_context_reduction_max_input_bytes = uint64(v);
+    else if (k == "session_context_reduction_timeout_ms")
+      c.session_context_reduction_timeout_ms = uint64(v);
     else if (k == "log_level")
       c.log_level = v;
     else if (k == "local_openai_endpoint")

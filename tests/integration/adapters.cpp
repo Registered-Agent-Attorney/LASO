@@ -12,7 +12,6 @@
 #include <laso/runtime/workspace.hpp>
 #include <laso/storage/coordination.hpp>
 #include <laso/storage/factory.hpp>
-#include <laso/storage/sqlite.hpp>
 #include <laso/workers/worker.hpp>
 #include <mutex>
 #include <spdlog/sinks/ostream_sink.h>
@@ -28,6 +27,9 @@ namespace {
 struct ContinuationObservation {
   std::string input_tag;
   std::optional<std::string> received_state;
+  std::optional<std::string> context_generation_id;
+  Json context_payload = nullptr;
+  Json context_turns = Json::array();
 };
 
 struct ContinuationFixtureState {
@@ -60,7 +62,14 @@ public:
     bool block = false;
     {
       std::lock_guard lock(state_->mutex);
-      state_->observed.push_back({tag, previous});
+      state_->observed.push_back(
+          {tag, previous,
+           request.session_context
+               ? std::optional<std::string>{request.session_context->generation_id}
+               : std::nullopt,
+           request.session_context ? request.session_context->payload : Json(nullptr)});
+      state_->observed.back().context_turns =
+          request.session_context ? request.session_context->recent_turns : Json::array();
       reject = state_->reject_state;
       timeout = state_->timeout;
       block = state_->block_until_released;
@@ -93,6 +102,7 @@ public:
     ProviderMetadata result;
     result.name = "continuation-fixture";
     result.version = "1";
+    result.capabilities.push_back("session-context");
     result.continuation_mode = mode_;
     return result;
   }
@@ -100,6 +110,29 @@ public:
 private:
   std::shared_ptr<ContinuationFixtureState> state_;
   ContinuationMode mode_;
+};
+
+class MarkerContextReducer final : public ContextReducer {
+public:
+  explicit MarkerContextReducer(bool fail = false, bool malformed = false,
+                                Milliseconds delay = Milliseconds{0})
+      : fail_(fail), malformed_(malformed), delay_(delay) {}
+  ContextReductionResult reduce(const ContextReductionRequest &request,
+                                std::stop_token cancellation) override {
+    if (delay_.count() > 0)
+      std::this_thread::sleep_for(delay_);
+    if (cancellation.stop_requested() || std::chrono::steady_clock::now() >= request.deadline)
+      throw Error(ErrorCode::Timeout, "test reducer deadline");
+    if (fail_)
+      throw Error(ErrorCode::Execution, "private reducer failure");
+    return {"test.marker", "1", request.through_turn_sequence + (malformed_ ? 1 : 0),
+            Json{{"reduced_through", request.through_turn_sequence}}};
+  }
+
+private:
+  bool fail_;
+  bool malformed_;
+  Milliseconds delay_;
 };
 
 Config continuation_config(const std::filesystem::path &path) {
@@ -201,22 +234,22 @@ private:
 } // namespace
 
 TEST(Storage, PersistsAcrossConnections) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
     {
-      auto s = backend.open(dir.path / "state.db");
+      auto s = fixture.open(dir.path / "state.db");
       s->commit({{RecordKind::Pipeline, "example", "", {{"value", 42}}}});
     }
     {
-      auto s = backend.open(dir.path / "state.db");
+      auto s = fixture.open(dir.path / "state.db");
       EXPECT_EQ(s->get(RecordKind::Pipeline, "example").at("value"), 42);
     }
   });
 }
 TEST(Storage, TransactionRollsBackWholeCheckpoint) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::vector<Record> batch{
         {RecordKind::Run, "first", "first", {{"valid", true}}},
         {RecordKind::Message, "large", "first", std::string(4 * 1024 * 1024 + 1, 'a')}};
@@ -225,9 +258,9 @@ TEST(Storage, TransactionRollsBackWholeCheckpoint) {
   });
 }
 TEST(Storage, ConformanceStoresAllRecordKinds) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     constexpr std::array kinds = {RecordKind::Pipeline,
                                   RecordKind::Run,
                                   RecordKind::Attempt,
@@ -259,9 +292,9 @@ TEST(Storage, ConformanceStoresAllRecordKinds) {
   });
 }
 TEST(Storage, ConformancePreservesOrderAcrossUpdates) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     s->commit({{RecordKind::Message, "first", "run-1", {{"value", 1}}},
                {RecordKind::Message, "second", "run-1", {{"value", 2}}}});
     s->commit({{RecordKind::Message, "first", "run-1", {{"value", 3}}}});
@@ -272,9 +305,9 @@ TEST(Storage, ConformancePreservesOrderAcrossUpdates) {
   });
 }
 TEST(Storage, ConformanceRejectsConflictingPipelineRevision) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Record original{RecordKind::Pipeline, "hello@1", "", {{"yaml", "one"}}};
     s->commit({original});
     EXPECT_NO_THROW(s->commit({original}));
@@ -287,9 +320,9 @@ TEST(Storage, ConformanceRejectsConflictingPipelineRevision) {
   });
 }
 TEST(Storage, ConformanceSupportsPagination) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     for (int i = 0; i < 3; ++i)
       s->commit({{RecordKind::Event, "event-" + std::to_string(i), "run-1", {{"index", i}}}});
     const auto page = s->list(RecordKind::Event, "run-1", 2, 1);
@@ -299,9 +332,9 @@ TEST(Storage, ConformanceSupportsPagination) {
   });
 }
 TEST(Storage, ConformancePaginatesBeyondOnePage) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::vector<Record> records;
     records.reserve(10001);
     for (unsigned i = 0; i < 10001; ++i)
@@ -313,9 +346,9 @@ TEST(Storage, ConformancePaginatesBeyondOnePage) {
   });
 }
 TEST(Storage, ConformanceRejectsInvalidRecordInputs) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     try {
       s->commit({{static_cast<RecordKind>(99), "record", "run-1", Json::object()}});
       FAIL() << "invalid record kind should be rejected";
@@ -341,9 +374,9 @@ TEST(Storage, ConformanceRejectsInvalidRecordInputs) {
   });
 }
 TEST(Storage, ConformancePersistsStructuredOperationalRecords) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Json run = {{"id", "parent"},
                       {"state", "WaitingApproval"},
                       {"pipeline_id", "parent"},
@@ -378,9 +411,9 @@ TEST(Storage, ConformancePersistsStructuredOperationalRecords) {
   });
 }
 TEST(Storage, ConformanceSerializesConcurrentCommits) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::atomic<bool> failed = false;
     std::vector<std::jthread> writers;
     for (unsigned writer = 0; writer < 4; ++writer) {
@@ -401,12 +434,12 @@ TEST(Storage, ConformanceSerializesConcurrentCommits) {
   });
 }
 TEST(Storage, SessionTurnsAreOrderedIdempotentReplayableAndDurable) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
     const auto path = dir.path / "sessions.db";
     const auto session_id = "session-" + uuid();
     {
-      auto storage = backend.open(path);
+      auto storage = fixture.open(path);
       AgentSession session;
       session.id = session_id;
       session.pipeline_id = "example@1";
@@ -454,12 +487,12 @@ TEST(Storage, SessionTurnsAreOrderedIdempotentReplayableAndDurable) {
       EXPECT_EQ(closed_events.back().at("sequence"), 26U);
       EXPECT_EQ(closed_events.back().at("type"), "session.closed");
     }
-    auto reopened = backend.open(path);
+    auto reopened = fixture.open(path);
     EXPECT_EQ(reopened->session_events(session_id, 0, 100).size(), 26U);
   });
 }
 TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &backend) {
     SCOPED_TRACE(backend.name);
     TemporaryDirectory dir;
     auto storage = backend.open(dir.path / "session-dispatch.db");
@@ -535,6 +568,12 @@ TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
     EXPECT_FALSE(stored_turn.contains("dispatch_owner"));
     EXPECT_FALSE(stored_turn.contains("dispatch_fencing_token"));
     EXPECT_EQ(storage->get(RecordKind::Run, run.id).at("session_turn_id"), first_id);
+    const auto snapshot =
+        storage->get(RecordKind::RunContextSnapshot, run.id).template get<RunContextSnapshot>();
+    EXPECT_EQ(snapshot.session_id, session.id);
+    EXPECT_EQ(snapshot.session_turn_id, first_id);
+    EXPECT_EQ(snapshot.turn_sequence, 1U);
+    EXPECT_EQ(snapshot.history_through_turn_sequence, 1U);
 
     const auto stored_session =
         storage->get(RecordKind::AgentSession, session.id).template get<AgentSession>();
@@ -554,6 +593,137 @@ TEST(Storage, SessionDispatchClaimsAndRunBindingAreAtomic) {
     EXPECT_EQ(events[4].at("type"), "turn.execution.started");
     for (std::size_t i = 0; i < events.size(); ++i)
       EXPECT_EQ(events[i].at("sequence").template get<std::uint64_t>(), i + 1);
+  });
+}
+TEST(Storage, ContextGenerationsAndRunSnapshotsAreImmutableAndDurable) {
+  for_each_storage_fixture([](const auto &backend) {
+    SCOPED_TRACE(backend.name);
+    TemporaryDirectory dir;
+    const auto database = dir.path / "context-provenance.db";
+    auto storage = backend.open(database);
+    AgentSession session;
+    session.pipeline_id = "example@1";
+    storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+
+    const auto initial = storage->create_session_context_generation(
+        session.id, 0, 0, "generation-key-0", "structured-context", "1",
+        Json{{"state", "initial"}});
+    EXPECT_EQ(initial.at("generation"), 1U);
+    EXPECT_TRUE(initial.at("predecessor_id").template get<std::string>().empty());
+    const auto retried = storage->create_session_context_generation(
+        session.id, 0, 0, "generation-key-0", "structured-context", "1",
+        Json{{"state", "initial"}});
+    EXPECT_EQ(retried.at("id"), initial.at("id"));
+    EXPECT_EQ(storage
+                  ->get(RecordKind::SessionContextGeneration,
+                        initial.at("id").template get<std::string>())
+                  .at("generation"),
+              1U);
+    EXPECT_EQ(storage->list(RecordKind::SessionContextGeneration, session.id).size(), 1U);
+    EXPECT_THROW(storage->create_session_context_generation(
+                     session.id, 0, 0, "generation-key-other", "structured-context", "1",
+                     Json{{"state", "stale"}}),
+                 Error);
+    EXPECT_THROW(storage->create_session_context_generation(session.id, 0, 1, "future-boundary",
+                                                            "structured-context", "1",
+                                                            Json{{"state", "invalid"}}),
+                 Error);
+    auto mutated = initial;
+    mutated["payload"] = {{"state", "rewritten"}};
+    EXPECT_THROW(
+        storage->commit({{RecordKind::SessionContextGeneration,
+                          initial.at("id").template get<std::string>(), session.id, mutated}}),
+        Error);
+
+    const std::string completed_turn_id = "completed-context-turn";
+    storage->commit({{RecordKind::SessionTurn, completed_turn_id, session.id,
+                      Json{{"id", completed_turn_id},
+                           {"session_id", session.id},
+                           {"sequence", 1},
+                           {"state", "succeeded"},
+                           {"input", {{"text", "prior"}}}}}});
+    const auto next = storage->create_session_context_generation(
+        session.id, 1, 1, "generation-key-1", "structured-context", "1",
+        Json{{"state", "derived-through-one"}});
+    EXPECT_EQ(next.at("generation"), 2U);
+    EXPECT_EQ(next.at("predecessor_id"), initial.at("id"));
+    EXPECT_THROW(storage->create_session_context_generation(session.id, 2, 0, "backward-boundary",
+                                                            "structured-context", "1",
+                                                            Json{{"state", "stale-history"}}),
+                 Error);
+
+    Event accepted;
+    ASSERT_TRUE(storage->submit_session_turn(session.id, "context-turn-2",
+                                             Json{{"idempotency_key", "turn-2"},
+                                                  {"input", {{"text", "next"}}},
+                                                  {"pipeline_id", "example@1"},
+                                                  {"state", "queued"}},
+                                             Json(accepted)));
+    auto claimed =
+        storage->claim_next_session_turn(session.id, "instance-a", 0, timestamp(), Json::object());
+    ASSERT_TRUE(claimed);
+    laso::Run run;
+    run.id = "run-context-turn-2";
+    run.pipeline_id = "example";
+    run.session_id = session.id;
+    run.session_turn_id = "context-turn-2";
+    Event run_event;
+    Event session_event;
+    ASSERT_TRUE(storage->bind_session_turn_run(session.id, run.session_turn_id, Json(run),
+                                               Json(run_event), "instance-a", 0,
+                                               Json(session_event)));
+    const auto snapshot =
+        storage->get(RecordKind::RunContextSnapshot, run.id).template get<RunContextSnapshot>();
+    EXPECT_EQ(snapshot.context_generation_id, next.at("id").template get<std::string>());
+    EXPECT_EQ(snapshot.context_generation, 2U);
+    EXPECT_EQ(snapshot.context_through_turn_sequence, 1U);
+    EXPECT_EQ(snapshot.history_through_turn_sequence, 2U);
+    EXPECT_EQ(snapshot.run_id, run.id);
+    EXPECT_THROW(storage->commit(
+                     {{RecordKind::RunContextSnapshot, run.id, run.id, Json{{"run_id", run.id}}}}),
+                 Error);
+
+    storage.reset();
+    auto reopened = backend.open(database);
+    const auto persisted_generation =
+        reopened->get(RecordKind::SessionContextGeneration, next.at("id"));
+    EXPECT_EQ(persisted_generation.at("payload").at("state"), "derived-through-one");
+    const auto persisted_snapshot =
+        reopened->get(RecordKind::RunContextSnapshot, run.id).template get<RunContextSnapshot>();
+    EXPECT_EQ(persisted_snapshot.context_generation_id, next.at("id").template get<std::string>());
+    EXPECT_EQ(persisted_snapshot.session_turn_id, run.session_turn_id);
+
+    AgentSession concurrent_session;
+    concurrent_session.pipeline_id = "example@1";
+    reopened->commit({{RecordKind::AgentSession, concurrent_session.id, concurrent_session.id,
+                       Json(concurrent_session)}});
+    std::barrier start(3);
+    std::atomic<unsigned> created = 0;
+    std::atomic<unsigned> stale = 0;
+    std::atomic<bool> unexpected = false;
+    std::vector<std::jthread> writers;
+    for (unsigned i = 0; i < 2; ++i)
+      writers.emplace_back([&, i] {
+        start.arrive_and_wait();
+        try {
+          (void)reopened->create_session_context_generation(
+              concurrent_session.id, 0, 0, "concurrent-key-" + std::to_string(i),
+              "structured-context", "1", Json{{"writer", i}});
+          ++created;
+        } catch (const Error &error) {
+          if (error.code == ErrorCode::Conflict)
+            ++stale;
+          else
+            unexpected = true;
+        }
+      });
+    start.arrive_and_wait();
+    writers.clear();
+    EXPECT_EQ(created, 1U);
+    EXPECT_EQ(stale, 1U);
+    EXPECT_FALSE(unexpected);
+    EXPECT_EQ(reopened->list(RecordKind::SessionContextGeneration, concurrent_session.id).size(),
+              1U);
   });
 }
 TEST(Sessions, AcceptedTurnsExecuteDurablyInAcceptanceOrder) {
@@ -966,10 +1136,8 @@ TEST(Sessions, OpaqueProviderContinuationSurvivesRestartAndIsSessionScoped) {
 }
 
 TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_continuation_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -988,7 +1156,6 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
 
   TemporaryDirectory dir;
   auto options = continuation_config(dir.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.validate();
@@ -1092,9 +1259,6 @@ TEST(Sessions, PostgresOpaqueContinuationSurvivesRestartAndIsSessionScoped) {
     }
     EXPECT_EQ(log_capture.str().find(trace->secret_prefix), std::string::npos);
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
 TEST(Sessions, InvalidAndTimedOutContinuationDoNotAdvanceState) {
@@ -1154,6 +1318,255 @@ TEST(Sessions, InvalidAndTimedOutContinuationDoNotAdvanceState) {
   EXPECT_EQ(api.handle("GET", "/api/v1/sessions/" + session.id + "/turns", "").status, 200U);
   EXPECT_EQ(service.get(RecordKind::SessionTurn, first.at("id").get<std::string>()).at("state"),
             "succeeded");
+}
+
+TEST(Sessions, ContextGenerationIsPassedAndRunSnapshotDoesNotChange) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  trace->secret_prefix = "snapshot-private-state";
+  Service service(io, continuation_config(dir.path));
+  register_continuation_fixture(service, trace);
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto pipeline =
+      service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+  const auto session = service.create_session(pipeline);
+  const Json first_payload{{"memory", "provider-neutral context"}};
+  const Json generation_request{{"expected_generation", 0},
+                                {"through_turn_sequence", 0},
+                                {"idempotency_key", "context-generation-0"},
+                                {"representation_kind", "structured-context"},
+                                {"representation_version", "1"},
+                                {"payload", first_payload}};
+  const auto generation_response = api.handle(
+      "POST", "/api/v1/sessions/" + session.id + "/context/generations", generation_request.dump());
+  ASSERT_EQ(generation_response.status, 201U);
+  EXPECT_FALSE(generation_response.body.contains("payload"));
+  const auto retried_generation = api.handle(
+      "POST", "/api/v1/sessions/" + session.id + "/context/generations", generation_request.dump());
+  ASSERT_EQ(retried_generation.status, 201U);
+  EXPECT_EQ(retried_generation.body.at("id"), generation_response.body.at("id"));
+  auto conflicting_generation_request = generation_request;
+  conflicting_generation_request["payload"] = {{"memory", "different"}};
+  EXPECT_EQ(api.handle("POST", "/api/v1/sessions/" + session.id + "/context/generations",
+                       conflicting_generation_request.dump())
+                .status,
+            409U);
+  const auto first_generation = generation_response.body;
+  EXPECT_EQ(
+      service
+          .get(RecordKind::SessionContextGeneration, first_generation.at("id").get<std::string>())
+          .at("generation"),
+      1U);
+  const auto first = service.submit_session_turn(session.id, "turn-1", Json{{"tag", "first"}});
+  io.run();
+  const auto first_turn = service.get(RecordKind::SessionTurn, first.at("id").get<std::string>());
+  const auto first_run_id = first_turn.at("run_id").get<std::string>();
+  const auto first_snapshot = service.get(RecordKind::RunContextSnapshot, first_run_id);
+  EXPECT_EQ(first_snapshot.at("context_generation_id"), first_generation.at("id"));
+  EXPECT_EQ(first_snapshot.at("context_through_turn_sequence"), 0U);
+  {
+    std::lock_guard lock(trace->mutex);
+    ASSERT_EQ(trace->observed.size(), 1U);
+    EXPECT_EQ(trace->observed[0].context_generation_id,
+              first_generation.at("id").get<std::string>());
+    EXPECT_EQ(trace->observed[0].context_payload, first_payload);
+    EXPECT_TRUE(trace->observed[0].context_turns.empty());
+  }
+
+  io.restart();
+  const auto second = service.submit_session_turn(session.id, "turn-2", Json{{"tag", "second"}});
+  io.run();
+  const auto second_turn = service.get(RecordKind::SessionTurn, second.at("id").get<std::string>());
+  const auto second_run_id = second_turn.at("run_id").get<std::string>();
+  const auto second_snapshot = service.get(RecordKind::RunContextSnapshot, second_run_id);
+  {
+    std::lock_guard lock(trace->mutex);
+    ASSERT_EQ(trace->observed.size(), 2U);
+    ASSERT_EQ(trace->observed[1].context_turns.size(), 1U);
+    EXPECT_EQ(trace->observed[1].context_turns[0].at("id"), first_turn.at("id"));
+    EXPECT_EQ(trace->observed[1].context_turns[0].at("sequence"), 1U);
+  }
+  ASSERT_EQ(second_snapshot.at("provider_continuations").size(), 1U);
+  EXPECT_EQ(second_snapshot.at("provider_continuations")[0].at("state"),
+            "snapshot-private-state:first");
+  const auto second_generation = service.create_session_context_generation(
+      session.id, 1, 2, "context-generation-1", "structured-context", "1",
+      Json{{"memory", "through turn two"}});
+  EXPECT_EQ(second_generation.at("generation"), 2U);
+  EXPECT_EQ(service.get(RecordKind::RunContextSnapshot, second_run_id).at("context_generation_id"),
+            first_generation.at("id"));
+  EXPECT_NE(service.list(RecordKind::SessionContinuation, session.id).front().at("state"),
+            second_snapshot.at("provider_continuations")[0].at("state"));
+
+  const auto session_context = api.handle("GET", "/api/v1/sessions/" + session.id + "/context", "");
+  ASSERT_EQ(session_context.status, 200U);
+  EXPECT_EQ(session_context.body.at("current_generation").at("id"), second_generation.at("id"));
+  EXPECT_FALSE(session_context.body.at("current_generation").contains("payload"));
+  const auto run_context = api.handle("GET", "/api/v1/runs/" + second_run_id + "/context", "");
+  ASSERT_EQ(run_context.status, 200U);
+  EXPECT_EQ(run_context.body.at("context_generation_id"), first_generation.at("id"));
+  EXPECT_EQ(run_context.body.dump().find("snapshot-private-state"), std::string::npos);
+}
+
+TEST(Sessions, AutomaticReductionCreatesGenerationBeforeRunBinding) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  auto options = continuation_config(dir.path);
+  options.session_context_reduction_enabled = true;
+  options.session_context_reducer = "recent-turns";
+  options.session_context_reduction_threshold_bytes = 700;
+  options.session_context_reduction_target_bytes = 600;
+  options.session_context_reduction_max_input_bytes = 4096;
+  Service service(io, options);
+  register_continuation_fixture(service, trace);
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto advertised_capabilities =
+      api.handle("GET", "/api/v1/version", "").body.at("capabilities");
+  ASSERT_TRUE(std::find(advertised_capabilities.begin(), advertised_capabilities.end(),
+                        Json("sessions.context_reduction")) != advertised_capabilities.end());
+  const auto pipeline =
+      service.register_pipeline(continuation_pipeline()).at("id").get<std::string>();
+  const auto session = service.create_session(pipeline);
+  const auto first = service.submit_session_turn(session.id, "auto-reduce-first", Json::object());
+  io.run();
+  io.restart();
+  const auto second = service.submit_session_turn(session.id, "auto-reduce-second", Json::object());
+  io.run();
+  EXPECT_TRUE(service.list(RecordKind::SessionContextGeneration, session.id).empty());
+  io.restart();
+  const auto third = service.submit_session_turn(session.id, "auto-reduce-third", Json::object());
+  io.run();
+  const auto first_turn = service.get(RecordKind::SessionTurn, first.at("id").get<std::string>());
+  const auto second_turn = service.get(RecordKind::SessionTurn, second.at("id").get<std::string>());
+  const auto third_turn = service.get(RecordKind::SessionTurn, third.at("id").get<std::string>());
+  ASSERT_EQ(third_turn.at("state"), "succeeded");
+  const auto generations = service.list(RecordKind::SessionContextGeneration, session.id);
+  ASSERT_EQ(generations.size(), 1U);
+  EXPECT_EQ(generations[0].at("through_turn_sequence"), 2U);
+  EXPECT_EQ(generations[0].at("payload").at("format"), "laso.recent-turns");
+  ASSERT_EQ(generations[0].at("payload").at("turns").size(), 1U);
+  EXPECT_EQ(generations[0].at("payload").at("turns")[0].at("sequence"), 2U);
+  const auto snapshot =
+      service.get(RecordKind::RunContextSnapshot, third_turn.at("run_id").get<std::string>());
+  EXPECT_EQ(snapshot.at("context_generation_id"), generations[0].at("id"));
+  EXPECT_EQ(first_turn.at("state"), "succeeded");
+  EXPECT_EQ(second_turn.at("state"), "succeeded");
+  EXPECT_EQ(service.list(RecordKind::SessionTurn, session.id).size(), 3U);
+  io.restart();
+  const auto fourth = service.submit_session_turn(session.id, "auto-reduce-fourth", Json::object());
+  io.run();
+  const auto fourth_turn = service.get(RecordKind::SessionTurn, fourth.at("id").get<std::string>());
+  ASSERT_EQ(fourth_turn.at("state"), "succeeded");
+  const auto advanced_generations = service.list(RecordKind::SessionContextGeneration, session.id);
+  ASSERT_EQ(advanced_generations.size(), 2U);
+  EXPECT_EQ(advanced_generations[1].at("generation"), 2U);
+  EXPECT_EQ(advanced_generations[1].at("predecessor_id"), advanced_generations[0].at("id"));
+  EXPECT_EQ(advanced_generations[1].at("through_turn_sequence"), 3U);
+  const auto fourth_snapshot =
+      service.get(RecordKind::RunContextSnapshot, fourth_turn.at("run_id").get<std::string>());
+  EXPECT_EQ(fourth_snapshot.at("context_generation_id"), advanced_generations[1].at("id"));
+  EXPECT_EQ(service.list(RecordKind::SessionTurn, session.id).size(), 4U);
+  {
+    std::lock_guard lock(trace->mutex);
+    ASSERT_EQ(trace->observed.size(), 4U);
+    EXPECT_EQ(trace->observed[2].context_generation_id, generations[0].at("id").get<std::string>());
+    EXPECT_TRUE(trace->observed[2].context_turns.empty());
+    EXPECT_EQ(trace->observed[2].context_payload, generations[0].at("payload"));
+    EXPECT_EQ(trace->observed[3].context_generation_id,
+              advanced_generations[1].at("id").get<std::string>());
+    EXPECT_EQ(trace->observed[3].context_payload, advanced_generations[1].at("payload"));
+  }
+}
+
+TEST(Sessions, AutomaticReductionFailureMalformedAndTimedOutResultsFailClosed) {
+  for (const auto scenario : {0, 1, 2}) {
+    TemporaryDirectory dir;
+    asio::io_context io;
+    auto options = config(dir.path);
+    options.session_context_reduction_enabled = true;
+    options.session_context_reducer = "test-marker";
+    options.session_context_reduction_threshold_bytes = 100;
+    options.session_context_reduction_target_bytes = 64;
+    options.session_context_reduction_max_input_bytes = 4096;
+    if (scenario == 2)
+      options.session_context_reduction_timeout_ms = 1;
+    Service service(io, options);
+    service.context_reducer_registry().add(
+        "test-marker",
+        std::make_shared<MarkerContextReducer>(scenario == 0, scenario == 1,
+                                               scenario == 2 ? Milliseconds{10} : Milliseconds{0}));
+    service.functions().add(
+        "session_reduction_probe",
+        std::make_shared<Function>(
+            [](ExecutionContext &, const Json &input) -> Task<Json> { co_return input; }));
+    const auto pipeline =
+        service.register_pipeline(single("type: function\n    function: session_reduction_probe"))
+            .at("id")
+            .get<std::string>();
+    const auto session = service.create_session(pipeline);
+    const auto first = service.submit_session_turn(session.id, "fail-closed-first", Json::object());
+    io.run();
+    io.restart();
+    const auto second =
+        service.submit_session_turn(session.id, "fail-closed-second", Json::object());
+    const auto second_turn =
+        service.get(RecordKind::SessionTurn, second.at("id").get<std::string>());
+    EXPECT_EQ(second_turn.at("state"), "claimed");
+    EXPECT_TRUE(second_turn.value("run_id", std::string{}).empty());
+    EXPECT_TRUE(service.list(RecordKind::SessionContextGeneration, session.id).empty());
+    EXPECT_EQ(service.list(RecordKind::Run).size(), 1U);
+    EXPECT_EQ(service.get(RecordKind::SessionTurn, first.at("id").get<std::string>()).at("state"),
+              "succeeded");
+  }
+}
+
+TEST(Sessions, RunContextSnapshotPreservesRunLocalContinuationProgress) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto trace = std::make_shared<ContinuationFixtureState>();
+  trace->secret_prefix = "run-local-state-" + uuid();
+  Service service(io, continuation_config(dir.path));
+  register_continuation_fixture(service, trace);
+  const auto pipeline = service
+                            .register_pipeline(R"(laso: "1"
+name: repeated-provider
+version: 1
+nodes:
+  first:
+    type: agent
+    model: session-model
+    prompt: First provider step.
+  second:
+    type: agent
+    model: session-model
+    prompt: Second provider step.
+edges:
+  - {from: input, to: first}
+  - {from: first, to: second}
+  - {from: second, to: output}
+)")
+                            .at("id")
+                            .get<std::string>();
+  const auto session = service.create_session(pipeline);
+  (void)service.create_session_context_generation(session.id, 0, 0, "run-context-1",
+                                                  "structured-context", "1", Json{{"x", 1}});
+  (void)service.submit_session_turn(session.id, "two-provider-steps", Json{{"tag", "same-run"}});
+  io.run();
+  const auto turns = service.list(RecordKind::SessionTurn, session.id);
+  ASSERT_EQ(turns.size(), 1U);
+  ASSERT_EQ(turns.front().at("state"), "succeeded");
+  const auto snapshot =
+      service.get(RecordKind::RunContextSnapshot, turns.front().at("run_id").get<std::string>());
+  EXPECT_TRUE(snapshot.at("provider_continuations").empty());
+  std::lock_guard lock(trace->mutex);
+  ASSERT_EQ(trace->observed.size(), 2U);
+  EXPECT_FALSE(trace->observed[0].received_state.has_value());
+  ASSERT_TRUE(trace->observed[1].received_state.has_value());
+  EXPECT_EQ(*trace->observed[1].received_state, trace->secret_prefix + ":same-run");
 }
 
 TEST(Sessions, CloseAfterProviderCallDoesNotAdvanceContinuation) {
@@ -1368,10 +1781,8 @@ TEST(Sessions, QueuedSessionsDispatchWhenRunCapacityFrees) {
 }
 
 TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_exec_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1390,7 +1801,6 @@ TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
 
   TemporaryDirectory dir;
   Config options = config(dir.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   asio::io_context io;
@@ -1414,16 +1824,11 @@ TEST(Sessions, PostgresSingleOwnerCompletesAcceptedTurn) {
     if (event.at("type") == "turn.execution.completed" && event.at("turn_id") == turn_id)
       saw_completion = true;
   EXPECT_TRUE(saw_completion);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
 TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_startup_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1442,7 +1847,6 @@ TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
 
   TemporaryDirectory directory;
   auto options = config(directory.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
@@ -1469,7 +1873,6 @@ TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
   // Model a process exit after the acceptance transaction commits but before
   // its immediate in-process dispatch is durably reflected in turn state.
   StorageOptions storage_options;
-  storage_options.backend = "postgres";
   storage_options.postgres_dsn = dsn;
   storage_options.postgres_schema = schema;
   storage_options.allow_multiple_processes = true;
@@ -1516,16 +1919,12 @@ TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
                                    event.value("turn_id", std::string{}) == turn_id;
                           }),
             1);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
+#if defined(LASO_ENABLE_SESSION_TEST_HOOKS)
 TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
-#if defined(LASO_HAS_POSTGRES) && defined(LASO_ENABLE_SESSION_TEST_HOOKS)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_claim_recovery_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1544,7 +1943,6 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
 
   TemporaryDirectory directory;
   auto options = config(directory.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
@@ -1569,7 +1967,6 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
   }
 
   StorageOptions storage_options;
-  storage_options.backend = "postgres";
   storage_options.postgres_dsn = dsn;
   storage_options.postgres_schema = schema;
   storage_options.allow_multiple_processes = true;
@@ -1641,16 +2038,13 @@ TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
                                    event.value("turn_id", std::string{}) == turn_id;
                           }),
             1);
-#else
-  GTEST_SKIP() << "PostgreSQL session test hooks are not enabled";
-#endif
 }
 
+#endif
+
 TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_claims_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1669,10 +2063,13 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
 
   TemporaryDirectory dir;
   auto options = config(dir.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
+  options.session_context_reduction_enabled = true;
+  options.session_context_reduction_threshold_bytes = 800;
+  options.session_context_reduction_target_bytes = 700;
+  options.session_context_reduction_max_input_bytes = 4096;
   options.validate();
 
   std::atomic<unsigned> active{0};
@@ -1693,7 +2090,7 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
       order.push_back(tag);
     }
     active.fetch_sub(1);
-    co_return input;
+    co_return Json{{"ok", true}};
   });
 
   std::string pipeline;
@@ -1713,7 +2110,6 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
   }
 
   StorageOptions storage_options;
-  storage_options.backend = options.storage_backend;
   storage_options.postgres_dsn = options.postgres_dsn;
   storage_options.postgres_schema = options.postgres_schema;
   storage_options.allow_multiple_processes = true;
@@ -1800,6 +2196,14 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
   }
   EXPECT_EQ(observed_x_order, (std::vector<std::string>{"X-A", "X-B", "X-C"}));
   EXPECT_GE(maximum_active.load(), 2U);
+  const auto generations = first.list(RecordKind::SessionContextGeneration, session_x.id);
+  ASSERT_EQ(generations.size(), 1U);
+  EXPECT_EQ(generations[0].at("through_turn_sequence"), 2U);
+  const auto third_turn = first.get(RecordKind::SessionTurn, x_c);
+  const auto third_snapshot =
+      first.get(RecordKind::RunContextSnapshot, third_turn.at("run_id").get<std::string>());
+  EXPECT_EQ(third_snapshot.at("context_generation_id"), generations[0].at("id"));
+  EXPECT_EQ(first.list(RecordKind::SessionTurn, session_x.id).size(), 3U);
   for (const auto &[session_id, response] : submitted) {
     const auto events = first.session_events(session_id, 0, 100);
     const auto turn_id = response.at("id").get<std::string>();
@@ -1811,15 +2215,10 @@ TEST(Sessions, PostgresTwoInstancesFenceDispatchAndPreserveSessionOrdering) {
                             }),
               1);
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_idempotency_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -1838,7 +2237,6 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
 
   TemporaryDirectory directory;
   auto options = config(directory.path);
-  options.storage_backend = "postgres";
   options.postgres_dsn = dsn;
   options.postgres_schema = schema;
   options.execution_mode = "multi_instance";
@@ -2067,15 +2465,10 @@ TEST(Sessions, PostgresTwoInstancesDeduplicateConcurrentSubmissions) {
             1);
   for (std::size_t i = 0; i < events.size(); ++i)
     EXPECT_EQ(events[i].at("sequence"), i + 1);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_stale_completion_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -2098,7 +2491,6 @@ TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
   auto owner_a = create_coordination(coordination_options, "session-owner-a");
   auto owner_b = create_coordination(coordination_options, "session-owner-b");
   StorageOptions storage_options;
-  storage_options.backend = "postgres";
   storage_options.postgres_dsn = dsn;
   storage_options.postgres_schema = schema;
   storage_options.allow_multiple_processes = true;
@@ -2211,15 +2603,12 @@ TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
                             return event.value("type", std::string{}) == "turn.execution.completed";
                           }),
             1);
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 
 TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto storage = backend.open(dir.path / "session-close-race.db");
+    auto storage = fixture.open(dir.path / "session-close-race.db");
     AgentSession session;
     storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
 
@@ -2284,7 +2673,7 @@ TEST(Storage, SessionCloseRacesInputAcceptanceTransactionally) {
   });
 }
 TEST(Storage, SessionCloseRacesTurnClaimTransactionally) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &backend) {
     TemporaryDirectory dir;
     auto storage = backend.open(dir.path / "session-close-claim-race.db");
     AgentSession session;
@@ -2363,25 +2752,24 @@ TEST(Storage, SessionCloseRacesTurnClaimTransactionally) {
 }
 TEST(Storage, IndependentSessionReadersSeeTheSameCommittedJournal) {
   TemporaryDirectory dir;
-  const auto path = dir.path / "shared-session.db";
-  SQLiteStorage writer(path);
-  SQLiteStorage first_reader(path);
-  SQLiteStorage second_reader(path);
+  auto writer = make_storage(dir.path / "shared-session.db");
+  auto first_reader = make_storage(dir.path / "shared-session.db");
+  auto second_reader = make_storage(dir.path / "shared-session.db");
   AgentSession session;
-  writer.commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+  writer->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
   const Json turn{{"idempotency_key", "input-1"}, {"input", {{"value", 1}}}};
   Event event;
-  ASSERT_TRUE(writer.submit_session_turn(session.id, "turn-1", turn, Json(event)));
-  const auto first = first_reader.session_events(session.id, 0, 10);
-  const auto second = second_reader.session_events(session.id, 0, 10);
+  ASSERT_TRUE(writer->submit_session_turn(session.id, "turn-1", turn, Json(event)));
+  const auto first = first_reader->session_events(session.id, 0, 10);
+  const auto second = second_reader->session_events(session.id, 0, 10);
   ASSERT_EQ(first.size(), 1U);
   EXPECT_EQ(first, second);
   EXPECT_EQ(second.front().at("sequence"), 1U);
 }
 TEST(Storage, ConformanceClaimsDurableOccurrenceOnce) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Record first{RecordKind::ScheduleOccurrence,
                        "schedule|due",
                        "",
@@ -2395,9 +2783,9 @@ TEST(Storage, ConformanceClaimsDurableOccurrenceOnce) {
   });
 }
 TEST(Storage, ConformanceSerializesConcurrentClaims) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::atomic<unsigned> winners = 0;
     std::vector<std::jthread> claimers;
     for (unsigned i = 0; i < 8; ++i) {
@@ -2411,9 +2799,9 @@ TEST(Storage, ConformanceSerializesConcurrentClaims) {
   });
 }
 TEST(Storage, ConformanceAtomicallyClaimsExternalEventAndDeduplicates) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     const Record claim{
         RecordKind::ExternalEventClaim,
         "external-event:source:event-1",
@@ -2427,9 +2815,9 @@ TEST(Storage, ConformanceAtomicallyClaimsExternalEventAndDeduplicates) {
   });
 }
 TEST(Storage, ConformanceSerializesConcurrentExternalEventClaims) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     std::atomic<unsigned> winners = 0;
     std::vector<std::jthread> claimers;
     for (unsigned i = 0; i < 8; ++i) {
@@ -2450,9 +2838,9 @@ TEST(Storage, ConformanceSerializesConcurrentExternalEventClaims) {
 }
 
 TEST(Storage, ConformancePersistsWorkerJobLifecycleAndRejectsInvalidUpdates) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     WorkerJob job;
     job.id = "worker-job-1";
     job.worker_id = "offline";
@@ -2502,9 +2890,9 @@ TEST(Storage, ConformancePersistsWorkerJobLifecycleAndRejectsInvalidUpdates) {
 }
 
 TEST(Storage, ConformanceClaimsWorkerJobIdentityOnce) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     WorkerJob job;
     job.id = "worker-claim";
     job.worker_id = "offline";
@@ -2537,9 +2925,9 @@ TEST(Workspace, ManifestStagesOnlyBoundedRelativeFilesWithIntegrity) {
 }
 
 TEST(Storage, ConformancePersistsAndFencesNodeWork) {
-  for_each_storage_backend([](const auto &backend) {
+  for_each_storage_fixture([](const auto &fixture) {
     TemporaryDirectory dir;
-    auto s = backend.open(dir.path / "state.db");
+    auto s = fixture.open(dir.path / "state.db");
     NodeWork work;
     work.id = "node-work-1";
     work.run_id = "run-1";
@@ -2578,16 +2966,20 @@ TEST(Storage, ConformancePersistsAndFencesNodeWork) {
 }
 
 TEST(Storage, PostgresRejectsSecondOwner) {
-#if defined(LASO_HAS_POSTGRES)
   if (!std::getenv("LASO_TEST_POSTGRES_DSN"))
     GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
-  for (const auto &backend : storage_backends()) {
-    if (backend.name != "postgres")
-      continue;
+  for (const auto &fixture : storage_fixtures()) {
+    struct FixtureCleanup {
+      const StorageFixture &fixture;
+      ~FixtureCleanup() {
+        if (fixture.cleanup)
+          fixture.cleanup();
+      }
+    } fixture_cleanup{fixture};
     TemporaryDirectory dir;
-    auto first = backend.open(dir.path / "state.db");
+    auto first = fixture.open(dir.path / "state.db");
     try {
-      auto second = backend.open(dir.path / "state.db");
+      auto second = fixture.open(dir.path / "state.db");
       (void)second;
       ADD_FAILURE() << "a second PostgreSQL storage owner was accepted";
     } catch (const Error &error) {
@@ -2595,15 +2987,34 @@ TEST(Storage, PostgresRejectsSecondOwner) {
       EXPECT_STREQ(error.what(), "PostgreSQL database is owned by another LASO process");
     }
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
+}
+TEST(Storage, PostgresOwnerCanBeReacquiredImmediatelyAfterStorageDestruction) {
+  const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
+  ASSERT_NE(dsn, nullptr);
+  TemporaryDirectory dir;
+  StorageOptions options;
+  options.postgres_dsn = dsn;
+  options.postgres_schema = schema_for(dir.path / "owner-lifecycle");
+
+  for (int attempt = 0; attempt < 25; ++attempt) {
+    {
+      auto owner = create_storage(options);
+      try {
+        auto competing = create_storage(options);
+        (void)competing;
+        ADD_FAILURE() << "a second PostgreSQL storage owner was accepted";
+      } catch (const Error &error) {
+        EXPECT_EQ(error.code, ErrorCode::Conflict);
+      }
+    }
+    std::unique_ptr<Storage> replacement;
+    EXPECT_NO_THROW(replacement = create_storage(options));
+    ASSERT_TRUE(replacement);
+  }
 }
 TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_upgrade_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   const std::vector<std::string> prior_tables = {"pipelines",
@@ -2647,7 +3058,6 @@ TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
     transaction.commit();
 
     StorageOptions options;
-    options.backend = "postgres";
     options.postgres_dsn = dsn;
     options.postgres_schema = schema;
     options.allow_multiple_processes = true;
@@ -2659,9 +3069,13 @@ TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
     pqxx::connection verify_connection(dsn);
     pqxx::read_transaction verify(verify_connection);
     verify.exec("SET search_path TO \"" + schema + "\", public");
-    EXPECT_EQ(verify.exec1("SELECT MAX(version) FROM laso_schema_migrations")[0].as<int>(), 10);
+    EXPECT_EQ(verify.exec1("SELECT MAX(version) FROM laso_schema_migrations")[0].as<int>(), 11);
     EXPECT_STREQ(verify.exec1("SELECT to_regclass('node_work')")[0].c_str(), "node_work");
     EXPECT_STREQ(verify.exec1("SELECT to_regclass('agent_sessions')")[0].c_str(), "agent_sessions");
+    EXPECT_STREQ(verify.exec1("SELECT to_regclass('session_context_generations')")[0].c_str(),
+                 "session_context_generations");
+    EXPECT_STREQ(verify.exec1("SELECT to_regclass('run_context_snapshots')")[0].c_str(),
+                 "run_context_snapshots");
   } catch (...) {
     pqxx::connection cleanup_connection(dsn);
     pqxx::work cleanup(cleanup_connection);
@@ -2673,21 +3087,15 @@ TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
   pqxx::work cleanup(cleanup_connection);
   cleanup.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
   cleanup.commit();
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Storage, PostgresRunsAndRecoversNormalRuntime) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   const auto dsn_copy = std::string(dsn);
   auto schema = "laso_runtime_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   TemporaryDirectory dir;
   Config c = config(dir.path);
-  c.storage_backend = "postgres";
   c.postgres_dsn = dsn_copy;
   c.postgres_schema = schema;
   c.validate();
@@ -2723,14 +3131,6 @@ TEST(Storage, PostgresRunsAndRecoversNormalRuntime) {
   pqxx::work transaction(connection);
   transaction.exec("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
   transaction.commit();
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
-}
-TEST(Storage, ProcessLeasePreventsCompetingExecutors) {
-  TemporaryDirectory dir;
-  ProcessLease first(dir.path / "state.db");
-  EXPECT_THROW(ProcessLease(dir.path / "state.db"), Error);
 }
 TEST(Artifacts, IgnoresUntrustedNamesForPath) {
   TemporaryDirectory dir;
@@ -2905,6 +3305,30 @@ edges:
   EXPECT_EQ(r.state, RunState::Completed);
   EXPECT_EQ(r.message.payload.at("text"), "Offline plugin model response");
   EXPECT_TRUE(r.message.payload.at("reviewed"));
+  const auto session_pipeline = s.register_pipeline(R"(laso: "1"
+name: plugin-session-context
+version: 1
+nodes:
+  generate:
+    type: agent
+    model: plugin-model
+    prompt: Continue the session.
+edges:
+  - {from: input, to: generate}
+  - {from: generate, to: output}
+)")
+                                    .at("id")
+                                    .get<std::string>();
+  const auto session = s.create_session(session_pipeline);
+  (void)s.create_session_context_generation(session.id, 0, 0, "plugin-context-1",
+                                            "structured-context", "1", Json{{"key", "value"}});
+  io.restart();
+  const auto turn = s.submit_session_turn(session.id, "plugin-session-turn", Json{{"input", "go"}});
+  io.run();
+  const auto completed = s.get(RecordKind::SessionTurn, turn.at("id").get<std::string>());
+  ASSERT_EQ(completed.at("state"), "succeeded");
+  const auto session_run = s.get(RecordKind::Run, completed.at("run_id").get<std::string>());
+  EXPECT_TRUE(session_run.at("message").at("payload").at("session_context_received"));
   const auto provenance = std::find_if(
       r.message.provenance.begin(), r.message.provenance.end(), [](const ProvenanceRecord &item) {
         return item.provider == "example-model" && item.model == "offline-example";
@@ -2967,7 +3391,12 @@ TEST(Api, HealthAndVersion) {
   LocalDevelopmentIdentity identity;
   Api api(s, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/health", "").status, 200U);
-  EXPECT_EQ(api.handle("GET", "/api/v1/version", "").body.at("version"), "0.1.0-rc.1");
+  const auto version = api.handle("GET", "/api/v1/version", "");
+  EXPECT_EQ(version.body.at("version"), "0.1.0-rc.1");
+  EXPECT_EQ(version.body.at("capabilities"),
+            (Json{"sessions.durable", "sessions.ordered_turns", "sessions.sequential_execution",
+                  "sessions.event_replay", "sessions.sse", "sessions.context_generations",
+                  "sessions.run_context_snapshots"}));
 }
 TEST(Api, RegistersAndCreatesRun) {
   TemporaryDirectory dir;
@@ -2995,6 +3424,11 @@ TEST(Api, PersistentSessionTurnsCanBeRetriedAndReplayed) {
   auto created = api.handle("POST", "/api/v1/sessions", R"({"pipeline_id":"test@1"})");
   ASSERT_EQ(created.status, 201U);
   const auto id = created.body.at("id").get<std::string>();
+  const auto listed = api.handle("GET", "/api/v1/sessions?limit=50&offset=0", "");
+  ASSERT_EQ(listed.status, 200U);
+  ASSERT_EQ(listed.body.size(), 1U);
+  EXPECT_EQ(listed.body.front().at("id"), id);
+  EXPECT_FALSE(listed.body.front().contains("next_sequence"));
   const auto inspected = api.handle("GET", "/api/v1/sessions/" + id, "").body;
   EXPECT_EQ(inspected.at("state"), "open");
   EXPECT_FALSE(inspected.contains("backend_state"));
@@ -3114,6 +3548,17 @@ TEST(Api, PersistentSessionsSurviveServiceRestart) {
     const auto open = api.handle("GET", "/api/v1/sessions/" + open_session_id, "");
     ASSERT_EQ(open.status, 200U);
     EXPECT_EQ(open.body.at("state"), "open");
+    const auto listed = api.handle("GET", "/api/v1/sessions?limit=50&offset=0", "");
+    ASSERT_EQ(listed.status, 200U);
+    bool found_open = false;
+    for (const auto &session : listed.body)
+      found_open |= session.at("id") == open_session_id;
+    EXPECT_TRUE(found_open);
+    const auto turns = api.handle("GET", "/api/v1/sessions/" + open_session_id + "/turns", "");
+    ASSERT_EQ(turns.status, 200U);
+    ASSERT_EQ(turns.body.size(), 1U);
+    EXPECT_EQ(turns.body.front().at("sequence"), 1U);
+    EXPECT_EQ(turns.body.front().at("input").at("text"), "one");
     const auto open_events =
         api.handle("GET", "/api/v1/sessions/" + open_session_id + "/events?after=0", "");
     ASSERT_EQ(open_events.body.size(), 3U);
@@ -3147,7 +3592,6 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
   struct StreamCleanup {
     HttpServer &server;
     Service &service;
-    asio::io_context &io;
     std::shared_ptr<ContinuationFixtureState> provider;
     bool stopped = false;
     void stop() {
@@ -3162,7 +3606,6 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
       }
       server.stop();
       service.shutdown();
-      io.stop();
       stopped = true;
     }
     ~StreamCleanup() {
@@ -3196,7 +3639,7 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
     server.start();
     std::jthread server_thread_a([&] { io.run(); });
     std::jthread server_thread_b([&] { io.run(); });
-    StreamCleanup cleanup{server, service, io, trace};
+    StreamCleanup cleanup{server, service, trace};
 
     SessionSseTestClient client_a(server.port(), session_id, 0);
     SessionSseTestClient client_b(server.port(), session_id, 0);
@@ -3281,7 +3724,7 @@ TEST(Api, SessionSseTwoClientsReplayExecutionAcrossRestart) {
     server.start();
     std::jthread server_thread_a([&] { io.run(); });
     std::jthread server_thread_b([&] { io.run(); });
-    StreamCleanup cleanup{server, restarted, io, {}};
+    StreamCleanup cleanup{server, restarted, {}};
 
     SessionSseTestClient client_a(server.port(), session_id, 3);
     SessionSseTestClient client_b(server.port(), session_id, 3);
@@ -3643,10 +4086,8 @@ TEST(Api, SessionSseSlotIsReleasedAfterConfiguredLifetimeAndShutdown) {
   EXPECT_EQ(server.metrics().closed_session_streams, 2U);
 }
 TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
-#if defined(LASO_HAS_POSTGRES)
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
-  if (!dsn || !*dsn)
-    GTEST_SKIP() << "LASO_TEST_POSTGRES_DSN is not configured";
+  ASSERT_NE(dsn, nullptr);
   auto schema = "laso_session_sse_" + uuid();
   std::replace(schema.begin(), schema.end(), '-', '_');
   struct SchemaCleanup {
@@ -3664,7 +4105,6 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
   } cleanup{dsn, schema};
   TemporaryDirectory dir;
   Config c = config(dir.path);
-  c.storage_backend = "postgres";
   c.postgres_dsn = dsn;
   c.postgres_schema = schema;
   c.execution_mode = "multi_instance";
@@ -3689,15 +4129,15 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
     std::jthread server_thread([&] { observer_io.run(); });
     struct ServerCleanup {
       HttpServer &server;
-      asio::io_context &io;
+      Service &service;
       std::jthread &thread;
       ~ServerCleanup() {
         server.stop();
-        io.stop();
+        service.shutdown();
         if (thread.joinable())
           thread.join();
       }
-    } server_cleanup{server, observer_io, server_thread};
+    } server_cleanup{server, observer, server_thread};
     asio::io_context peer_io;
     boost::beast::tcp_stream client(peer_io);
     client.expires_after(std::chrono::seconds(5));
@@ -3769,9 +4209,6 @@ TEST(Api, PostgresSessionSseObservesEventsFromAnotherInstance) {
     client.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
     client.socket().close(ec);
   }
-#else
-  GTEST_SKIP() << "PostgreSQL backend is not enabled";
-#endif
 }
 TEST(Api, RunMetadataIsPreservedForWorkerContext) {
   TemporaryDirectory dir;
@@ -3874,7 +4311,7 @@ TEST(Storage, InterruptedRunBecomesInspectablePausedCheckpoint) {
   r.pipeline_id = "hello";
   r.definition = fixture("hello-pipeline");
   {
-    auto s = make_storage(c.db_path);
+    auto s = make_storage(c.data_dir / "service");
     s->commit({{RecordKind::Run, r.id, r.id, Json(r)}});
   }
   asio::io_context io;
@@ -3888,7 +4325,7 @@ TEST(Storage, PersistedCancellationSurvivesRestart) {
   r.state = RunState::Running;
   r.cancellation_requested = true;
   {
-    auto s = make_storage(c.db_path);
+    auto s = make_storage(c.data_dir / "service");
     s->commit({{RecordKind::Run, r.id, r.id, Json(r)}});
   }
   asio::io_context io;
@@ -3904,7 +4341,7 @@ TEST(Storage, RecoveryDoesNotRewriteTerminalRuns) {
   r.pipeline_id = "completed";
   r.definition = fixture("hello-pipeline");
   {
-    auto storage = make_storage(c.db_path);
+    auto storage = make_storage(c.data_dir / "service");
     storage->commit({{RecordKind::Run, r.id, r.id, Json(r)}});
   }
   asio::io_context io;
@@ -3930,7 +4367,7 @@ TEST(Storage, RecoveryScansAttemptsBeyondOnePage) {
     records.push_back({RecordKind::Attempt, attempt.id, r.id, Json(attempt)});
   }
   {
-    auto storage = make_storage(c.db_path);
+    auto storage = make_storage(c.data_dir / "service");
     storage->commit(records);
   }
   asio::io_context io;
