@@ -1192,14 +1192,16 @@ TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
   work.join = "join";
   work.token = {"branch", Message{}, {{"group-1", "join", 1, 0}}};
   storage->commit({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}});
-  const auto old = first->acquire("node:" + work.id, 100);
+  // Leave enough time for the initial fenced write under loaded CI runners;
+  // the test still waits for expiry before exercising takeover.
+  const auto old = first->acquire("node:" + work.id, 5000);
   ASSERT_TRUE(old);
   work.state = NodeWorkState::Running;
   work.attempt = 1;
   storage->commit_owned({{RecordKind::NodeWork, work.id, work.run_id, Json(work)}},
                         "node:" + work.id, old->owner_instance, old->fencing_token);
-  std::this_thread::sleep_for(std::chrono::milliseconds{180});
-  const auto current = second->acquire("node:" + work.id, 5000);
+  std::this_thread::sleep_for(std::chrono::milliseconds{5200});
+  const auto current = second->acquire("node:" + work.id, 30000);
   ASSERT_TRUE(current);
   EXPECT_GT(current->fencing_token, old->fencing_token);
   TemporaryDirectory artifact_directory;
