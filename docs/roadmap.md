@@ -119,7 +119,8 @@ observed the same authoritative transcript through two independent Web clients.
 The real-provider run also crossed an immutable context-generation boundary.
 Browser acceptance verified SSE replay from `Last-Event-ID`. Provider process
 death, stale completion, and cancellation races are covered by deterministic
-worker fixtures and the existing fencing tests. The live-provider boundary
-uses one LASO owner with two Web instances; this milestone does not claim that a
-live Codex operation can be taken over by a different LASO instance. See
+worker fixtures and the existing fencing tests. Browser acceptance used two Web
+instances against one LASO owner. A separate real-provider test used two LASO
+instances and resumed the session through B after A stopped between turns; it
+does not claim that an in-flight Codex operation can be transferred safely. See
 [the M6 contract and validation](m6-real-provider-sessions.md).

@@ -73,9 +73,16 @@ continuation remained private in the API.
 Browser acceptance used the private Go LASO-Web against the same LASO build.
 It verified a real provider-backed turn, two independent browser clients
 observing the same LASO-owned session, Web restart, next-turn continuation,
-and SSE replay using `Last-Event-ID`. The test topology used one LASO owner and
-two Web instances; it does not claim that a live Codex operation can be taken
-over by a second LASO instance.
+and SSE replay using `Last-Event-ID`.
+
+A separate real-provider acceptance ran two LASO service processes against the
+same disposable PostgreSQL schema. Instance A created the pipeline and session
+and completed Turn 1. Instance B then listed and retrieved that session and
+replayed Turn 1's completion event. After A was stopped between turns, Turn 2
+was submitted through B; its newly supervised Codex process resumed the saved
+continuation and recalled the fixture marker. This verifies continuation after
+the prior service owner is gone. It does not claim that an in-flight Codex
+side effect can be transferred safely to another LASO instance.
 
 The complete GCC Debug and Release suites each discovered 290 tests; 285
 passed, none failed, and five were intentionally skipped for optional S3,
