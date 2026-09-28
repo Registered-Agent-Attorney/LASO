@@ -1,9 +1,12 @@
 # Security boundaries
 
-LASO v0.1.0-rc.1 is an early framework. It has not been independently audited or validated
-in production. Ubuntu GCC/Clang, ASan/UBSan, Debian container, runtime-image, and
-hosted CI validation have been performed; full systemd deployment behavior remains
-unvalidated. See [VALIDATION.md](VALIDATION.md) for the exact record.
+LASO is a release candidate, not a claim of general production readiness. It has
+not received an independent security audit. Validation covers the specific
+builds, tests, systemd/deployment paths, provider acceptance, and failure cases
+listed in [VALIDATION.md](VALIDATION.md); it does not establish security for
+every deployment, plugin, provider, or network topology. Use only controlled
+deployments that satisfy the documented security boundaries and recovery
+requirements.
 
 - The only built-in model provider is offline Mock. No external AI service is
   contacted and no model is downloaded automatically.
@@ -15,11 +18,11 @@ unvalidated. See [VALIDATION.md](VALIDATION.md) for the exact record.
 - Policy checks occur in the runtime before invoking tools/providers. Network
   access defaults off, and remote providers cannot receive non-public metadata
   classifications through the baseline policy. Policy is not an OS sandbox.
-- The management API is unauthenticated development mode on loopback by default.
-  Non-loopback binding requires an explicit configuration change. A deployment
-  exposing it remotely must supply an identity/authorization implementation or a
-  correctly configured authenticating proxy. Do not equate loopback with complete
-  access isolation from other local processes.
+- The management API is unauthenticated and binds to loopback by default.
+  Non-loopback binding requires an explicit configuration change but does not add
+  authentication. Keep it private or place it behind a correctly configured
+  authenticating boundary before any remote exposure. Do not equate loopback with
+  complete access isolation from other local processes.
 - Loading a native LASO plugin grants that plugin code execution inside the LASO
   process. Even shared-library constructors run before ABI checks. Only explicitly
   trusted, configured plugin directories should be used, with write access limited

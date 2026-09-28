@@ -124,8 +124,9 @@ cmake --install build-user
 
 This installs the CLI, server, deterministic reference worker, public headers,
 the C plugin SDK header, the example configuration, and public documentation.
-The state directory is still selected at runtime and is not created in the
-installation prefix.
+Provider adapter executables are installed beside the server when their
+`LASO_BUILD_*_ADAPTER` option is enabled. The state directory is still selected
+at runtime and is not created in the installation prefix.
 
 ## Windows and containers
 

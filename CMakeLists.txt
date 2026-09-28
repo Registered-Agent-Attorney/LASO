@@ -177,6 +177,14 @@ target_compile_options(laso_example_worker PRIVATE -Wall -Wextra -Wpedantic ${LA
 target_link_options(laso_example_worker PRIVATE ${LASO_SANITIZER_FLAGS})
 set_target_properties(laso_example_worker PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/worker-plugins")
 install(TARGETS laso laso-server laso-example-worker-host RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+foreach(optional_worker IN ITEMS
+    laso-opencode-worker
+    laso-codex-worker
+    laso-claude-worker)
+  if(TARGET ${optional_worker})
+    install(TARGETS ${optional_worker} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  endif()
+endforeach()
 if(LASO_INSTALL_SYSTEMD_UNIT)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/laso.service" DESTINATION "${LASO_SYSTEMD_UNIT_DIR}")
 endif()

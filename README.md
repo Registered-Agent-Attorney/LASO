@@ -6,8 +6,10 @@ Local AI System for Orchestration is an early, Linux-first C++20 framework for
 declarative workflows, deterministic functions, model and tool registries, policy
 checks, durable human approval, and execution history. Applications supply their
 own logic and integrations. Agents are one node type; pipelines are the root
-abstraction. This tree is release candidate **0.1.0-rc.1**; read the support
-matrix and security limitations before production deployment.
+abstraction. This source targets the next `0.1.0` release candidate; the
+version reported by `laso version` and any published tag identify the exact
+build. Release readiness is not implied until the current validation record
+and known limitations have been reviewed.
 
 **Validation status:** implemented, statically reviewed, and validated on Ubuntu
 with GCC and Clang, ASan/UBSan, a Debian 13 container build, a runtime image

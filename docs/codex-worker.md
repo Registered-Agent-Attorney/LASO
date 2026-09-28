@@ -17,14 +17,18 @@ notifications; it does not scrape terminal output. The app-server interface is
 experimental in Codex, so deployments should pin and validate their installed
 Codex version.
 
-Build the adapter explicitly:
+Build and install the adapter explicitly when the deployment uses it. Configure
+the final install prefix before building so the generated systemd unit points at
+the installed server path:
 
 ```sh
-cmake -S . -B build -G Ninja -DLASO_BUILD_CODEX_ADAPTER=ON
-cmake --build build --target laso-codex-worker
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr/local -DLASO_BUILD_CODEX_ADAPTER=ON
+cmake --build build --parallel 2
+sudo cmake --install build
 ```
 
-The default LASO build does not require Codex or build this executable.
+The default LASO build does not require Codex or build/install this executable.
 
 ## Configuration
 

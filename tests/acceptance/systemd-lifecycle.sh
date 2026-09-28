@@ -119,7 +119,8 @@ process_workers:
 EOF
 sed "s|/var/lib/laso|$root/installed-example-state|g" \
   "$prefix/share/laso/laso.systemd.example.yaml" >"$root/installed-example.yaml"
-"$prefix/bin/laso" --config "$root/installed-example.yaml" health >/dev/null
+LASO_POSTGRES_DSN="$postgres_dsn" "$prefix/bin/laso" \
+  --config "$root/installed-example.yaml" health >/dev/null
 
 start_service() {
   systemd-run --user --unit="$unit" --property=Type=simple \
