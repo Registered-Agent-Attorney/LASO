@@ -46,7 +46,8 @@ session authorization policy.
 
 ### M5.1 — durable input journal and replay
 
-Status: closed. M5.1 acceptance and hosted CI passed on PR #13; the merge records this closeout.
+Status: closed. Merged in PR #13. Its durable session and event contract remains
+the foundation for the later PostgreSQL-only implementation.
 
 Provide durable session creation, bounded idempotent input acceptance, ordered
 per-session events, close semantics, event replay, and resumable SSE. Acceptance
@@ -63,10 +64,12 @@ recovery for sessions.
 
 ### M5.2 — durable sequential turn execution and provider continuation
 
-Status: implementation merged in PR #14. The hosted regression matrix passed;
-the PR records physical owner-death, PostgreSQL outage/recovery, and
-restart-continuation cases as follow-up validation not repeated on its exact
-candidate.
+Status: implementation merged in PR #14. The PostgreSQL regression suite
+covers ordered dispatch, run binding, recovery, fencing, cancellation, and
+continuation publication. M6 adds real Codex continuation across a LASO restart
+for one supported provider path. The system does not promise exactly-once
+provider side effects; distributed fault injection remains limited to the cases
+listed in [the validation record](../VALIDATION.md).
 
 The durable state machine, run-binding transaction, execution ownership,
 continuation boundary, and close/cancellation races are specified in
@@ -81,7 +84,43 @@ artifacts. See [the M5.2 design](m5-2-design.md) and
 
 The suite covers duplicate submission, two-instance claim contention, worker
 and process recovery boundaries, stale-fence completion, provider timeout, and
-replay of committed transitions. The physical follow-up scenarios listed above
-remain evidence gaps. LASO may make at-least-once provider attempts with one
-authoritative fenced completion; it does not promise exactly-once external side
-effects.
+replay of committed transitions. LASO may make at-least-once provider attempts
+with one authoritative fenced completion; it does not promise exactly-once
+external side effects.
+
+### M5.3 — SSE admission and replay
+
+Status: closed. Merged in PR #15 and included in the PostgreSQL session stack
+landed by PR #21. The event journal supports numeric `Last-Event-ID` replay,
+bounded stream admission, sanitized HTTP 429 responses, and `Retry-After`.
+LASO-Web reconnects and reloads canonical session state from LASO.
+
+### M5.4 — PostgreSQL storage and session context
+
+Status: closed. PR #21 merged the validated PostgreSQL-only storage,
+capability-discovery, context-provenance, immutable-generation, and opt-in
+context-reduction work. PostgreSQL is required; SQLite storage has been
+removed. Capability discovery is available from merged LASO `main`. Context
+reduction remains opt-in and uses immutable generation records and run-context
+snapshots; it does not replace durable turn history.
+
+## M6 — real provider execution in durable sessions
+
+Status: implementation and real-provider/Web acceptance passed. The M6 PR is
+the record of exact-head CI and final disposition. The Codex worker is the
+canonical first adapter because its supported app-server protocol provides
+structured start/resume/turn operations and a documented continuation boundary.
+Claude Code and OpenCode remain optional adapters and are not accepted as
+durable-session providers by this milestone.
+
+The acceptance path completed three real provider-backed turns through a LASO
+session, verified provider continuation after LASO and LASO-Web restarts, and
+observed the same authoritative transcript through two independent Web clients.
+The real-provider run also crossed an immutable context-generation boundary.
+Browser acceptance verified SSE replay from `Last-Event-ID`. Provider process
+death, stale completion, and cancellation races are covered by deterministic
+worker fixtures and the existing fencing tests. Browser acceptance used two Web
+instances against one LASO owner. A separate real-provider test used two LASO
+instances and resumed the session through B after A stopped between turns; it
+does not claim that an in-flight Codex operation can be transferred safely. See
+[the M6 contract and validation](m6-real-provider-sessions.md).

@@ -69,11 +69,14 @@ void from_json(const Json &, WorkerMetadata &);
 
 struct WorkerRequest {
   std::string job_id, worker_id, capability, task_type, instructions, idempotency_key, deadline,
-      run_id, node_id;
+      run_id, node_id, durable_session_id;
   unsigned attempt = 1;
   std::uint64_t timeout_ms = 0;
   Json input = Json::object(), output_schema = Json::object(), metadata = Json::object();
   std::vector<std::string> artifact_ids;
+  bool durable_session = false;
+  std::optional<OpaqueProviderContinuation> continuation;
+  std::optional<SessionContext> session_context;
 };
 
 struct WorkerSubmission {
@@ -84,6 +87,7 @@ struct WorkerSubmission {
   Json result = nullptr;
   std::vector<Json> artifacts;
   std::string error;
+  std::optional<OpaqueProviderContinuation> continuation;
 };
 
 struct WorkerStatus {
@@ -92,6 +96,7 @@ struct WorkerStatus {
   std::vector<Json> artifacts;
   std::string error;
   WorkerUsage usage;
+  std::optional<OpaqueProviderContinuation> continuation;
 };
 
 struct WorkerJob {
@@ -104,6 +109,9 @@ struct WorkerJob {
   Json request_metadata = Json::object(), result = Json::object(), result_metadata = Json::object();
   std::vector<Json> artifacts;
   WorkerUsage usage;
+  // Private durable staging data. Session continuation is only advanced by
+  // the owning run's execution fence; worker-job APIs redact this candidate.
+  std::optional<OpaqueProviderContinuation> continuation;
 };
 void to_json(Json &, const WorkerJob &);
 void from_json(const Json &, WorkerJob &);

@@ -53,10 +53,13 @@ allowlisted variables and literal overrides are passed to the adapter and then
 to Codex. Do not place credentials, prompts, session transcripts, or DSNs in
 configuration, worker metadata, or logs.
 
-Every job must provide `metadata.project_dir`. The adapter canonicalizes the
-directory and rejects traversal, missing paths, symlink escapes detectable by
-canonicalization, and paths outside the configured roots. Existing explicit
-Git worktrees are supported; automatic worktree creation is not performed.
+Jobs normally provide `metadata.project_dir`. A durable-session job may omit it
+when exactly one `--allowed-root` is configured; the adapter uses that root as
+the session workspace. With multiple roots the caller must provide an explicit
+project directory. The adapter canonicalizes the directory and rejects
+traversal, missing paths, symlink escapes detectable by canonicalization, and
+paths outside the configured roots. Existing explicit Git worktrees are
+supported; automatic worktree creation is not performed.
 
 ## Sessions and recovery
 
@@ -74,6 +77,30 @@ provider identity, bounded command/action metadata, project directory, turn
 duration, and normalized token usage. Missing Codex metrics remain absent; LASO
 does not invent pricing or billing data. Existing wall-time, token, cost-unit,
 and job-count budgets apply through `WorkerManager`.
+
+### Durable LASO sessions
+
+The adapter advertises the generic `session-continuation` and `session-context`
+capabilities. LASO passes its private opaque continuation to the adapter and
+stages the returned candidate in a private field of the durable worker-job
+record. That closes the recovery gap if LASO restarts after the provider has
+completed but before the run checkpoint. Worker-job API views redact the
+candidate. Only the enclosing run's authoritative session fence can publish it
+as current continuation; staging does not advance session state. In this mode,
+the response includes safe text/model/provider fields only; it omits the Codex
+thread ID, project path, and raw command/action details.
+If Codex requests approval or input during a durable turn, the worker
+interaction is linked to the LASO session and worker-job IDs. The provider
+thread ID is kept out of that public interaction record.
+
+After an adapter or LASO restart, the adapter opens a new Codex app-server
+process and resumes the committed thread. When LASO selects a new immutable
+context generation, the adapter starts a new thread and seeds it with the
+generation payload plus the completed-turn tail after the generation
+boundary. LASO continues to own full durable turn/event history. If the
+provider outcome is ambiguous, the turn remains subject to LASO's conservative
+`Unknown` recovery semantics and is not blindly resubmitted. This is not an
+exactly-once side-effect guarantee.
 
 ## Approvals and questions
 

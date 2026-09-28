@@ -589,7 +589,9 @@ std::vector<Json> Service::worker_jobs(const std::string &run_id, std::size_t li
   return worker_manager_->jobs(run_id, limit, offset);
 }
 Json Service::worker_job(const std::string &id) const {
-  return Json(worker_manager_->job(id));
+  auto result = Json(worker_manager_->job(id));
+  result.erase("_continuation_candidate");
+  return result;
 }
 void Service::cancel_worker_job(const std::string &id) {
   worker_manager_->cancel(id, WorkerJobState::Cancelled, "Cancellation requested by operator");

@@ -150,6 +150,10 @@ void to_json(Json &j, const WorkerJob &job) {
        {"result_metadata", job.result_metadata},
        {"artifacts", job.artifacts},
        {"usage", job.usage}};
+  if (job.continuation)
+    j["_continuation_candidate"] = {{"provider_id", job.continuation->provider_id},
+                                    {"provider_version", job.continuation->provider_version},
+                                    {"state", job.continuation->state}};
 }
 
 void from_json(const Json &j, WorkerJob &job) {
@@ -173,6 +177,19 @@ void from_json(const Json &j, WorkerJob &job) {
   job.result = j.value("result", Json::object());
   job.result_metadata = j.value("result_metadata", Json::object());
   job.artifacts = j.value("artifacts", std::vector<Json>{});
+  if (j.contains("_continuation_candidate") && !j.at("_continuation_candidate").is_null()) {
+    const auto &candidate = j.at("_continuation_candidate");
+    if (!candidate.is_object())
+      throw Error(ErrorCode::Storage, "Stored worker continuation candidate is invalid");
+    OpaqueProviderContinuation continuation{candidate.value("provider_id", std::string{}),
+                                            candidate.value("provider_version", std::string{}),
+                                            candidate.value("state", std::string{})};
+    if (continuation.provider_id.empty() || continuation.provider_id.size() > 256 ||
+        continuation.provider_version.empty() || continuation.provider_version.size() > 128 ||
+        continuation.state.empty() || continuation.state.size() > 64 * 1024)
+      throw Error(ErrorCode::Storage, "Stored worker continuation candidate is invalid");
+    job.continuation = std::move(continuation);
+  }
   if (j.contains("usage"))
     job.usage = j.at("usage").get<WorkerUsage>();
 }
