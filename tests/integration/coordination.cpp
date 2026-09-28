@@ -114,7 +114,7 @@ private:
 TEST(PostgresPool, BoundedAcquisitionAndReplacement) {
   IsolatedPostgres database;
 
-  PostgresConnectionPool pool(database.dsn, database.schema, {1, 1, 50});
+  PostgresConnectionPool pool(database.dsn, database.schema, {1, 1, 500});
   auto held = pool.acquire();
   EXPECT_EQ(pool.diagnostics().in_use, 1U);
   EXPECT_THROW(pool.acquire(), Error);
