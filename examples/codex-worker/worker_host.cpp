@@ -338,7 +338,7 @@ public:
     result.version = "app-server";
     result.description = "Optional supervised Codex coding worker";
     result.plugin = "process";
-    result.capabilities = {"coding", "coding-agent"};
+    result.capabilities = {"coding", "coding-agent", "session-continuation", "session-context"};
     result.local = true;
     result.status = healthy_ ? "healthy" : "stopped";
     result.healthy = healthy_;
@@ -354,34 +354,79 @@ public:
     const auto payload = request.value("payload", Json::object());
     const auto metadata = payload.value("metadata", Json::object());
     const auto directory = canonical_project(metadata.value("project_dir", std::string{}));
+    const bool durable_session = payload.value("durable_session", false);
+    durable_session_id_ = durable_session ? payload.value("durable_session_id", std::string{})
+                                         : std::string{};
+    if (durable_session && durable_session_id_.empty())
+      throw CodexFailure("Durable Codex request has no LASO session identity");
+    const auto session_context = payload.value("session_context", Json::object());
+    const auto context_generation =
+        session_context.is_object() ? session_context.value("generation_id", std::string{})
+                                    : std::string{};
     const auto requested_session = metadata.value("codex_session_id", std::string{});
-    if (!requested_session.empty() && requested_session != session_id_)
-      resume_thread(requested_session, directory);
-    if (session_id_.empty())
-      start_thread(directory, metadata);
-    else if (directory != project_dir_) {
-      if (!requested_session.empty())
-        throw CodexFailure("Codex session belongs to a different project directory");
-      // Distributed attempts use fresh, owner-scoped staging directories.
-      // Start a new provider thread for a new directory instead of reusing a
-      // session bound to the previous attempt's workspace.
-      session_id_.clear();
-      project_dir_.clear();
-      active_turn_id_.clear();
-      model_.clear();
-      provider_.clear();
-      start_thread(directory, metadata);
+    if (durable_session) {
+      std::string previous_session;
+      std::string previous_generation;
+      if (payload.contains("continuation") && !payload.at("continuation").is_null()) {
+        const auto &continuation = payload.at("continuation");
+        if (!continuation.is_object() ||
+            continuation.value("provider_id", std::string{}) != "codex" ||
+            continuation.value("provider_version", std::string{}) != "app-server")
+          throw CodexFailure("Stored Codex continuation is incompatible");
+        const auto state = Json::parse(continuation.value("state", std::string{}), nullptr, false);
+        if (state.is_discarded() || !state.is_object() ||
+            state.value("format", std::string{}) != "laso-codex-session-v1")
+          throw CodexFailure("Stored Codex continuation is invalid");
+        previous_session = state.value("thread_id", std::string{});
+        previous_generation = state.value("context_generation_id", std::string{});
+        if (previous_session.empty())
+          throw CodexFailure("Stored Codex continuation has no thread");
+      }
+
+      if (!previous_session.empty() && previous_generation == context_generation) {
+        if (session_id_ != previous_session || project_dir_ != directory)
+          resume_thread(previous_session, directory);
+      } else {
+        reset_thread();
+        start_thread(directory, metadata);
+      }
+    } else {
+      if (!requested_session.empty() && requested_session != session_id_)
+        resume_thread(requested_session, directory);
+      if (session_id_.empty())
+        start_thread(directory, metadata);
+      else if (directory != project_dir_) {
+        if (!requested_session.empty())
+          throw CodexFailure("Codex session belongs to a different project directory");
+        // Distributed attempts use fresh, owner-scoped staging directories.
+        // Start a new provider thread for a new directory instead of reusing a
+        // session bound to the previous attempt's workspace.
+        reset_thread();
+        start_thread(directory, metadata);
+      }
     }
 
     summary_.clear();
     actions_ = Json::array();
     usage_ = WorkerUsage{};
-    const auto instructions = payload.value("instructions", std::string{});
+    auto instructions = payload.value("instructions", std::string{});
     if (instructions.size() > max_text)
       throw WorkerTransportError("Codex instructions exceed the limit");
+    if (durable_session && !session_context.is_null() && !session_context.empty() &&
+        (payload.value("continuation", Json::object()).is_null() ||
+         previous_context_generation(payload.value("continuation", Json::object())) !=
+             context_generation)) {
+      Json bounded_context = session_context;
+      bounded_context.erase("generation_id");
+      instructions += "\n\nLASO derived session context (bounded state and recent completed turns):\n" +
+                      bounded_context.dump();
+    }
     Json input{{"type", "text"}, {"text", instructions}};
     if (payload.contains("input") && !payload.at("input").is_null())
       input["text"] = instructions + "\n\nStructured input:\n" + payload.at("input").dump();
+    if (input.at("text").get<std::string>().size() > max_text)
+      throw WorkerTransportError("Codex session input exceeds the limit");
+    active_job_id_ = request.value("job_id", std::string{});
     const auto turn_response = call("turn/start", Json{{"threadId", session_id_},
                                                          {"input", Json::array({input})},
                                                          {"cwd", project_dir_}},
@@ -411,18 +456,32 @@ public:
         throw WorkerTransportError("Codex emitted an unrelated response");
     }
     active_turn_id_.clear();
+    active_job_id_.clear();
     const auto turn = completed.value("turn", Json::object());
     const auto status = turn.value("status", std::string{});
     if (status == "failed" || status == "interrupted")
       throw CodexFailure(turn.value("error", Json::object()).value("message", "Codex turn failed"));
     WorkerSubmission result;
-    result.external_job_id = "codex:" + session_id_;
+    result.external_job_id = durable_session ? request.value("job_id", std::string{})
+                                             : "codex:" + session_id_;
     result.state = WorkerJobState::Completed;
     result.usage = usage_;
-    result.metadata = { {"codex_session_id", session_id_}, {"project_dir", project_dir_},
-                        {"model", model_}, {"provider", provider_} };
-    result.result = { {"summary", summary_}, {"session_id", session_id_},
-                      {"project_dir", project_dir_}, {"actions", actions_} };
+    result.metadata = {{"model", model_}, {"provider", provider_}};
+    result.result = {{"summary", summary_}};
+    if (!durable_session) {
+      result.metadata["codex_session_id"] = session_id_;
+      result.metadata["project_dir"] = project_dir_;
+      result.result["session_id"] = session_id_;
+      result.result["project_dir"] = project_dir_;
+      result.result["actions"] = actions_;
+    } else {
+      result.continuation = OpaqueProviderContinuation{
+          "codex", "app-server",
+          Json{{"format", "laso-codex-session-v1"},
+               {"thread_id", session_id_},
+               {"context_generation_id", context_generation}}
+              .dump()};
+    }
     if (!model_.empty())
       result.result["model"] = model_;
     if (!provider_.empty())
@@ -441,8 +500,11 @@ public:
 
   WorkerStatus result(const std::string &external) const { return status(external); }
 
-  bool cancel(const std::string &) {
+  bool cancel(const std::string &external_job_id) {
     if (session_id_.empty() || active_turn_id_.empty())
+      return false;
+    if (!active_job_id_.empty() && external_job_id != active_job_id_ &&
+        external_job_id != "codex:" + session_id_ && external_job_id != session_id_)
       return false;
     const auto response = call("turn/interrupt", Json{{"threadId", session_id_}}, {});
     return response.is_object();
@@ -460,7 +522,8 @@ private:
   CodexProcess process_;
   bool healthy_ = false;
   std::uint64_t rpc_id_ = 0, interaction_id_ = 0;
-  std::string session_id_, project_dir_, active_turn_id_, model_, provider_, summary_;
+  std::string session_id_, durable_session_id_, project_dir_, active_turn_id_, active_job_id_,
+      model_, provider_, summary_;
   WorkerUsage usage_;
   Json actions_ = Json::array();
 
@@ -468,7 +531,25 @@ private:
     return Clock::now() + std::chrono::milliseconds(timeout_ms_);
   }
 
+  std::string previous_context_generation(const Json &continuation) const {
+    if (!continuation.is_object())
+      return {};
+    const auto state = Json::parse(continuation.value("state", std::string{}), nullptr, false);
+    return state.is_object() ? state.value("context_generation_id", std::string{}) : std::string{};
+  }
+
+  void reset_thread() {
+    session_id_.clear();
+    project_dir_.clear();
+    active_turn_id_.clear();
+    active_job_id_.clear();
+    model_.clear();
+    provider_.clear();
+  }
+
   std::filesystem::path canonical_project(const std::string &value) const {
+    if (value.empty() && roots_.size() == 1)
+      return roots_.front();
     if (value.empty())
       throw CodexFailure("Codex request requires metadata.project_dir");
     std::error_code ec;
@@ -533,8 +614,11 @@ private:
                         {"request_id", request_id},
                         {"worker_job_id", job_id},
                         {"worker_id", "codex"},
-                        {"external_job_id", "codex:" + session_id_},
-                        {"session_id", session_id_},
+                        {"external_job_id", durable_session_id_.empty()
+                                                ? "codex:" + session_id_
+                                                : job_id},
+                        {"session_id", durable_session_id_.empty() ? session_id_
+                                                                   : durable_session_id_},
                         {"request_type", type},
                         {"title", method},
                         {"summary", params.value("reason", "Codex requests a decision")},
@@ -679,6 +763,10 @@ int main(int argc, char **argv) {
           auto result = adapter.submit(request);
           Json body{{"ok", true}, {"state", result.state}, {"external_job_id", result.external_job_id},
                     {"payload", result.result}, {"metadata", result.metadata}, {"usage", result.usage}};
+          if (result.continuation)
+            body["continuation"] = {{"provider_id", result.continuation->provider_id},
+                                    {"provider_version", result.continuation->provider_version},
+                                    {"state", result.continuation->state}};
           response(request, body);
         } else if (operation == "status" || operation == "result") {
           const auto result = operation == "status" ? adapter.status(request.value("external_job_id", ""))

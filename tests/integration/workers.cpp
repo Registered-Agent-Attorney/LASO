@@ -48,7 +48,10 @@ public:
       throw WorkerTransportError("synthetic transport failure");
     WorkerSubmission result;
     result.external_job_id = "external-usage";
-    result.state = job_failure ? WorkerJobState::Failed : WorkerJobState::Queued;
+    result.state = job_failure ? WorkerJobState::Failed
+                               : complete_immediately ? WorkerJobState::Completed
+                                                      : WorkerJobState::Queued;
+    result.continuation = submission_continuation;
     result.usage = submission_usage;
     return result;
   }
@@ -69,11 +72,50 @@ public:
   void stop() noexcept override {}
 
   WorkerUsage submission_usage, status_usage;
+  std::optional<OpaqueProviderContinuation> submission_continuation;
   WorkerJobState status_state = WorkerJobState::Queued;
   Json status_result = nullptr;
-  bool transport_failure = false, job_failure = false;
+  bool transport_failure = false, job_failure = false, complete_immediately = false;
 };
 } // namespace
+
+TEST(Workers, OpaqueContinuationIsDurableButRedactedFromWorkerJobViews) {
+  TemporaryDirectory directory;
+  auto storage = make_storage(directory.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  adapter->submission_continuation =
+      OpaqueProviderContinuation{"usage", "1", "opaque-provider-thread"};
+  adapter->complete_immediately = true;
+  registry.add("usage", adapter);
+  PolicyEngine policy;
+  WorkerManager manager(*storage, registry, policy);
+  WorkerRequest request;
+  request.worker_id = "usage";
+  request.run_id = "run-with-continuation";
+  request.idempotency_key = "durable-continuation";
+  const auto submitted = manager.submit(request);
+  ASSERT_TRUE(submitted.continuation.has_value());
+  EXPECT_EQ(submitted.continuation->state, "opaque-provider-thread");
+  const auto internal = manager.job(submitted.id);
+  ASSERT_TRUE(internal.continuation.has_value());
+  EXPECT_EQ(internal.continuation->state, "opaque-provider-thread");
+  EXPECT_TRUE(storage->get(RecordKind::WorkerJob, submitted.id).contains("_continuation_candidate"));
+  const auto public_jobs = manager.jobs(request.run_id);
+  ASSERT_EQ(public_jobs.size(), 1U);
+  EXPECT_FALSE(public_jobs.front().contains("_continuation_candidate"));
+  WorkerManager restarted(*storage, registry, policy);
+  ASSERT_TRUE(restarted.job(submitted.id).continuation.has_value());
+  EXPECT_EQ(restarted.job(submitted.id).continuation->state, "opaque-provider-thread");
+  EXPECT_EQ(restarted.continuation_candidate(submitted.id)->state, "opaque-provider-thread");
+
+  adapter->job_failure = true;
+  request.run_id = "failed-continuation-run";
+  request.idempotency_key = "failed-continuation-key";
+  const auto failed = manager.submit(request);
+  EXPECT_EQ(failed.state, WorkerJobState::Failed);
+  EXPECT_FALSE(storage->get(RecordKind::WorkerJob, failed.id).contains("_continuation_candidate"));
+}
 
 TEST(Workers, DistributedCapabilityAdvertisementContainsOnlySafeClaimData) {
   TemporaryDirectory directory;

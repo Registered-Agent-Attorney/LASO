@@ -937,7 +937,8 @@ Task<void> Runtime::execute(Run r, std::stop_token stop) {
                                      r.message.provenance.end() - 256);
         std::vector<Record> records{{RecordKind::Attempt, attempt.id, r.id, Json(attempt)},
                                     {RecordKind::Message, r.message.id, r.id, Json(r.message)}};
-        if (!r.session_id.empty() && definition.type == "agent") {
+        if (!r.session_id.empty() &&
+            (definition.type == "agent" || definition.type == "worker")) {
           std::lock_guard lock(continuation_candidates->mutex);
           for (const auto &[provider_id, continuation] : continuation_candidates->by_provider) {
             Json candidate{{"scope", "candidate"},

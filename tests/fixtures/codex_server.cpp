@@ -12,6 +12,9 @@
 using namespace laso;
 
 namespace {
+unsigned thread_sequence = 0;
+std::string active_thread;
+
 void send(const Json &value) {
   std::cout << value.dump() << '\n' << std::flush;
 }
@@ -100,16 +103,32 @@ int main(int argc, char **argv) {
       return 73;
     if (method == "thread/start") {
       const auto cwd = request.value("params", Json::object()).value("cwd", std::string{});
+      const auto sequence_file = std::filesystem::path(cwd) / ".laso-codex-fixture-sequence";
+      {
+        std::ifstream stored(sequence_file);
+        if (stored)
+          stored >> thread_sequence;
+      }
+      ++thread_sequence;
+      {
+        std::ofstream stored(sequence_file, std::ios_base::trunc);
+        if (!(stored << thread_sequence << '\n'))
+          return 74;
+      }
+      active_thread = thread_sequence == 1 ? "fixture-session"
+                                           : "fixture-session-" + std::to_string(thread_sequence);
       send({{"jsonrpc", "2.0"},
             {"id", id},
-            {"result", Json{{"thread", thread("fixture-session", cwd)},
+            {"result", Json{{"thread", thread(active_thread, cwd)},
                             {"model", "fixture-model"},
                             {"modelProvider", "fixture-provider"}}}});
     } else if (method == "thread/resume") {
-      const auto cwd = request.value("params", Json::object()).value("cwd", std::string{});
+      const auto params = request.value("params", Json::object());
+      const auto cwd = params.value("cwd", std::string{});
+      active_thread = params.value("threadId", std::string{});
       send({{"jsonrpc", "2.0"},
             {"id", id},
-            {"result", Json{{"thread", thread("fixture-session", cwd)},
+            {"result", Json{{"thread", thread(active_thread, cwd)},
                             {"model", "fixture-model"},
                             {"modelProvider", "fixture-provider"}}}});
     } else if (method == "turn/start") {
@@ -206,10 +225,11 @@ int main(int argc, char **argv) {
       }
       const auto turn = Json{{"id", "fixture-turn"}, {"status", "inProgress"}};
       send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
-      const auto item =
-          Json{{"type", "agentMessage"},
-               {"text", prompt.find("continue") != std::string::npos ? "FIXTURE-CONTINUED"
-                                                                     : "FIXTURE-COMPLETE"}};
+      const auto text = prompt.find("M6 context marker") != std::string::npos
+                            ? "FIXTURE-CONTEXT-SEEN"
+                            : prompt.find("continue") != std::string::npos ? "FIXTURE-CONTINUED"
+                                                                             : "FIXTURE-COMPLETE";
+      const auto item = Json{{"type", "agentMessage"}, {"text", text}};
       send(Json{{"method", "item/completed"}, {"params", Json{{"item", item}}}});
       const auto usage = Json{{"inputTokens", 11}, {"outputTokens", 7}, {"totalTokens", 18}};
       send(Json{{"method", "thread/tokenUsage/updated"},
@@ -217,7 +237,7 @@ int main(int argc, char **argv) {
       const auto completed_turn =
           Json{{"id", "fixture-turn"}, {"status", "completed"}, {"durationMs", 4}};
       send(Json{{"method", "turn/completed"},
-                {"params", Json{{"threadId", "fixture-session"}, {"turn", completed_turn}}}});
+                {"params", Json{{"threadId", active_thread}, {"turn", completed_turn}}}});
     } else if (method == "turn/interrupt") {
       send({{"jsonrpc", "2.0"}, {"id", id}, {"result", Json::object()}});
     } else {

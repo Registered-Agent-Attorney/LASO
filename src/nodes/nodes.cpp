@@ -66,11 +66,19 @@ Task<NodeResult> ToolNode::execute(ExecutionContext &c, const Message &input) {
 }
 Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) {
   c.check();
-  if (!c.session_id.empty())
-    throw Error(ErrorCode::Provider,
-                "Worker adapter continuation is not supported for durable sessions");
   if (!manager_)
     throw Error(ErrorCode::Execution, "Worker manager is unavailable");
+  const bool durable_session = !c.session_id.empty();
+  const auto metadata = manager_->worker(worker_id_).get<WorkerMetadata>();
+  if (durable_session &&
+      std::find(metadata.capabilities.begin(), metadata.capabilities.end(),
+                "session-continuation") == metadata.capabilities.end())
+    throw Error(ErrorCode::Provider,
+                "Worker does not support durable session continuation");
+  if (durable_session && c.session_context &&
+      std::find(metadata.capabilities.begin(), metadata.capabilities.end(), "session-context") ==
+          metadata.capabilities.end())
+    throw Error(ErrorCode::Provider, "Worker does not support session context generations");
   WorkerRequest request;
   request.worker_id = worker_id_;
   request.capability = capability_;
@@ -86,6 +94,18 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
   const auto remaining =
       std::chrono::duration_cast<Milliseconds>(c.deadline - std::chrono::steady_clock::now());
   request.timeout_ms = static_cast<std::uint64_t>(std::max<std::int64_t>(remaining.count(), 1));
+  request.durable_session = durable_session;
+  if (durable_session) {
+    request.durable_session_id = c.session_id;
+    if (!c.load_provider_continuation || !c.stage_provider_continuation)
+      throw Error(ErrorCode::Provider, "Worker session continuation context is unavailable");
+    request.continuation = c.load_provider_continuation(worker_id_);
+    request.session_context = c.session_context;
+    if (request.continuation &&
+        (request.continuation->provider_id != worker_id_ ||
+         request.continuation->provider_version != metadata.version))
+      throw Error(ErrorCode::Provider, "Stored worker continuation is incompatible");
+  }
   request.input = input.payload;
   request.output_schema =
       output_schema_.empty() ? Json::object() : Json{{"reference", output_schema_}};
@@ -108,12 +128,22 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
     for (;;) {
       current = manager_->refresh(current.id);
       if (current.state == WorkerJobState::Completed) {
+        if (durable_session) {
+          const auto continuation = manager_->continuation_candidate(current.id);
+          if (!continuation || continuation->provider_id != worker_id_ ||
+              continuation->provider_version != metadata.version || continuation->state.empty() ||
+              continuation->state.size() > 64 * 1024)
+            throw Error(ErrorCode::Provider, "Worker returned invalid session continuation state");
+          c.stage_provider_continuation(*continuation);
+        }
         auto message = input;
         message.payload = current.result;
         message.metadata["worker_id"] = current.worker_id;
         message.metadata["worker_job_id"] = current.id;
-        message.metadata["external_job_id"] = current.external_job_id;
-        message.metadata["worker_result_metadata"] = current.result_metadata;
+        if (!durable_session) {
+          message.metadata["external_job_id"] = current.external_job_id;
+          message.metadata["worker_result_metadata"] = current.result_metadata;
+        }
         message.metadata["worker_usage"] = current.usage;
         message.metadata["worker_failure_kind"] = current.failure_kind;
         if (!current.artifacts.empty())

@@ -27,6 +27,7 @@ public:
   WorkerJob submit_async(const WorkerRequest &);
   std::string job_id_for(const std::string &idempotency_key) const;
   WorkerJob job(const std::string &) const;
+  std::optional<OpaqueProviderContinuation> continuation_candidate(const std::string &) const;
   // Refresh an active job through a recovery-capable transport.  This is used
   // by WorkerNode for transports that do not emit asynchronous status events.
   WorkerJob refresh(const std::string &);

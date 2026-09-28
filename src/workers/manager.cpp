@@ -32,6 +32,17 @@ std::string bounded_error(const std::string &value) {
   return value.substr(0, 512);
 }
 
+void apply_continuation(WorkerJob &job,
+                        const std::optional<OpaqueProviderContinuation> &continuation) {
+  if (!continuation)
+    return;
+  if (continuation->provider_id.empty() || continuation->provider_id.size() > 256 ||
+      continuation->provider_version.empty() || continuation->provider_version.size() > 128 ||
+      continuation->state.empty() || continuation->state.size() > 64 * 1024)
+    throw WorkerTransportError("Worker returned invalid continuation state");
+  job.continuation = continuation;
+}
+
 WorkerJobState event_state(const std::string &type) {
   if (type == "worker.job.started")
     return WorkerJobState::Running;
@@ -76,6 +87,13 @@ WorkerJob WorkerManager::job(const std::string &id) const {
   return storage_.get(RecordKind::WorkerJob, id).get<WorkerJob>();
 }
 
+std::optional<OpaqueProviderContinuation>
+WorkerManager::continuation_candidate(const std::string &id) const {
+  if (!bounded_identifier(id, max_job_id_bytes))
+    throw Error(ErrorCode::Validation, "Invalid worker job id");
+  return job(id).continuation;
+}
+
 std::string WorkerManager::job_id_for(const std::string &idempotency_key) const {
   if (idempotency_key.empty() || idempotency_key.size() > 512)
     throw Error(ErrorCode::Validation, "Invalid worker idempotency key");
@@ -91,7 +109,10 @@ WorkerJob WorkerManager::refresh(const std::string &id) {
 
 std::vector<Json> WorkerManager::jobs(const std::string &run_id, std::size_t limit,
                                       std::size_t offset) const {
-  return storage_.list(RecordKind::WorkerJob, run_id, limit, offset);
+  auto result = storage_.list(RecordKind::WorkerJob, run_id, limit, offset);
+  for (auto &value : result)
+    value.erase("_continuation_candidate");
+  return result;
 }
 
 Json WorkerManager::workers() const {
@@ -295,6 +316,8 @@ void WorkerManager::persist(WorkerJob &value) {
     throw Error(ErrorCode::Validation, "Worker result exceeds limit");
   if (value.usage.metadata.dump().size() > max_usage_metadata_bytes)
     throw Error(ErrorCode::Validation, "Worker usage metadata exceeds limit");
+  if (value.state != WorkerJobState::Completed)
+    value.continuation.reset();
   storage_.commit({{RecordKind::WorkerJob, value.id, value.run_id, Json(value)}});
 }
 
@@ -349,6 +372,7 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
       value.result = status.result;
     if (status.metadata.is_object() && status.metadata.dump().size() <= max_metadata_bytes)
       value.result_metadata = status.metadata;
+    apply_continuation(value, status.continuation);
     merge_usage(value.usage, status.usage);
     if (!status.artifacts.empty() && status.artifacts.size() <= max_artifacts_)
       value.artifacts = status.artifacts;
@@ -398,6 +422,15 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
       request.metadata.dump().size() > max_metadata_bytes ||
       request.artifact_ids.size() > max_artifacts_)
     throw Error(ErrorCode::Validation, "Worker request exceeds limit");
+  if ((request.session_context &&
+       (!request.durable_session || request.session_context->payload.dump().size() > max_result_bytes ||
+        request.session_context->recent_turns.dump().size() > max_result_bytes)) ||
+      (request.continuation &&
+       (request.continuation->provider_id.empty() || request.continuation->provider_id.size() > 256 ||
+        request.continuation->provider_version.empty() ||
+        request.continuation->provider_version.size() > 128 || request.continuation->state.empty() ||
+        request.continuation->state.size() > 64 * 1024)))
+    throw Error(ErrorCode::Validation, "Worker session context exceeds limit");
   for (const auto &artifact : request.artifact_ids)
     if (!bounded_identifier(artifact, 128))
       throw Error(ErrorCode::Validation, "Invalid worker artifact reference");
@@ -468,6 +501,7 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
       existing->external_job_id = submission.external_job_id;
       existing->state = submission.state;
       existing->result_metadata = submission.metadata;
+      apply_continuation(*existing, submission.continuation);
       if (!submission.result.is_null())
         existing->result = submission.result;
       if (!submission.artifacts.empty())
@@ -585,6 +619,7 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
     created.external_job_id = submission.external_job_id;
     created.state = submission.state;
     created.result_metadata = submission.metadata;
+    apply_continuation(created, submission.continuation);
     if (!submission.result.is_null())
       created.result = submission.result;
     if (!submission.artifacts.empty())
@@ -677,6 +712,15 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       request.metadata.dump().size() > max_metadata_bytes ||
       request.artifact_ids.size() > max_artifacts_)
     throw Error(ErrorCode::Validation, "Worker request exceeds limit");
+  if ((request.session_context &&
+       (!request.durable_session || request.session_context->payload.dump().size() > max_result_bytes ||
+        request.session_context->recent_turns.dump().size() > max_result_bytes)) ||
+      (request.continuation &&
+       (request.continuation->provider_id.empty() || request.continuation->provider_id.size() > 256 ||
+        request.continuation->provider_version.empty() ||
+        request.continuation->provider_version.size() > 128 || request.continuation->state.empty() ||
+        request.continuation->state.size() > 64 * 1024)))
+    throw Error(ErrorCode::Validation, "Worker session context exceeds limit");
   for (const auto &artifact : request.artifact_ids)
     if (!bounded_identifier(artifact, 128))
       throw Error(ErrorCode::Validation, "Invalid worker artifact reference");
@@ -1112,6 +1156,16 @@ void WorkerManager::apply_event(const Event &event) {
     if (next == WorkerJobState::Completed) {
       value.result = event.payload.value("result", event.payload.value("output", Json::object()));
       value.result_metadata = event.payload.value("metadata", Json::object());
+      if (event.payload.contains("continuation") && !event.payload.at("continuation").is_null()) {
+        const auto &continuation = event.payload.at("continuation");
+        if (!continuation.is_object())
+          throw Error(ErrorCode::Validation, "Worker event continuation is invalid");
+        apply_continuation(
+            value, OpaqueProviderContinuation{
+                       continuation.value("provider_id", std::string{}),
+                       continuation.value("provider_version", std::string{}),
+                       continuation.value("state", std::string{})});
+      }
       value.artifacts = event.payload.value("artifacts", std::vector<Json>{});
       if (event.payload.contains("usage"))
         merge_usage(value.usage, event.payload.at("usage").get<WorkerUsage>());

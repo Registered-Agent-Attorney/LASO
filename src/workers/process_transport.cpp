@@ -59,6 +59,38 @@ bool bounded_text(const std::string &value, std::size_t maximum) {
   return !value.empty() && value.size() <= maximum;
 }
 
+Json continuation_json(const OpaqueProviderContinuation &continuation) {
+  return {{"provider_id", continuation.provider_id},
+          {"provider_version", continuation.provider_version},
+          {"state", continuation.state}};
+}
+
+std::optional<OpaqueProviderContinuation> response_continuation(const Json &response) {
+  if (!response.contains("continuation") || response.at("continuation").is_null())
+    return std::nullopt;
+  const auto &value = response.at("continuation");
+  if (!value.is_object())
+    throw WorkerTransportError("Worker continuation is invalid");
+  OpaqueProviderContinuation result{value.value("provider_id", std::string{}),
+                                    value.value("provider_version", std::string{}),
+                                    value.value("state", std::string{})};
+  if (!bounded_text(result.provider_id, 256) ||
+      !bounded_text(result.provider_version, 128) ||
+      !bounded_text(result.state, 64 * 1024))
+    throw WorkerTransportError("Worker continuation is invalid");
+  return result;
+}
+
+Json session_context_json(const SessionContext &context) {
+  return {{"generation_id", context.generation_id},
+          {"representation_kind", context.representation_kind},
+          {"representation_version", context.representation_version},
+          {"generation", context.generation},
+          {"through_turn_sequence", context.through_turn_sequence},
+          {"payload", context.payload},
+          {"recent_turns", context.recent_turns}};
+}
+
 bool process_group_alive(pid_t process_group) noexcept {
   if (process_group <= 0)
     return false;
@@ -187,7 +219,13 @@ struct ProcessWorkerTransport::Impl {
                  {"input", request.input},
                  {"output_schema", request.output_schema},
                  {"metadata", request.metadata},
+                 {"durable_session", request.durable_session},
+                 {"durable_session_id", request.durable_session_id},
                  {"artifact_ids", request.artifact_ids}};
+    if (request.continuation)
+      payload["continuation"] = continuation_json(*request.continuation);
+    if (request.session_context)
+      payload["session_context"] = session_context_json(*request.session_context);
     const auto timeout_ms = request.timeout_ms == 0
                                 ? config.request_timeout_ms
                                 : std::min(request.timeout_ms, config.request_timeout_ms);
@@ -679,6 +717,7 @@ private:
         throw WorkerTransportError("Worker returned an invalid external job id");
       result.state = response_state(response);
       result.metadata = response.value("metadata", Json::object());
+      result.continuation = response_continuation(response);
       result.result = response_payload(response);
       result.artifacts = response.value("artifacts", std::vector<Json>{});
       result.error = response.value("error", std::string{});
@@ -702,6 +741,7 @@ private:
       result.state = response_state(response);
       result.result = response_payload(response);
       result.metadata = response.value("metadata", Json::object());
+      result.continuation = response_continuation(response);
       result.artifacts = response.value("artifacts", std::vector<Json>{});
       result.error = response.value("error", std::string{});
       result.usage = response_usage(response);
