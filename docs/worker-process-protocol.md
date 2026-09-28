@@ -29,6 +29,18 @@ Every request is an object with the following fields:
 required for operations that address an already-submitted external job.
 Payloads are structured JSON and are bounded by the transport.
 
+The `submit` payload may also contain `durable_session`,
+`durable_session_id`, `continuation`, and `session_context`. These optional
+fields are used only when LASO executes an agent worker inside a durable
+session. `durable_session_id` is LASO's canonical session identifier and is
+provided so worker-interaction records can refer to the LASO session without
+exposing provider-native identifiers. `continuation` has provider ID, adapter
+version, and an opaque state string; `session_context` is the immutable
+provider-neutral context snapshot selected when LASO bound the run. A
+continuation response uses the same three fields. Workers must not publish
+continuation through the result or metadata fields. LASO stores it privately
+and returns it only to the adapter on a later authoritative turn.
+
 ## Worker-originated requests
 
 The request channel is deliberately narrower than RPC. Supported request types
@@ -82,6 +94,7 @@ channel.
   "external_job_id": "child-123",
   "payload": {"ok": true},
   "metadata": {},
+  "continuation": null,
   "artifacts": [],
   "usage": {"executor": "reference"},
   "error": ""
