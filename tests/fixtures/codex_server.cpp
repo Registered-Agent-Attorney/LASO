@@ -227,8 +227,8 @@ int main(int argc, char **argv) {
       send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
       const auto text = prompt.find("M6 context marker") != std::string::npos
                             ? "FIXTURE-CONTEXT-SEEN"
-                            : prompt.find("continue") != std::string::npos ? "FIXTURE-CONTINUED"
-                                                                             : "FIXTURE-COMPLETE";
+                        : prompt.find("continue") != std::string::npos ? "FIXTURE-CONTINUED"
+                                                                       : "FIXTURE-COMPLETE";
       const auto item = Json{{"type", "agentMessage"}, {"text", text}};
       send(Json{{"method", "item/completed"}, {"params", Json{{"item", item}}}});
       const auto usage = Json{{"inputTokens", 11}, {"outputTokens", 7}, {"totalTokens", 18}};

@@ -70,11 +70,9 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
     throw Error(ErrorCode::Execution, "Worker manager is unavailable");
   const bool durable_session = !c.session_id.empty();
   const auto metadata = manager_->worker(worker_id_).get<WorkerMetadata>();
-  if (durable_session &&
-      std::find(metadata.capabilities.begin(), metadata.capabilities.end(),
-                "session-continuation") == metadata.capabilities.end())
-    throw Error(ErrorCode::Provider,
-                "Worker does not support durable session continuation");
+  if (durable_session && std::find(metadata.capabilities.begin(), metadata.capabilities.end(),
+                                   "session-continuation") == metadata.capabilities.end())
+    throw Error(ErrorCode::Provider, "Worker does not support durable session continuation");
   if (durable_session && c.session_context &&
       std::find(metadata.capabilities.begin(), metadata.capabilities.end(), "session-context") ==
           metadata.capabilities.end())
@@ -101,9 +99,8 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
       throw Error(ErrorCode::Provider, "Worker session continuation context is unavailable");
     request.continuation = c.load_provider_continuation(worker_id_);
     request.session_context = c.session_context;
-    if (request.continuation &&
-        (request.continuation->provider_id != worker_id_ ||
-         request.continuation->provider_version != metadata.version))
+    if (request.continuation && (request.continuation->provider_id != worker_id_ ||
+                                 request.continuation->provider_version != metadata.version))
       throw Error(ErrorCode::Provider, "Stored worker continuation is incompatible");
   }
   request.input = input.payload;

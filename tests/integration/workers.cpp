@@ -48,9 +48,9 @@ public:
       throw WorkerTransportError("synthetic transport failure");
     WorkerSubmission result;
     result.external_job_id = "external-usage";
-    result.state = job_failure ? WorkerJobState::Failed
-                               : complete_immediately ? WorkerJobState::Completed
-                                                      : WorkerJobState::Queued;
+    result.state = job_failure            ? WorkerJobState::Failed
+                   : complete_immediately ? WorkerJobState::Completed
+                                          : WorkerJobState::Queued;
     result.continuation = submission_continuation;
     result.usage = submission_usage;
     return result;
@@ -100,7 +100,8 @@ TEST(Workers, OpaqueContinuationIsDurableButRedactedFromWorkerJobViews) {
   const auto internal = manager.job(submitted.id);
   ASSERT_TRUE(internal.continuation.has_value());
   EXPECT_EQ(internal.continuation->state, "opaque-provider-thread");
-  EXPECT_TRUE(storage->get(RecordKind::WorkerJob, submitted.id).contains("_continuation_candidate"));
+  EXPECT_TRUE(
+      storage->get(RecordKind::WorkerJob, submitted.id).contains("_continuation_candidate"));
   const auto public_jobs = manager.jobs(request.run_id);
   ASSERT_EQ(public_jobs.size(), 1U);
   EXPECT_FALSE(public_jobs.front().contains("_continuation_candidate"));

@@ -423,13 +423,15 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
       request.artifact_ids.size() > max_artifacts_)
     throw Error(ErrorCode::Validation, "Worker request exceeds limit");
   if ((request.session_context &&
-       (!request.durable_session || request.session_context->payload.dump().size() > max_result_bytes ||
+       (!request.durable_session ||
+        request.session_context->payload.dump().size() > max_result_bytes ||
         request.session_context->recent_turns.dump().size() > max_result_bytes)) ||
       (request.continuation &&
-       (request.continuation->provider_id.empty() || request.continuation->provider_id.size() > 256 ||
+       (request.continuation->provider_id.empty() ||
+        request.continuation->provider_id.size() > 256 ||
         request.continuation->provider_version.empty() ||
-        request.continuation->provider_version.size() > 128 || request.continuation->state.empty() ||
-        request.continuation->state.size() > 64 * 1024)))
+        request.continuation->provider_version.size() > 128 ||
+        request.continuation->state.empty() || request.continuation->state.size() > 64 * 1024)))
     throw Error(ErrorCode::Validation, "Worker session context exceeds limit");
   for (const auto &artifact : request.artifact_ids)
     if (!bounded_identifier(artifact, 128))
@@ -713,13 +715,15 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       request.artifact_ids.size() > max_artifacts_)
     throw Error(ErrorCode::Validation, "Worker request exceeds limit");
   if ((request.session_context &&
-       (!request.durable_session || request.session_context->payload.dump().size() > max_result_bytes ||
+       (!request.durable_session ||
+        request.session_context->payload.dump().size() > max_result_bytes ||
         request.session_context->recent_turns.dump().size() > max_result_bytes)) ||
       (request.continuation &&
-       (request.continuation->provider_id.empty() || request.continuation->provider_id.size() > 256 ||
+       (request.continuation->provider_id.empty() ||
+        request.continuation->provider_id.size() > 256 ||
         request.continuation->provider_version.empty() ||
-        request.continuation->provider_version.size() > 128 || request.continuation->state.empty() ||
-        request.continuation->state.size() > 64 * 1024)))
+        request.continuation->provider_version.size() > 128 ||
+        request.continuation->state.empty() || request.continuation->state.size() > 64 * 1024)))
     throw Error(ErrorCode::Validation, "Worker session context exceeds limit");
   for (const auto &artifact : request.artifact_ids)
     if (!bounded_identifier(artifact, 128))
@@ -1161,10 +1165,9 @@ void WorkerManager::apply_event(const Event &event) {
         if (!continuation.is_object())
           throw Error(ErrorCode::Validation, "Worker event continuation is invalid");
         apply_continuation(
-            value, OpaqueProviderContinuation{
-                       continuation.value("provider_id", std::string{}),
-                       continuation.value("provider_version", std::string{}),
-                       continuation.value("state", std::string{})});
+            value, OpaqueProviderContinuation{continuation.value("provider_id", std::string{}),
+                                              continuation.value("provider_version", std::string{}),
+                                              continuation.value("state", std::string{})});
       }
       value.artifacts = event.payload.value("artifacts", std::vector<Json>{});
       if (event.payload.contains("usage"))

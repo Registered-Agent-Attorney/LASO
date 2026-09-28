@@ -45,8 +45,8 @@ WorkerRequest durable_request(const std::filesystem::path &root, const std::stri
   result.durable_session_id = "laso-session-test";
   result.continuation = continuation;
   if (!generation_id.empty())
-    result.session_context = SessionContext{generation_id, "m6-test", "1", 1, 0,
-                                            Json{{"summary", "M6 context marker"}}, Json::array()};
+    result.session_context = SessionContext{
+        generation_id, "m6-test", "1", 1, 0, Json{{"summary", "M6 context marker"}}, Json::array()};
   return result;
 }
 
@@ -55,8 +55,8 @@ Config codex_session_config(const std::filesystem::path &root,
   auto result = config(root / "laso-state");
   ProcessWorkerConfig worker;
   worker.executable = LASO_CODEX_WORKER;
-  worker.args = {"--codex", LASO_CODEX_FIXTURE, "--allowed-root", root.string(), "--timeout-ms",
-                 "5000"};
+  worker.args = {"--codex",     LASO_CODEX_FIXTURE, "--allowed-root",
+                 root.string(), "--timeout-ms",     "5000"};
   worker.startup_timeout_ms = 5000;
   worker.request_timeout_ms = 5000;
   if (fixture_mode != "success")
@@ -68,8 +68,9 @@ Config codex_session_config(const std::filesystem::path &root,
 Config real_codex_session_config(const std::filesystem::path &root) {
   auto result = codex_session_config(root);
   auto &worker = result.process_workers.at("codex");
-  worker.args = {"--codex", std::getenv("CODEX_BIN") ? std::getenv("CODEX_BIN") : "codex",
-                 "--allowed-root", root.string(), "--timeout-ms", "180000"};
+  worker.args = {"--codex",        std::getenv("CODEX_BIN") ? std::getenv("CODEX_BIN") : "codex",
+                 "--allowed-root", root.string(),
+                 "--timeout-ms",   "180000"};
   worker.startup_timeout_ms = 30000;
   worker.request_timeout_ms = 180000;
   worker.interaction_timeout_ms = 300000;
@@ -138,9 +139,9 @@ TEST(CodexWorker, DurableSessionContinuationSurvivesAdapterRestartAndContextGene
     EXPECT_EQ(second.result.value("summary", ""), "FIXTURE-CONTINUED");
     continuation = second.continuation;
 
-    const auto generation = transport.submit(durable_request(
-        root.path, "codex-durable-generation", "continue after the context boundary", continuation,
-        "generation-2"));
+    const auto generation = transport.submit(durable_request(root.path, "codex-durable-generation",
+                                                             "continue after the context boundary",
+                                                             continuation, "generation-2"));
     ASSERT_EQ(generation.state, WorkerJobState::Completed) << generation.error;
     ASSERT_TRUE(generation.continuation.has_value());
     const auto generation_state = Json::parse(generation.continuation->state);
@@ -154,9 +155,9 @@ TEST(CodexWorker, DurableSessionContinuationSurvivesAdapterRestartAndContextGene
 
   ProcessWorkerTransport restarted("codex", codex_config(root.path));
   ASSERT_NO_THROW(restarted.start());
-  const auto recovered = restarted.submit(durable_request(
-      root.path, "codex-durable-after-adapter-restart", "continue after provider restart",
-      continuation, "generation-2"));
+  const auto recovered = restarted.submit(
+      durable_request(root.path, "codex-durable-after-adapter-restart",
+                      "continue after provider restart", continuation, "generation-2"));
   ASSERT_EQ(recovered.state, WorkerJobState::Completed) << recovered.error;
   ASSERT_TRUE(recovered.continuation.has_value());
   EXPECT_EQ(Json::parse(recovered.continuation->state).at("thread_id"), provider_session);
@@ -249,8 +250,8 @@ TEST(Sessions, CodexProviderDeathDoesNotAdvanceContinuationAndLaterTurnRecovers)
     const auto pipeline_id =
         service.register_pipeline(session_worker_pipeline()).at("id").get<std::string>();
     session_id = service.create_session(pipeline_id).id;
-    const auto accepted = service.submit_session_turn(
-        session_id, "m6-provider-crash-first", Json{{"message", "start"}});
+    const auto accepted = service.submit_session_turn(session_id, "m6-provider-crash-first",
+                                                      Json{{"message", "start"}});
     io.run();
     const auto failed = service.get(RecordKind::SessionTurn, accepted.at("id").get<std::string>());
     ASSERT_EQ(failed.at("state"), "failed");
@@ -260,8 +261,8 @@ TEST(Sessions, CodexProviderDeathDoesNotAdvanceContinuationAndLaterTurnRecovers)
   {
     asio::io_context io;
     Service restarted(io, codex_session_config(root.path));
-    const auto accepted = restarted.submit_session_turn(
-        session_id, "m6-provider-crash-recovery", Json{{"message", "start after recovery"}});
+    const auto accepted = restarted.submit_session_turn(session_id, "m6-provider-crash-recovery",
+                                                        Json{{"message", "start after recovery"}});
     io.run();
     const auto recovered =
         restarted.get(RecordKind::SessionTurn, accepted.at("id").get<std::string>());
@@ -293,14 +294,13 @@ TEST(Sessions, RealCodexDurableSessionContinuesAcrossRestartAndContextGeneration
     const auto accepted = service.submit_session_turn(
         session_id, "m6-real-turn-one",
         Json{{"message", "Read m6-context.txt. Remember its harmless project mnemonic. "
-                          "Reply with that exact mnemonic and do not modify any files."}});
+                         "Reply with that exact mnemonic and do not modify any files."}});
     first_turn_id = accepted.at("id").get<std::string>();
     io.run();
     const auto first = service.get(RecordKind::SessionTurn, first_turn_id);
     ASSERT_EQ(first.at("state"), "succeeded");
     ASSERT_EQ(first.at("sequence"), 1);
-    EXPECT_NE(first.at("result").value("summary", std::string{}).find(phrase),
-              std::string::npos);
+    EXPECT_NE(first.at("result").value("summary", std::string{}).find(phrase), std::string::npos);
     const auto continuation = service.list(RecordKind::SessionContinuation, session_id);
     ASSERT_EQ(continuation.size(), 1U);
     EXPECT_EQ(continuation.front().value("provider_id", std::string{}), "codex");
@@ -316,19 +316,18 @@ TEST(Sessions, RealCodexDurableSessionContinuesAcrossRestartAndContextGeneration
     const auto accepted = service.submit_session_turn(
         session_id, "m6-real-turn-two",
         Json{{"message", "Without rereading files or using tools, what exact mnemonic did I "
-                          "ask you to remember? Reply with exactly that mnemonic."}});
+                         "ask you to remember? Reply with exactly that mnemonic."}});
     io.run();
     const auto second = service.get(RecordKind::SessionTurn, accepted.at("id").get<std::string>());
     ASSERT_EQ(second.at("state"), "succeeded");
     ASSERT_EQ(second.at("sequence"), 2);
-    EXPECT_NE(second.at("result").value("summary", std::string{}).find(phrase),
-              std::string::npos);
+    EXPECT_NE(second.at("result").value("summary", std::string{}).find(phrase), std::string::npos);
     EXPECT_FALSE(service.latest_session_context_generation(session_id).has_value());
 
     const auto third = service.submit_session_turn(
         session_id, "m6-real-turn-three",
         Json{{"message", "Using the established conversation context, repeat the exact mnemonic. "
-                          "Do not read or modify files."}});
+                         "Do not read or modify files."}});
     io.restart();
     io.run();
     const auto final_turn = service.get(RecordKind::SessionTurn, third.at("id").get<std::string>());
@@ -459,8 +458,8 @@ TEST(CodexWorker, DurableSessionInteractionUsesLasoIdentity) {
   TemporaryDirectory root;
   ProcessWorkerTransport transport("codex", codex_config(root.path));
   unsigned requests = 0;
-  const auto request_value = durable_request(root.path, "codex-durable-permission",
-                                            "request-permission");
+  const auto request_value =
+      durable_request(root.path, "codex-durable-permission", "request-permission");
   transport.set_interaction_handler([&](const WorkerInteractionRequest &interaction) {
     ++requests;
     EXPECT_EQ(interaction.worker_job_id, request_value.job_id);

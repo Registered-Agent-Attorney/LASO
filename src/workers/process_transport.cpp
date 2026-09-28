@@ -74,8 +74,7 @@ std::optional<OpaqueProviderContinuation> response_continuation(const Json &resp
   OpaqueProviderContinuation result{value.value("provider_id", std::string{}),
                                     value.value("provider_version", std::string{}),
                                     value.value("state", std::string{})};
-  if (!bounded_text(result.provider_id, 256) ||
-      !bounded_text(result.provider_version, 128) ||
+  if (!bounded_text(result.provider_id, 256) || !bounded_text(result.provider_version, 128) ||
       !bounded_text(result.state, 64 * 1024))
     throw WorkerTransportError("Worker continuation is invalid");
   return result;
