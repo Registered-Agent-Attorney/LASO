@@ -4,19 +4,12 @@
 
 ### Breaking changes
 
-- PostgreSQL is now required for all LASO deployments, including single-owner mode. Removed SQLite storage, the `storage_backend` selector, and `db_path`. Existing SQLite state is not imported; back it up and plan an application-specific export/import before upgrading. Startup detects the default `.laso/laso.db` file and refuses to continue until it is handled. See [storage upgrade guidance](docs/storage.md#upgrading-from-sqlite).
-
-## 0.1.0-rc.1
-
-- Release-hardening pass: documented clean-clone builds, optional dependencies,
-  configuration, capability boundaries, recovery semantics, migration policy,
-  and the public threat model.
-- Added safe operator inspection views for runs, durable node work, attempts,
-  worker jobs, leases/fences, failures, and artifact integrity metadata.
-- Added a credential-free deterministic PostgreSQL owner/worker example and
-  documented installation and controlled recovery workflows.
-
-## Unreleased
+- PostgreSQL is required for all deployments, including single-owner mode.
+  SQLite storage, `storage_backend`, and `db_path` were removed. Existing
+  SQLite state is not imported; back it up and plan an application-specific
+  export/import before upgrading. Startup detects the default `.laso/laso.db`
+  file and refuses to continue until it is handled. See [storage upgrade
+  guidance](docs/storage.md#upgrading-from-sqlite).
 
 - Added an optional S3-compatible content-addressed artifact backend behind
   `LASO_ENABLE_S3`; the filesystem backend remains the default and cloud-free.
@@ -28,13 +21,13 @@
   disposable infrastructure. M4.1 merged after physical acceptance and green hosted CI; see
   `VALIDATION.md` for the sanitized evidence.
 
-- Added durable agent session identity, idempotent ordered input acceptance,
-  close semantics, event replay, and resumable SSE for SQLite and PostgreSQL.
-  PostgreSQL supports cross-instance event observation; SQLite remains
-  single-instance. Inputs remain journaled rather than executed until M5.2.
-  Acceptance covers concurrent ordering, idempotent conflict behavior, service
-  restart, close races, cursor resume, and final close-event delivery; see
-  `VALIDATION.md` for the evidence.
+- Added durable agent sessions, idempotent ordered turns, sequential run
+  execution, opaque provider continuation, event replay, and resumable SSE on
+  PostgreSQL. Capability discovery, immutable context generations, run-context
+  snapshots, and opt-in context reduction are part of the merged session API.
+  LASO remains authoritative for session history and execution state; it does
+  not promise exactly-once provider side effects. See `VALIDATION.md` and
+  `docs/sessions.md` for the supported contract.
 
 - Preserve expired PostgreSQL lease rows so fencing tokens remain monotonic, and
   mark a superseded running node attempt failed in the same fenced transaction
@@ -72,9 +65,8 @@
 
 - Added opt-in PostgreSQL multi-instance execution. Multiple LASO service
   processes can claim whole queued runs using database-time leases, heartbeats,
-  fencing tokens, durable service-instance state, and crash takeover. SQLite
-  remains single-instance; distributed execution does not claim exactly-once
-  external effects.
+  fencing tokens, durable service-instance state, and crash takeover. Distributed
+  execution does not claim exactly-once external effects.
 
 - Hardened the CLI schedule and trigger deletion results so successful deletes
   return an explicit stable result instead of depending on post-delete record
@@ -84,9 +76,8 @@
 
 - Added a bounded PostgreSQL connection pool and opaque service-instance identity.
   Added PostgreSQL lease, heartbeat, expiry, takeover, and fencing primitives with
-  migration version 6 and contention/crash coverage. SQLite and default
-  single-owner service behavior remain unchanged; multi-instance run ownership is
-  an explicit PostgreSQL-only opt-in.
+  migration version 6 and contention/crash coverage. Multi-instance run
+  ownership is an explicit PostgreSQL-only opt-in.
 
 - Added an optional supervised Claude Code adapter using the documented
   structured `stream-json` CLI interface. Session identifiers, resume/follow-up,
@@ -142,20 +133,24 @@
   offline worker example. Vendor-specific adapters and distributed workers remain
   out of scope.
 
-## 0.2.0 — Framework Milestone 1 (in progress)
+## Previous 0.1.0-rc.1 candidate (not tagged)
 
-- Native model-provider components are available through the stable C plugin ABI.
-- Added an offline deterministic provider plugin and end-to-end AgentNode coverage.
-- Corrected Linux validation status claims after recorded Ubuntu, Debian, CI, and
-  sanitizer validation.
+- Release-hardening pass: documented clean-clone builds, optional dependencies,
+  configuration, capability boundaries, recovery semantics, migration policy,
+  and the public threat model.
+- Added safe operator inspection views for runs, durable node work, attempts,
+  worker jobs, leases/fences, failures, and artifact integrity metadata.
+- Added a credential-free deterministic PostgreSQL owner/worker example and
+  documented installation and controlled recovery workflows.
 
-## 0.1.0 — initial skeleton (unreleased)
+## 0.1.0 — initial skeleton (historical baseline)
 
 - Linux-first C++20 libraries and native CLI/server with CMake/Ninja configuration.
 - Typed YAML pipelines, message/provenance envelopes and explicit run/attempt states.
 - Bounded coroutine execution, retries, cooperative deadlines/cancellation, durable
   approval, branch/join checkpoints and registered subpipelines.
-- SQLite state and event history, local artifacts, policy and identity boundaries.
+- SQLite state and event history (removed in the PostgreSQL-only release
+  candidate), local artifacts, policy and identity boundaries.
 - Versioned C plugin SDK, Linux `.so` loader and deterministic example tool.
 - Offline GoogleTest/CTest suites, Ubuntu GCC/Clang and Debian CI definitions,
   sanitizer options, systemd and container examples, contributor documentation.

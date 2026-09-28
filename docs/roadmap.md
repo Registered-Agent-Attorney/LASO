@@ -106,8 +106,8 @@ snapshots; it does not replace durable turn history.
 
 ## M6 — real provider execution in durable sessions
 
-Status: implementation and real-provider/Web acceptance passed. The M6 PR is
-the record of exact-head CI and final disposition. The Codex worker is the
+Status: closed. Merged as PR #22 at `f78c1a98cc89f36f34903be1cee4119fe078fa31`;
+exact-head CI and real-provider/Web acceptance passed. The Codex worker is the
 canonical first adapter because its supported app-server protocol provides
 structured start/resume/turn operations and a documented continuation boundary.
 Claude Code and OpenCode remain optional adapters and are not accepted as
@@ -124,3 +124,14 @@ instances against one LASO owner. A separate real-provider test used two LASO
 instances and resumed the session through B after A stopped between turns; it
 does not claim that an in-flight Codex operation can be transferred safely. See
 [the M6 contract and validation](m6-real-provider-sessions.md).
+
+## M7 — release candidate closure
+
+Status: in progress. This is a release-readiness and feature-freeze milestone,
+not a product-feature milestone. It closes only after clean installation,
+existing-state upgrade, PostgreSQL backup/restore, process and provider
+recovery, browser/SSE acceptance, bounded load, security review, exact-main CI,
+and final clean-room validation have evidence recorded in `VALIDATION.md`.
+Release tags and artifacts must identify the exact validated source commits.
+Any uncompleted acceptance gate remains an explicit release limitation; it is
+not marked complete by documentation alone.
