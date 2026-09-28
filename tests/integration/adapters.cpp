@@ -1921,8 +1921,8 @@ TEST(Sessions, PostgresMultiInstanceDispatchesQueuedTurnOnStartup) {
             1);
 }
 
-TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
 #if defined(LASO_ENABLE_SESSION_TEST_HOOKS)
+TEST(Sessions, PostgresClaimInterruptionIsRecoveredByAnotherInstance) {
   const auto *dsn = std::getenv("LASO_TEST_POSTGRES_DSN");
   ASSERT_NE(dsn, nullptr);
   auto schema = "laso_claim_recovery_" + uuid();
