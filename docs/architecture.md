@@ -1,7 +1,7 @@
 # Architecture and ownership
 
 The public API is C++20. The shared-library extension boundary is C. The framework
-release identifier (0.1.0-rc.1), YAML format (1), PostgreSQL migration history, and plugin ABI (1) are distinct.
+application release identifier, YAML format (1), PostgreSQL migration history, and plugin ABI (1) are distinct.
 
 | Target | Responsibility and dependencies |
 |---|---|

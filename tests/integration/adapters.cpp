@@ -3392,7 +3392,7 @@ TEST(Api, HealthAndVersion) {
   Api api(s, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/health", "").status, 200U);
   const auto version = api.handle("GET", "/api/v1/version", "");
-  EXPECT_EQ(version.body.at("version"), "0.1.0-rc.1");
+  EXPECT_EQ(version.body.at("version"), laso::version);
   EXPECT_EQ(version.body.at("capabilities"),
             (Json{"sessions.durable", "sessions.ordered_turns", "sessions.sequential_execution",
                   "sessions.event_replay", "sessions.sse", "sessions.context_generations",

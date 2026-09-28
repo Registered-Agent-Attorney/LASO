@@ -64,7 +64,8 @@ start_server() {
 }
 base="http://127.0.0.1:$port/api/v1"
 start_server
-curl -fsS "$base/version" | jq -e '.version == "0.1.0-rc.1"'
+expected_version=$("$build/bin/laso" version)
+curl -fsS "$base/version" | jq -e --arg expected "$expected_version" '.version == $expected'
 cat > "$temp/occupied-port.yaml" <<EOF
 data_dir: "$temp/occupied-port-state"
 api_host: 127.0.0.1
