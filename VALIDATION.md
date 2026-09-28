@@ -973,7 +973,79 @@ passing ASan/UBSan suite, PostgreSQL fencing/recovery tests, real-provider
 restart/restore path, and systemd forced-process-restart harness provide
 separate concurrency and recovery evidence; TSan is not claimed as passed.
 
-Exact-head hosted CI for the final pushed release-candidate commits is recorded
-with the corresponding pull requests. The final clean-room release gate remains
-open until that CI, post-merge validation, release artifacts, and final main
-smoke checks have completed.
+### M7 exact-main closeout (2026-09-28)
+
+The clean-source acceptance used the merged LASO main commit
+`74d79ebcf8a202fa069a475f21eacb1767aab881` (tree
+`c654e25fed25b4e5438d8edc2cf7c0773fecf3ae`) and merged private LASO-Web main
+commit `dab955cc5553e002b52c433890e8c071e17b104c` (tree
+`a1a1e1af1eb30232816329b7ba10a01fed346f74`). Both merge trees were verified
+byte-for-byte equal to their green PR candidate trees. Source archives were
+created from those exact main refs and independently checksum-verified after
+transfer to a fresh disposable workspace.
+
+GitHub post-merge CI completed successfully on the exact main commits:
+
+| Repository and commit | Workflow | Result |
+| --- | --- | --- |
+| LASO `74d79eb` | `linux.yml`, run `36460927609` | 8/8 jobs passed: Ubuntu GCC, Ubuntu Clang, ASan/UBSan, Release GCC, Release Clang, Debian, PostgreSQL, and S3. |
+| Private LASO-Web `dab955c` | `tests`, run `36463135117` | 4/4 jobs passed: Go/browser model, Linux amd64, Windows amd64, and Darwin arm64. |
+| Private LASO-Web `dab955c` | `PostgreSQL browser acceptance`, run `36463135104` | 1/1 job passed, including the two-LASO/two-Web browser acceptance lane. |
+
+From the clean source archives, LASO was configured and built in Release with
+PostgreSQL and the Codex adapter enabled, all default targets were built, and
+the complete install manifest was installed under a disposable prefix. The
+installed CLI, server, worker, examples, and systemd unit were checked; the
+unit passed `systemd-analyze verify`. Private LASO-Web passed `gofmt`,
+`go vet ./...`, `go test ./...`, `go test -race ./...`, production build,
+`npm ci`, all 11 frontend tests, JavaScript syntax checks, and supported
+cross-builds.
+
+The production-browser suite passed 7/7 on PostgreSQL using current LASO main
+and the merged Go-Web tree. It covered capability discovery, six reduced
+session turns shared by two browsers, immutable generation/run-snapshot
+linkage, an ordinary standalone run after LASO restart, ordered durable turns,
+two-observer updates, idempotency, SSE reconnect/replay, LASO-Web restart,
+session close, admission `429`/`Retry-After`, concurrent sessions, backend
+outage/recovery, and workspace routes. This also reproduces the scenario
+reported by public LASO-Web PR #5 against current merged LASO and confirms that
+ordinary work completes after context reduction and service restart.
+
+The actual Codex app-server completed three real turns through one LASO session.
+Continuation persisted through LASO restart and provider-process replacement,
+and a fourth turn after database backup/restore used the same logical context
+across an immutable generation boundary. Provider-native identifiers and
+continuation values are excluded from public state and this report. The
+existing-state upgrade from the previous accepted LASO main binary preserved
+and continued its durable provider-backed session.
+
+A logical PostgreSQL backup was restored to a separate database. The restored
+service exposed the open session, completed turn, linked run, durable event,
+and context provenance. Immediate PostgreSQL stop made database-backed API
+requests unavailable without killing LASO; after PostgreSQL restart the same
+durable state was readable. Forced LASO termination and restart preserved that
+state, and session close rejected a later turn with HTTP 409. The installed
+user-service lifecycle harness covered startup, health, approvals, SIGTERM,
+SIGINT, forced termination/restart, child cleanup, repeated transitions, and
+invalid configuration. These are disposable tests; no system services or
+database outside the isolated acceptance resources were changed.
+
+The bounded Go-Web soak recorded in [reverse-proxy validation](docs/reverse-proxy.md)
+remains applicable because the release PR changed only compatibility
+documentation and browser regression coverage. It exercised 25 concurrent SSE
+clients plus API load for 15 minutes with stable resource observations; the
+documented LASO SSE admission soak also exercised over-limit `429` and
+reconnect churn. These measurements describe only the isolated test runs and
+are not a capacity guarantee.
+
+No unresolved release-blocking product defect was found. The LASO TSan binary
+built but its runtime aborted before test discovery with
+`unexpected memory mapping`; no TSan test pass is claimed. ASan/UBSan, Go race,
+concurrency/recovery tests, and the bounded stream soak provide separate
+evidence. The system-wide dedicated-account sandbox was not launched; its unit
+was statically validated and the user-service lifecycle was exercised. LASO's
+current PostgreSQL schema migration applies forward at startup; binary rollback
+across an incompatible schema requires restoring a tested database backup.
+This release candidate's acceptance suite, residual limits, and supported
+upgrade/rollback contract are complete and documented; no arbitrary historic
+LASO-Web compatibility is promised.

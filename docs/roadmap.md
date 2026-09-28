@@ -64,12 +64,13 @@ recovery for sessions.
 
 ### M5.2 — durable sequential turn execution and provider continuation
 
-Status: implementation merged in PR #14. The PostgreSQL regression suite
-covers ordered dispatch, run binding, recovery, fencing, cancellation, and
-continuation publication. M6 adds real Codex continuation across a LASO restart
-for one supported provider path. The system does not promise exactly-once
-provider side effects; distributed fault injection remains limited to the cases
-listed in [the validation record](../VALIDATION.md).
+Status: closed. The durable execution implementation was merged in PR #14 and
+the PostgreSQL storage/session integration landed in PR #21. Regression tests
+cover ordered dispatch, run binding, recovery, fencing, cancellation, and
+continuation publication. M6 proved one supported real-provider path with
+Codex across a LASO restart. The system does not promise exactly-once provider
+side effects, and in-flight Codex work is not transferred between LASO owners;
+see [the validation record](../VALIDATION.md).
 
 The durable state machine, run-binding transaction, execution ownership,
 continuation boundary, and close/cancellation races are specified in
@@ -127,11 +128,15 @@ does not claim that an in-flight Codex operation can be transferred safely. See
 
 ## M7 — release candidate closure
 
-Status: in progress. This is a release-readiness and feature-freeze milestone,
-not a product-feature milestone. It closes only after clean installation,
-existing-state upgrade, PostgreSQL backup/restore, process and provider
-recovery, browser/SSE acceptance, bounded load, security review, exact-main CI,
-and final clean-room validation have evidence recorded in `VALIDATION.md`.
-Release tags and artifacts must identify the exact validated source commits.
-Any uncompleted acceptance gate remains an explicit release limitation; it is
-not marked complete by documentation alone.
+Status: closed for the `0.1.0-rc.2` release candidate. This was a release-
+readiness and feature-freeze milestone, not a product-feature milestone.
+Clean installation, upgrade from the prior merged main, PostgreSQL backup and
+restore, process/provider recovery, real-provider sessions, browser/SSE
+acceptance, bounded load, security review, exact-main CI, and clean-source
+validation are recorded in [the validation record](../VALIDATION.md).
+The release is a candidate for controlled pilot use, not a claim of general
+production readiness. PostgreSQL downgrade rollback is not supported without
+restoring a compatible database backup; TSan could not start in the validation
+runtime; and the dedicated system-account filesystem sandbox was statically
+checked but not exercised with a system-wide service. These boundaries remain
+explicit release limitations.
