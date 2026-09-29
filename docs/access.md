@@ -1,9 +1,15 @@
 # API and CLI reference
 
-The server uses JSON bodies, `/api/v1`, loopback port 8080 by default. Registration
-accepts `{"yaml":"..."}`; run creation accepts `{"input":{...}}`. Approval accepts
+The current development server retains the RC2 API and adds M8 metadata-only
+operator routes. It uses JSON bodies, `/api/v1`, and loopback port 8080 by
+default. Registration accepts `{"yaml":"..."}`; run creation accepts
+`{"input":{...}}`. Approval accepts
 `{"comment":"..."}`. Actor identity comes from the identity provider rather than
-an arbitrary request-body actor. Local development identity is unauthenticated.
+an arbitrary request-body actor. The shipped server uses unauthenticated local
+development identity; LASO core has no built-in user authentication platform.
+An embedding application may provide its own `IdentityProvider` implementation.
+Remote deployments must keep LASO private or place it behind a deployment-owned
+authentication and authorization boundary before exposing operator data/actions.
 
 | Method | Path |
 |---|---|
@@ -27,6 +33,9 @@ an arbitrary request-body actor. Local development identity is unauthenticated.
 | GET, POST | `/sessions` |
 | GET | `/sessions/{id}`, `/sessions/{id}/turns`, `/sessions/{id}/events`, `/sessions/{id}/events/stream` |
 | POST | `/sessions/{id}/turns`, `/sessions/{id}/close` |
+| GET | `/operator/status`, `/operator/artifacts/integrity` |
+| GET | `/operator/runs`, `/operator/node-work`, `/operator/worker-jobs`, `/operator/artifacts`, `/operator/sessions`, `/operator/approvals`, `/operator/worker-requests`, `/operator/providers`, `/operator/plugins`, `/operator/workers`, `/operator/instances`, `/operator/leases` |
+| GET | `/operator/sessions/{id}/turns` |
 
 All paths above are relative to `/api/v1`. Creation/decisions return 201/202; callers
 inspect run state separately. Errors use 400 (validation), 403 (policy), 404, 409
@@ -36,6 +45,16 @@ connection, with 15-second I/O deadlines. Malformed/oversized HTTP transport inp
 closes the connection. List endpoints accept `?limit=50&offset=0`; limits are
 1..100, default 50. Responses are capped at 4 MiB; reduce the page size for large
 stored messages. The C++ storage interface also supports bounded pagination.
+The operator endpoints use the same `IdentityProvider` authorization boundary as
+the rest of the API. Their list responses are paged and omit prompt/input bodies,
+provider-native continuation values, arbitrary metadata, DSNs, and artifact paths.
+Artifact integrity returns counts and a bounded status only; it never returns
+filesystem locations or raw error text. The operator scan examines at most ten
+filesystem/metadata entries and verifies at most 16 MiB of local object data per
+request. Larger objects remain unverified in this summary; use the local
+operator CLI for a complete integrity scan. For S3, this dashboard check
+compares bounded object size and digest metadata without downloading object
+bodies; the local CLI integrity command performs full content verification.
 
 ```text
 laso [--config FILE] [--data-dir DIR] version

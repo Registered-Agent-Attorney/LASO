@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added bounded, metadata-only operator API views for service compatibility and
+  capacity, runs, durable sessions and turns, NodeWork, worker jobs and
+  requests, approvals, providers, plugins, artifacts, instances, and leases.
+  Artifact integrity reports counts and status without paths or raw errors.
+- Corrected current documentation to distinguish the RC2 release baseline from
+  M8 development and to describe PostgreSQL-only support and current limits.
+
+## 0.1.0-rc.2 (2026-09-28)
+
 ### Breaking changes
 
 - PostgreSQL is required for all deployments, including single-owner mode.
@@ -43,9 +52,9 @@
   provenance. Added integrity and conservative GC operator commands plus large
   generated-file and gateway regression coverage. PostgreSQL stores metadata and
   references only; at-least-once attempts with one authoritative fenced
-  completion remain the guarantee. The initial artifact-specific chaos suite
-  was incomplete at that publication point; the later M3.6 closure evidence is
-  recorded in `VALIDATION.md`.
+  completion remain the guarantee. The first artifact-specific publication did
+  not yet have complete chaos evidence; that gap closed under M3.6 before this
+  release. See `VALIDATION.md`.
 
 - Closed M3.6 artifact-transport validation using separate Linux owner and
   worker operating-system/process/network boundaries. Normal distributed runs,

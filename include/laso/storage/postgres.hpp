@@ -5,6 +5,7 @@
 #include <string>
 
 namespace laso {
+inline constexpr unsigned postgres_schema_version = 11;
 class PostgresStorage final : public Storage {
 public:
   PostgresStorage(const std::string &dsn, const std::string &schema = "public",
@@ -35,6 +36,7 @@ public:
   Json get(RecordKind, const std::string &) const override;
   std::vector<Json> list(RecordKind, const std::string &run_id = "", std::size_t limit = 1000,
                          std::size_t offset = 0) const override;
+  Json operator_diagnostics() const override;
 
 private:
   struct Impl;

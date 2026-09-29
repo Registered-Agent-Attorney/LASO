@@ -4,8 +4,8 @@
 
 ## Context
 
-LASO supports embedded SQLite and an optional PostgreSQL deployment without
-duplicating runtime persistence semantics.
+At acceptance, LASO supported embedded SQLite and an optional PostgreSQL
+deployment without duplicating runtime persistence semantics.
 
 ## Decision
 
@@ -15,11 +15,12 @@ behind that boundary.
 
 ## Consequences
 
-SQLite remains the default embedded backend. Backend conformance tests define
-shared behavior; backend-specific tests cover driver and deployment details.
+At acceptance, SQLite was the default embedded backend. Backend conformance
+tests defined shared behavior; backend-specific tests covered driver and
+deployment details.
 
 ## Supersedes
 
-None; this records the current architecture.
+None; this recorded the architecture at the time of acceptance.
 
 > **Status: superseded** by ADR 0009. This records the former SQLite plus optional PostgreSQL policy. The generic `Storage` boundary remains; PostgreSQL is now the sole shipped implementation.

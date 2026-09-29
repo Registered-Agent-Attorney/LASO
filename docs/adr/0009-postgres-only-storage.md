@@ -20,7 +20,7 @@ history stays authoritative and previously applied migrations are unchanged.
 
 ## Compatibility
 
-This is a breaking change. SQLite state is not imported. The default `.laso/laso.db`
+This is a breaking change. SQLite state is not imported. The legacy default `.laso/laso.db`
 file is detected and startup fails safely; old `db_path` and `storage_backend`
 configuration keys are rejected. Operators must preserve and back up SQLite state,
 then perform and verify an application-specific export/import before switching. No

@@ -1544,6 +1544,10 @@ bool Runtime::idle() const {
   std::lock_guard lock(mutex_);
   return active_.empty();
 }
+RuntimeDiagnostics Runtime::diagnostics() const {
+  std::lock_guard lock(mutex_);
+  return {active_.size(), active_nodes_.size(), stopping_};
+}
 bool Runtime::approved(const Run &r) const {
   for (const auto &item : list_all(deps_.storage, RecordKind::Approval, r.id)) {
     auto a = item.get<Approval>();

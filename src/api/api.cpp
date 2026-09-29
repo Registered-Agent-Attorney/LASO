@@ -80,6 +80,35 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
 ApiResponse Api::route(const std::string &method, const std::string &target, const Json &body,
                        const Actor &actor, std::size_t limit, std::size_t offset,
                        std::uint64_t after) {
+  static const std::regex operator_collection_route(
+      "/api/v1/operator/(runs|node-work|worker-jobs|artifacts|sessions|approvals|"
+      "worker-requests|providers|plugins|workers|instances|leases)");
+  static const std::regex operator_session_turns_route(
+      "/api/v1/operator/sessions/([A-Za-z0-9_.@-]{1,128})/turns");
+  std::smatch operator_match;
+  if (target == "/api/v1/operator/status") {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    return {200, service_.operator_status()};
+  }
+  if (target == "/api/v1/operator/artifacts/integrity") {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    return {200, service_.operator_artifact_integrity()};
+  }
+  if (std::regex_match(target, operator_match, operator_session_turns_route)) {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    return {200, service_.operator_page("session-turns", limit, offset, operator_match[1].str())};
+  }
+  if (std::regex_match(target, operator_match, operator_collection_route)) {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    return {200, service_.operator_page(operator_match[1].str(), limit, offset)};
+  }
+  if (target.starts_with("/api/v1/operator/"))
+    return {404, {{"error", "Endpoint not found"}}};
+
   static const std::regex session_stream_pattern(
       "/api/v1/sessions/([A-Za-z0-9_.@-]{1,128})/events/stream");
   std::smatch stream_match;

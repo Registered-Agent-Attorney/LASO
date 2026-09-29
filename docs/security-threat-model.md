@@ -1,6 +1,6 @@
 # Security threat model
 
-This document describes the trust boundaries that exist in LASO RC1. It is a
+This document describes the trust boundaries that exist in LASO `v0.1.0-rc.2`. It is a
 deployment guide, not a claim that LASO is a sandbox or a complete security
 boundary.
 
@@ -16,12 +16,17 @@ boundary.
 - PostgreSQL is the coordination authority for leases, claims, migrations, and
   fenced writes. It must be private, authenticated, and dedicated to the
   deployment.
+- The LASO HTTP API does not provide a built-in user authentication platform.
+  It defaults to loopback and uses the `IdentityProvider` boundary for an
+  embedding application's authenticated identity and authorization policy.
+  Remote deployments must enforce that boundary at the application or at a
+  trusted deployment proxy before exposing operator data or actions.
 - Workspace contents and returned artifact metadata are untrusted input and are
   validated before use.
 
 ## Threats and mitigations
 
-| Threat | Mitigation in RC1 |
+| Threat | Mitigation in RC2 |
 |---|---|
 | Stale worker commits after lease loss | Database-authoritative lease checks and fencing on every authoritative completion. |
 | Duplicate completion after uncertain response | Idempotent equivalent completion; conflicting completion fails closed. |

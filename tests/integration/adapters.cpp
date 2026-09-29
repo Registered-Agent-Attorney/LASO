@@ -3179,6 +3179,9 @@ TEST(Artifacts, ContentAddressedObjectsStreamAndMaterialize) {
   const auto report = artifacts.integrity();
   EXPECT_EQ(report.invalid, 0U);
   EXPECT_GE(report.verified, 1U);
+  const auto bounded = artifacts.integrity_bounded(100, 1);
+  EXPECT_EQ(bounded.unverified, 1U);
+  EXPECT_FALSE(bounded.complete);
 }
 TEST(Artifacts, GarbageCollectionHandlesFreshStore) {
   TemporaryDirectory dir;
@@ -4382,4 +4385,178 @@ TEST(Api, PaginationBounds) {
   Api api(s, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/runs?limit=1&offset=0", "").status, 200U);
   EXPECT_EQ(api.handle("GET", "/api/v1/runs?limit=10000", "").status, 400U);
+}
+TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto cfg = config(dir.path);
+  Service service(io, cfg);
+  auto storage = make_storage(cfg.data_dir / "service");
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+
+  const std::string prompt_secret = "fixture-canary-session-body";
+  const std::string error_secret = "fixture-canary-error-text";
+  const std::string artifact_secret = "fixture-canary-artifact-name";
+  const std::string request_secret = "fixture-canary-worker-request-detail";
+  AgentSession session;
+  session.id = "operator-session";
+  session.pipeline_id = "operator-pipeline@1";
+  storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
+  ASSERT_TRUE(
+      storage->submit_session_turn(session.id, "operator-turn",
+                                   Json{{"idempotency_key", "operator-private-idempotency-key"},
+                                        {"input", {{"text", prompt_secret}}},
+                                        {"state", "queued"}},
+                                   Json::object()));
+
+  laso::Run run;
+  run.id = "operator-run";
+  run.pipeline_id = "operator-pipeline";
+  run.state = RunState::Failed;
+  run.error = error_secret;
+  storage->commit({{RecordKind::Run, run.id, run.id, Json(run)}});
+
+  WorkerJob job;
+  job.id = "operator-worker-job";
+  job.run_id = run.id;
+  job.node_id = "operator-node";
+  job.worker_id = "operator-worker";
+  job.external_job_id = "fixture-canary-provider-handle";
+  job.result = {{"text", "fixture-canary-worker-result"}};
+  job.usage.provider = "fixture-canary-provider-metadata";
+  job.usage.model = "fixture-canary-model-metadata";
+  job.usage.executor = "fixture-canary-executor-metadata";
+  storage->commit({{RecordKind::WorkerJob, job.id, run.id, Json(job)}});
+
+  Artifact artifact;
+  artifact.id = "operator-artifact";
+  artifact.name = artifact_secret;
+  artifact.location = "/private/operator/artifact";
+  artifact.object_id = "sha256:operator-object";
+  artifact.sha256 = "operator-sha256";
+  artifact.metadata = {{"private", artifact_secret},
+                       {"attempt_id", "operator-attempt"},
+                       {"worker_id", "operator-worker"},
+                       {"fencing_token", 7}};
+  storage->commit({{RecordKind::Artifact, artifact.id, run.id, Json(artifact)}});
+
+  WorkerInteraction interaction;
+  interaction.id = "operator-worker-request";
+  interaction.worker_job_id = "operator-job";
+  interaction.worker_id = "operator-worker";
+  interaction.run_id = run.id;
+  interaction.external_job_id = "fixture-canary-provider-handle";
+  interaction.session_id = session.id;
+  interaction.type = WorkerInteractionType::Permission;
+  interaction.title = request_secret;
+  interaction.summary = request_secret;
+  interaction.risk = request_secret;
+  interaction.category = request_secret;
+  interaction.payload = {{"text", request_secret}};
+  interaction.response = {{"text", request_secret}};
+  storage->commit({{RecordKind::WorkerInteraction, interaction.id, run.id, Json(interaction)}});
+
+  std::filesystem::create_directories(service.artifacts().root() / "objects" / "aa");
+  for (unsigned index = 0; index < 120; ++index) {
+    std::ofstream(service.artifacts().root() / "objects" / "aa" /
+                  ("bounded-fixture-" + std::to_string(index)))
+        << "fixture";
+  }
+
+  auto provider_state = std::make_shared<ContinuationFixtureState>();
+  register_continuation_fixture(service, provider_state);
+
+  const auto status = api.handle("GET", "/api/v1/operator/status", "");
+  ASSERT_EQ(status.status, 200U);
+  EXPECT_EQ(status.body.at("system").at("version"), version);
+  EXPECT_EQ(status.body.at("storage").at("backend"), "postgresql");
+  EXPECT_EQ(status.body.at("storage").at("schema_state"), "current");
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/runs?limit=1&offset=0", "").status, 200U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/runs?limit=101", "").status, 400U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/unknown", "").status, 404U);
+  EXPECT_EQ(api.handle("POST", "/api/v1/operator/status", "{}").status, 405U);
+
+  const auto runs = api.handle("GET", "/api/v1/operator/runs?limit=100", "");
+  ASSERT_EQ(runs.status, 200U);
+  ASSERT_EQ(runs.body.size(), 1U);
+  EXPECT_TRUE(runs.body[0].contains("error_summary"));
+  const auto turns = api.handle("GET", "/api/v1/operator/sessions/operator-session/turns", "");
+  ASSERT_EQ(turns.status, 200U);
+  ASSERT_EQ(turns.body.size(), 1U);
+  EXPECT_TRUE(turns.body[0].at("input_present"));
+  EXPECT_EQ(turns.body[0].size(), 7U);
+  const auto artifacts = api.handle("GET", "/api/v1/operator/artifacts", "");
+  ASSERT_EQ(artifacts.status, 200U);
+  ASSERT_EQ(artifacts.body.size(), 1U);
+  EXPECT_FALSE(artifacts.body[0].contains("name"));
+  EXPECT_FALSE(artifacts.body[0].contains("location"));
+  EXPECT_TRUE(artifacts.body[0].contains("metadata"));
+  const auto integrity = api.handle("GET", "/api/v1/operator/artifacts/integrity", "");
+  ASSERT_EQ(integrity.status, 200U);
+  EXPECT_TRUE(integrity.body.contains("objects"));
+  EXPECT_FALSE(integrity.body.contains("root"));
+  EXPECT_FALSE(integrity.body.contains("errors"));
+  EXPECT_LE(integrity.body.at("entries_scanned").get<std::size_t>(), 10U);
+  EXPECT_TRUE(integrity.body.at("truncated"));
+  EXPECT_FALSE(integrity.body.at("complete"));
+  EXPECT_TRUE(integrity.body.contains("unverified"));
+  EXPECT_EQ(integrity.body.at("verification"), "content_hash");
+
+  const auto requests = api.handle("GET", "/api/v1/operator/worker-requests", "");
+  ASSERT_EQ(requests.status, 200U);
+  ASSERT_EQ(requests.body.size(), 1U);
+  EXPECT_EQ(requests.body[0].at("request_type"), "permission");
+  EXPECT_TRUE(requests.body[0].at("details_withheld"));
+  EXPECT_FALSE(requests.body[0].contains("title"));
+  EXPECT_FALSE(requests.body[0].contains("summary"));
+  EXPECT_FALSE(requests.body[0].contains("risk"));
+  EXPECT_FALSE(requests.body[0].contains("payload"));
+  EXPECT_FALSE(requests.body[0].contains("response"));
+  EXPECT_FALSE(requests.body[0].contains("external_job_id"));
+
+  const auto jobs = api.handle("GET", "/api/v1/operator/worker-jobs", "");
+  ASSERT_EQ(jobs.status, 200U);
+  ASSERT_EQ(jobs.body.size(), 1U);
+  EXPECT_FALSE(jobs.body[0].contains("external_job_id"));
+  EXPECT_FALSE(jobs.body[0].at("usage").contains("provider"));
+  EXPECT_FALSE(jobs.body[0].at("usage").contains("model"));
+  EXPECT_FALSE(jobs.body[0].at("usage").contains("executor"));
+  EXPECT_TRUE(jobs.body[0].at("result_present"));
+
+  const auto providers = api.handle("GET", "/api/v1/operator/providers", "");
+  ASSERT_EQ(providers.status, 200U);
+  ASSERT_EQ(providers.body.size(), 2U);
+  EXPECT_FALSE(providers.body[0].contains("plugin"));
+  EXPECT_FALSE(providers.body[0].contains("capabilities"));
+  EXPECT_TRUE(providers.body[0].contains("capability_count"));
+
+  const auto all_responses = status.body.dump() + runs.body.dump() + turns.body.dump() +
+                             artifacts.body.dump() + integrity.body.dump() + requests.body.dump() +
+                             jobs.body.dump() + providers.body.dump();
+  EXPECT_EQ(all_responses.find(prompt_secret), std::string::npos);
+  EXPECT_EQ(all_responses.find("operator-private-idempotency-key"), std::string::npos);
+  EXPECT_EQ(all_responses.find(error_secret), std::string::npos);
+  EXPECT_EQ(all_responses.find(artifact_secret), std::string::npos);
+  EXPECT_EQ(all_responses.find(request_secret), std::string::npos);
+  EXPECT_EQ(all_responses.find("fixture-canary-provider-handle"), std::string::npos);
+  EXPECT_EQ(all_responses.find("fixture-canary-worker-result"), std::string::npos);
+  EXPECT_EQ(all_responses.find("fixture-canary-provider-metadata"), std::string::npos);
+  EXPECT_EQ(all_responses.find(cfg.postgres_dsn), std::string::npos);
+}
+TEST(Api, OperatorViewsRespectIdentityAuthorization) {
+  struct Denied : IdentityProvider {
+    Actor authenticate(const std::string &) const override {
+      return {};
+    }
+    bool authorize(const AuthorizationContext &) const override {
+      return false;
+    }
+  } identity;
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  Api api(service, identity);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/status", "").status, 403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/runs", "").status, 403U);
 }

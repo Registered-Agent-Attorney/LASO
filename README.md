@@ -6,16 +6,17 @@ Local AI System for Orchestration is an early, Linux-first C++20 framework for
 declarative workflows, deterministic functions, model and tool registries, policy
 checks, durable human approval, and execution history. Applications supply their
 own logic and integrations. Agents are one node type; pipelines are the root
-abstraction. This source targets the next `0.1.0` release candidate; the
-version reported by `laso version` and any published tag identify the exact
-build. Release readiness is not implied until the current validation record
-and known limitations have been reviewed.
+abstraction. M8 development starts from `v0.1.0-rc.2`; untagged development
+commits retain that release version until a later candidate is published.
+Release readiness is not implied until the current validation record and known
+limitations have been reviewed.
 
-**Validation status:** implemented, statically reviewed, and validated on Ubuntu
-with GCC and Clang, ASan/UBSan, a Debian 13 container build, a runtime image
-health check, and GitHub Actions. These are development and CI results, not a
+**Validation status:** RC2 passed the complete public Actions matrix and
+clean-source Linux validation, including PostgreSQL-backed recovery and
+backup/restore. The 272-test count is the RC2 clean-source result; M8 adds tests
+to the current development branch. These are development and CI results, not a
 production-readiness claim. See [VALIDATION.md](VALIDATION.md) for exact scope,
-systemd deployment validation status, and the blocked host TSan run.
+the RC2 systemd boundary, and the TSan runtime limitation.
 
 ```text
                  API / CLI
@@ -255,16 +256,17 @@ docker compose -f deploy/docker/compose.yaml up --build
 The Compose example deliberately uses Linux host networking with the API on host
 loopback. Persistent data lives in a named volume. The installed systemd unit runs
 the daemon in the foreground as an unprivileged `laso` service account and uses a
-systemd-managed state directory. Dedicated-account system-service installation,
-filesystem restrictions, startup/health, stop/restart, and durable recovery have
-been exercised separately from rootless user-service acceptance; see the exact
-scope and remaining limitations in `VALIDATION.md`.
+systemd-managed state directory. RC2 validation covered the installed unit and
+the user-service lifecycle. The dedicated-account system-unit sandbox was not
+rerun specifically for RC2; earlier system-account evidence is retained as
+historical validation in `VALIDATION.md`.
 
 ## Current limitations and deferred work
 
-- Linux builds, tests, sanitizer builds, the Debian container path, and a native
-  dedicated-account systemd service lifecycle have documented validation. These
-  results do not by themselves establish general production readiness.
+- Linux builds, tests, ASan/UBSan, the Debian container path, and the installed
+  systemd user-service lifecycle have documented validation. The dedicated
+  system-account sandbox was not rerun specifically for RC2. These results do
+  not by themselves establish general production readiness.
 - M3.6 cross-machine artifact transport and its worker-loss, fencing, database
   interruption, owner-recovery, and integrity acceptance are closed; see
   `VALIDATION.md`. M4.1 adds an opt-in S3-compatible store. Remote S3 garbage
@@ -297,9 +299,11 @@ scope and remaining limitations in `VALIDATION.md`.
   declared; declared schemas use the shared local JSON Schema engine. Prompt values
   are inline text, not automatically read from files.
 - Mock is the default built-in provider. An optional loopback-only OpenAI-compatible
-  adapter can call an already-running local model service. No model serving, remote
-  adapters, streaming, secret persistence, sandboxing, authentication platform, or
-  GUI is included.
+  adapter can call an already-running local model service. LASO includes HTTP/SSE
+  APIs and supervised worker transports, but no model-serving service, persistent
+  secret store, native-plugin sandbox, or built-in authentication/IdP platform.
+  The core API defaults to unauthenticated loopback access; remote deployments
+  must provide their own authentication and authorization boundary.
 - Schedules and event triggers are durable local framework records. One-time,
   interval, UTC five-field cron, and internal-event triggers launch normal runs;
   misfire, overlap, delivery-depth, and pending-work bounds are explicit. Vendor-

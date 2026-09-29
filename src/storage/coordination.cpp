@@ -331,8 +331,9 @@ public:
     }
   }
 
-  std::vector<InstanceRecord> list_instances(std::uint64_t stale_after_ms) const override {
-    if (stale_after_ms > 86400000)
+  std::vector<InstanceRecord> list_instances(std::uint64_t stale_after_ms, std::size_t limit,
+                                             std::size_t offset) const override {
+    if (stale_after_ms > 86400000 || limit > 100 || offset > 100000000)
       throw Error(ErrorCode::Validation, "Invalid instance stale interval");
     auto lease = pool_.acquire();
     try {
@@ -341,8 +342,8 @@ public:
           "SELECT instance_id, started_at, last_heartbeat_at, software_version, capabilities, "
           "CASE WHEN $1::bigint > 0 AND last_heartbeat_at + ($1::double precision * "
           "interval '1 millisecond') <= clock_timestamp() THEN 'STALE' ELSE state END "
-          "FROM laso_instances ORDER BY instance_id",
-          stale_after_ms);
+          "FROM laso_instances ORDER BY instance_id LIMIT $2 OFFSET $3",
+          stale_after_ms, static_cast<long long>(limit), static_cast<long long>(offset));
       std::vector<InstanceRecord> instances;
       instances.reserve(result.size());
       for (const auto &row : result)
@@ -359,6 +360,35 @@ public:
       throw;
     } catch (const std::exception &) {
       throw Error(ErrorCode::Storage, "Instance listing failed");
+    }
+  }
+
+  std::vector<LeaseRecord> list_leases(std::size_t limit, std::size_t offset) const override {
+    if (limit > 100 || offset > 100000000)
+      throw Error(ErrorCode::Validation, "Lease listing limit exceeded");
+    auto lease = pool_.acquire();
+    try {
+      pqxx::work tx(lease.connection());
+      const auto result = tx.exec_params(
+          "SELECT resource_key, owner_instance, fencing_token, acquired_at, heartbeat_at, "
+          "expires_at, expires_at > clock_timestamp() FROM laso_coordination_leases "
+          "ORDER BY resource_key LIMIT $1 OFFSET $2",
+          static_cast<long long>(limit), static_cast<long long>(offset));
+      std::vector<LeaseRecord> leases;
+      leases.reserve(result.size());
+      for (const auto &row : result)
+        leases.push_back(read_lease(row));
+      tx.commit();
+      return leases;
+    } catch (const pqxx::sql_error &error) {
+      translate_sql(error);
+    } catch (const pqxx::broken_connection &) {
+      lease.mark_broken();
+      translate_connection();
+    } catch (const Error &) {
+      throw;
+    } catch (const std::exception &) {
+      throw Error(ErrorCode::Storage, "Lease listing failed");
     }
   }
 

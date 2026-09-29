@@ -138,6 +138,10 @@ TEST(S3Artifacts, StreamsLargeContentAddressedObjectAndMaterializesVerifiedBytes
   const auto report = store.integrity();
   EXPECT_EQ(report.invalid, 0U);
   EXPECT_EQ(report.verified, 1U);
+  const auto bounded = store.integrity_bounded(10, 0);
+  EXPECT_EQ(bounded.verification, "remote_metadata");
+  EXPECT_EQ(bounded.verified, 1U);
+  EXPECT_TRUE(bounded.complete);
   EXPECT_THROW(store.collect_garbage(true), Error);
 }
 

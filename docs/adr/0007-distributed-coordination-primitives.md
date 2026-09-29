@@ -11,10 +11,11 @@ effects.
 
 ## Context
 
-LASO currently assumes one service process owns a selected database. Removing that
-protection without a durable ownership protocol would permit duplicate scheduling
-and ambiguous recovery. PostgreSQL also needs bounded concurrent database access
-as coordination work grows, while SQLite must remain the default embedded backend.
+At acceptance, LASO assumed one service process owned a selected database.
+Removing that protection without a durable ownership protocol would permit
+duplicate scheduling and ambiguous recovery. PostgreSQL needed bounded
+concurrent database access as coordination work grew. SQLite was then the
+default embedded backend; ADR 0009 later removed it.
 
 ## Decision
 
@@ -26,10 +27,11 @@ monotonic fencing token on every takeover. Renewals require the current owner an
 token before expiry; release and inspection are token-aware; protected operations
 can reject stale tokens.
 
-The existing SQLite file lease and PostgreSQL session-held advisory owner lock
-remain in force. `single_owner` remains the default. PostgreSQL can explicitly
-enable multi-instance whole-run ownership after the version-7 instance registry
-and fenced-checkpoint work; SQLite remains single-instance.
+At acceptance, the SQLite file lease and PostgreSQL session-held advisory owner
+lock were both in force. ADR 0009 removed SQLite; the PostgreSQL session-held
+lock remains the single-owner default. PostgreSQL can explicitly enable
+multi-instance whole-run ownership after the version-7 instance registry and
+fenced-checkpoint work.
 
 ## Consequences
 

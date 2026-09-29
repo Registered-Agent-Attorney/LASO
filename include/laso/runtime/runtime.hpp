@@ -43,6 +43,11 @@ struct RuntimeDependencies {
   std::string instance_id;
   std::filesystem::path workspace_root;
 };
+struct RuntimeDiagnostics {
+  std::size_t active_runs = 0;
+  std::size_t active_nodes = 0;
+  bool stopping = false;
+};
 class Runtime {
 public:
   Runtime(asio::io_context &io, Config config, RuntimeDependencies dependencies);
@@ -61,6 +66,7 @@ public:
               const std::string &comment);
   void shutdown();
   bool idle() const;
+  RuntimeDiagnostics diagnostics() const;
   void start_distributed();
   void dispatch_session(const std::string &session_id);
 #ifdef LASO_ENABLE_SESSION_TEST_HOOKS

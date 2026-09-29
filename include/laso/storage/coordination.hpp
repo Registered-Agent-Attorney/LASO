@@ -73,7 +73,11 @@ public:
                                  const std::string &capabilities) = 0;
   virtual bool heartbeat_instance(const std::string &state) = 0;
   virtual void set_instance_state(const std::string &state) = 0;
-  virtual std::vector<InstanceRecord> list_instances(std::uint64_t stale_after_ms = 0) const = 0;
+  virtual std::vector<InstanceRecord> list_instances(std::uint64_t stale_after_ms = 0,
+                                                     std::size_t limit = 100,
+                                                     std::size_t offset = 0) const = 0;
+  virtual std::vector<LeaseRecord> list_leases(std::size_t limit = 100,
+                                               std::size_t offset = 0) const = 0;
 };
 
 std::unique_ptr<Coordination> create_coordination(const CoordinationOptions &,
