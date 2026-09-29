@@ -60,7 +60,8 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
         }
       }
       auto result = route(method, path, input, actor, limit, offset, after);
-      const auto response_bytes = result.raw_body ? result.raw_body->size() : result.body.dump().size();
+      const auto response_bytes =
+          result.raw_body ? result.raw_body->size() : result.body.dump().size();
       if (response_bytes > std::size_t{4} * 1024 * 1024)
         return {413, {{"error", "Response exceeds limit; request a smaller page"}}};
       return result;
@@ -89,13 +90,13 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
 
 void Api::record_request(std::string_view method, unsigned status,
                          std::chrono::steady_clock::duration duration) noexcept {
-  static constexpr std::array<std::string_view, 6> methods{"GET", "POST", "PUT", "DELETE",
-                                                           "PATCH", "OTHER"};
+  static constexpr std::array<std::string_view, 6> methods{"GET",    "POST",  "PUT",
+                                                           "DELETE", "PATCH", "OTHER"};
   const auto method_it = std::find(methods.begin(), methods.end(), method);
   const std::size_t method_index = method_it == methods.end()
                                        ? methods.size() - 1
                                        : static_cast<std::size_t>(method_it - methods.begin());
-  const std::size_t status_index = status >= 200 && status < 300 ? 0
+  const std::size_t status_index = status >= 200 && status < 300   ? 0
                                    : status >= 400 && status < 500 ? 1
                                    : status >= 500 && status < 600 ? 2
                                                                    : 3;
@@ -105,7 +106,7 @@ void Api::record_request(std::string_view method, unsigned status,
   request_duration_count_.fetch_add(1, std::memory_order_relaxed);
   request_duration_nanoseconds_.fetch_add(elapsed_ns, std::memory_order_relaxed);
   static constexpr std::array<std::uint64_t, 10> bounds_ns{
-      5000000, 10000000, 25000000, 50000000, 100000000,
+      5000000,   10000000,  25000000,   50000000,   100000000,
       250000000, 500000000, 1000000000, 2500000000, 5000000000};
   for (std::size_t index = 0; index < bounds_ns.size(); ++index)
     if (elapsed_ns <= bounds_ns[index])
@@ -113,14 +114,15 @@ void Api::record_request(std::string_view method, unsigned status,
 }
 
 std::string Api::prometheus_metrics() const {
-  static constexpr std::array<std::string_view, 6> methods{"GET", "POST", "PUT", "DELETE",
-                                                           "PATCH", "OTHER"};
+  static constexpr std::array<std::string_view, 6> methods{"GET",    "POST",  "PUT",
+                                                           "DELETE", "PATCH", "OTHER"};
   static constexpr std::array<std::string_view, 4> classes{"2xx", "4xx", "5xx", "other"};
   static constexpr std::array<std::string_view, 10> bucket_labels{
       "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5"};
   std::ostringstream output;
   output.imbue(std::locale::classic());
-  output << "# HELP laso_api_responses_total Completed API responses by bounded method and status class.\n"
+  output << "# HELP laso_api_responses_total Completed API responses by bounded method and status "
+            "class.\n"
          << "# TYPE laso_api_responses_total counter\n";
   for (std::size_t method = 0; method < methods.size(); ++method)
     for (std::size_t status = 0; status < classes.size(); ++status)

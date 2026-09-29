@@ -22,13 +22,17 @@ std::string session_stream_metrics(const HttpServerMetrics &metrics) {
          "# TYPE laso_session_sse_stream_limit gauge\nlaso_session_sse_stream_limit " +
          std::to_string(metrics.session_stream_limit) +
          "\n# HELP laso_session_sse_streams_accepted_total Accepted durable session SSE streams.\n"
-         "# TYPE laso_session_sse_streams_accepted_total counter\nlaso_session_sse_streams_accepted_total " +
+         "# TYPE laso_session_sse_streams_accepted_total "
+         "counter\nlaso_session_sse_streams_accepted_total " +
          std::to_string(metrics.accepted_session_streams) +
-         "\n# HELP laso_session_sse_streams_rejected_total Durable session SSE admission rejections.\n"
-         "# TYPE laso_session_sse_streams_rejected_total counter\nlaso_session_sse_streams_rejected_total " +
+         "\n# HELP laso_session_sse_streams_rejected_total Durable session SSE admission "
+         "rejections.\n"
+         "# TYPE laso_session_sse_streams_rejected_total "
+         "counter\nlaso_session_sse_streams_rejected_total " +
          std::to_string(metrics.rejected_session_streams) +
          "\n# HELP laso_session_sse_streams_closed_total Closed durable session SSE streams.\n"
-         "# TYPE laso_session_sse_streams_closed_total counter\nlaso_session_sse_streams_closed_total " +
+         "# TYPE laso_session_sse_streams_closed_total "
+         "counter\nlaso_session_sse_streams_closed_total " +
          std::to_string(metrics.closed_session_streams) + "\n";
 }
 } // namespace
@@ -235,11 +239,12 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
           },
           asio::use_awaitable);
       if (target == "/api/v1/metrics" && result.status == 200 && result.raw_body)
-        result.raw_body->append(session_stream_metrics(
-            {active_event_streams.load(std::memory_order_relaxed),
-             accepted_event_streams.load(std::memory_order_relaxed),
-             rejected_event_streams.load(std::memory_order_relaxed),
-             closed_event_streams.load(std::memory_order_relaxed), stream_options.max_session_streams}));
+        result.raw_body->append(
+            session_stream_metrics({active_event_streams.load(std::memory_order_relaxed),
+                                    accepted_event_streams.load(std::memory_order_relaxed),
+                                    rejected_event_streams.load(std::memory_order_relaxed),
+                                    closed_event_streams.load(std::memory_order_relaxed),
+                                    stream_options.max_session_streams}));
       http::response<http::string_body> response{static_cast<http::status>(result.status), 11};
       response.set(http::field::content_type, result.content_type);
       response.set(http::field::server, "LASO/0.1");

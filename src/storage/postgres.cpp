@@ -1291,7 +1291,8 @@ Json PostgresStorage::readiness_diagnostics() const {
     connection = impl_->pool->acquire(std::chrono::milliseconds(1000));
     pqxx::work transaction(connection.connection());
     transaction.exec("SET LOCAL statement_timeout = '1000ms'");
-    const auto migration = transaction.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations");
+    const auto migration =
+        transaction.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations");
     const auto schema_version = migration.empty() ? 0 : migration.front()[0].as<std::uint64_t>();
     transaction.commit();
     return {{"available", true},

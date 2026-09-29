@@ -193,14 +193,11 @@ PostgresConnectionPool::Lease PostgresConnectionPool::acquire() {
   return acquire(std::chrono::milliseconds(state_->options.acquisition_timeout_ms));
 }
 
-PostgresConnectionPool::Lease
-PostgresConnectionPool::acquire(std::chrono::milliseconds max_wait) {
+PostgresConnectionPool::Lease PostgresConnectionPool::acquire(std::chrono::milliseconds max_wait) {
   if (max_wait <= std::chrono::milliseconds::zero())
     throw Error(ErrorCode::Validation, "PostgreSQL pool wait must be positive");
-  const auto configured_timeout =
-      std::chrono::milliseconds(state_->options.acquisition_timeout_ms);
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::min(max_wait, configured_timeout);
+  const auto configured_timeout = std::chrono::milliseconds(state_->options.acquisition_timeout_ms);
+  const auto deadline = std::chrono::steady_clock::now() + std::min(max_wait, configured_timeout);
   std::unique_lock lock(state_->mutex);
   const auto ready = [&] {
     if (state_->shutting_down)
@@ -226,8 +223,7 @@ PostgresConnectionPool::acquire(std::chrono::milliseconds max_wait) {
             ++state_->acquisition_timeouts;
             throw Error(ErrorCode::Capacity, "PostgreSQL connection pool acquisition timed out");
           }
-          const auto remaining =
-              std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+          const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
           slot.connection = connect(state_, remaining);
         }
         slot.in_use = true;

@@ -13,7 +13,6 @@
 #include <laso/storage/coordination.hpp>
 #include <laso/storage/factory.hpp>
 #include <laso/workers/worker.hpp>
-#include <pqxx/pqxx>
 #include <mutex>
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
@@ -3432,15 +3431,17 @@ TEST(Api, PrometheusMetricsHaveBoundedLabelsAndOmitRequestData) {
   constexpr auto body_canary = "metric-body-canary";
   constexpr auto credential_canary = "metric-credential-canary";
   EXPECT_EQ(api.handle("GET", "/api/v1/unknown/metric-path-canary",
-                       Json{{"prompt", body_canary}}.dump(), credential_canary).status,
+                       Json{{"prompt", body_canary}}.dump(), credential_canary)
+                .status,
             404U);
   const auto metrics = api.handle("GET", "/api/v1/metrics", "");
   ASSERT_EQ(metrics.status, 200U);
   EXPECT_EQ(metrics.content_type, "text/plain; version=0.0.4; charset=utf-8");
   ASSERT_TRUE(metrics.raw_body.has_value());
   EXPECT_LT(metrics.raw_body->size(), 8192U);
-  EXPECT_NE(metrics.raw_body->find("laso_api_responses_total{method=\"GET\",status_class=\"4xx\"} 1"),
-            std::string::npos);
+  EXPECT_NE(
+      metrics.raw_body->find("laso_api_responses_total{method=\"GET\",status_class=\"4xx\"} 1"),
+      std::string::npos);
   EXPECT_NE(metrics.raw_body->find("laso_api_request_duration_seconds_bucket{le=\"+Inf\"} 1"),
             std::string::npos);
   EXPECT_EQ(metrics.raw_body->find(path_canary), std::string::npos);
