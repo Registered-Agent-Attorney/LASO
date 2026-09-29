@@ -28,7 +28,7 @@ jobs:
       matrix:
         compiler: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install distribution dependencies
         run: |
           sudo apt-get update
@@ -65,7 +65,7 @@ jobs:
       LASO_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
       LASO_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build libpq-dev libpqxx-dev libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev libcli11-dev libboost-system-dev libgtest-dev postgresql-client curl jq
@@ -97,7 +97,7 @@ jobs:
       LASO_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
       LASO_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install release-build dependencies
         run: |
           sudo apt-get update
@@ -137,7 +137,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git ca-certificates build-essential cmake ninja-build libpq-dev libpqxx-dev libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev libcli11-dev libboost-system-dev libgtest-dev postgresql-client curl jq
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLASO_ENABLE_SESSION_TEST_HOOKS=ON -DLASO_BUILD_CODEX_ADAPTER=ON
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
@@ -158,7 +158,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install PostgreSQL build dependencies
         run: |
           sudo apt-get update
@@ -202,7 +202,7 @@ jobs:
       LASO_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
       LASO_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=laso_test user=laso_ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install LASO and AWS SDK build dependencies
         run: |
           sudo apt-get update
