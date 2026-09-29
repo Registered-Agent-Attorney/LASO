@@ -1064,3 +1064,12 @@ start/stop transitions. This runs under the invoking account. The requested
 dedicated-account system-manager acceptance could not pass privileged host
 preflight, so no service account, system unit, StateDirectory, or installation
 was created. That system-unit sandbox remains unverified.
+
+A follow-up on an alternate authorized Ubuntu 24.04 host confirmed that the
+native system manager and tools were available and that a transient user-manager
+unit could run. The current public source also configured and built in a
+disposable directory. Privileged setup could not be authenticated for the
+dedicated-account system-unit test, so no system account, unit, service,
+StateDirectory, or system installation was created. Temporary source, build,
+and extracted package files were removed. This remains a preflight result, not a
+dedicated-account sandbox acceptance.

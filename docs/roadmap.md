@@ -157,14 +157,17 @@ bounded, metadata-safe operator views for the separate Web surface.
 
 ### M8.1 — separate LASO-Web operator/admin surface
 
-Status: complete on private Go LASO-Web-Internal main. A distinct `/admin`
-area provides sanitized operational metadata and narrowly scoped, confirmed
-actions; normal chat remains separate. Remote administration fails closed
-unless a deployment-owned trusted proxy supplies a trustworthy principal and
-role. Loopback development remains usable, and the Web application remains an
-API client and reverse-proxy. Trusted actor, action, resource, and outcome are
-written to structured Web service logs; durable actor propagation into Core
-remains follow-up work. Full OIDC/JWT integration is deferred.
+Status: complete in the separate Go LASO-Web service. A distinct `/admin`
+area provides sanitized, read-only operational metadata; normal chat remains
+separate. Operator and admin principals may read the surface, while ordinary
+users are denied. Admin mutations are withheld until LASO can durably attribute
+the authenticated human principal; privileged mutation requests return a stable
+`501` without reaching LASO. Remote administration fails closed unless a
+deployment-owned trusted proxy supplies a trustworthy principal and role from a
+configured direct peer. Explicit loopback development remains available, and
+the Web application remains an API client and reverse-proxy. No durable Core
+actor record or action audit is claimed. Durable actor propagation and full
+OIDC/JWT integration remain follow-up work.
 
 The operator contract excludes prompts, message bodies, provider-native
 session IDs, credentials, DSNs, absolute sensitive paths, and arbitrary
