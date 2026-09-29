@@ -714,20 +714,22 @@ Json operator_node_work_summary(const NodeWork &work) {
           {"error", work.error},
           {"result_present", work.result.has_value()}};
 }
+std::string safe_error_summary(std::string error);
 Json operator_attempt_summary(const Json &value) {
   const auto attempt = value.get<NodeExecution>();
-  return {{"id", attempt.id},
-          {"run_id", attempt.run_id},
-          {"node_id", attempt.node_id},
-          {"attempt", attempt.attempt},
-          {"state", attempt.state},
-          {"started_at", attempt.started_at},
-          {"finished_at", attempt.finished_at},
-          {"duration_ms", attempt.duration_ms},
-          {"error", attempt.error},
-          {"worker_job_id", attempt.worker_job_id},
-          {"worker_id", attempt.worker_id},
-          {"external_job_id", attempt.external_job_id}};
+  Json summary = {{"id", attempt.id},
+                  {"run_id", attempt.run_id},
+                  {"node_id", attempt.node_id},
+                  {"attempt", attempt.attempt},
+                  {"state", attempt.state},
+                  {"started_at", attempt.started_at},
+                  {"finished_at", attempt.finished_at},
+                  {"duration_ms", attempt.duration_ms},
+                  {"worker_job_id", attempt.worker_job_id},
+                  {"worker_id", attempt.worker_id}};
+  if (!attempt.error.empty())
+    summary["error_summary"] = safe_error_summary(attempt.error);
+  return summary;
 }
 Json operator_worker_job_summary(const Json &value) {
   const auto job = value.get<WorkerJob>();
@@ -767,7 +769,6 @@ Json operator_artifact_summary(const Json &value) {
                  {"name_present", !artifact.name.empty()},
                  {"media_type", artifact.media_type},
                  {"created_at", artifact.created_at},
-                 {"object_id", artifact.object_id},
                  {"sha256", artifact.sha256},
                  {"size", artifact.size},
                  {"location_present", !artifact.location.empty()}};
@@ -1001,6 +1002,9 @@ Json Service::operator_page(const std::string &resource, std::size_t limit, std:
         summary["usage"].erase(key);
       result.push_back(std::move(summary));
     }
+  } else if (resource == "attempts") {
+    for (const auto &value : storage_->list(RecordKind::Attempt, "", limit, offset))
+      result.push_back(operator_attempt_summary(value));
   } else if (resource == "artifacts") {
     for (const auto &value : storage_->list(RecordKind::Artifact, "", limit, offset))
       result.push_back(operator_artifact_summary(value));

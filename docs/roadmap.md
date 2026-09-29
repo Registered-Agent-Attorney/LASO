@@ -202,7 +202,7 @@ M9 follows the merged M8 operator/API work. The feature-gap audit found that
 LASO-Web already has loopback-only runtime diagnostics and separate liveness /
 readiness routes, while LASO Core exposed only process liveness and an
 in-process SSE counter snapshot. M9.1 adds a Core readiness signal for
-PostgreSQL/schema compatibility and runtime drain state, plus an authorization-aware,
+PostgreSQL/schema compatibility and runtime shutdown state, plus an authorization-aware,
 low-cardinality Prometheus endpoint for API request latency/outcomes and
 session-SSE admission. It does not claim provider, artifact backend, or worker
 health through readiness, and it is not a complete tracing/metrics system.

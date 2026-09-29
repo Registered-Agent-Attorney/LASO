@@ -3446,6 +3446,19 @@ TEST(Api, PrometheusMetricsHaveBoundedLabelsAndOmitRequestData) {
       std::string::npos);
   EXPECT_NE(metrics.raw_body->find("laso_api_request_duration_seconds_bucket{le=\"+Inf\"} 1"),
             std::string::npos);
+  std::uint64_t previous_bucket = 0;
+  for (const auto bound :
+       {"0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5"}) {
+    const auto marker =
+        std::string("laso_api_request_duration_seconds_bucket{le=\"") + bound + "\"} ";
+    const auto position = metrics.raw_body->find(marker);
+    ASSERT_NE(position, std::string::npos);
+    const auto value_start = position + marker.size();
+    const auto value_end = metrics.raw_body->find('\n', value_start);
+    const auto bucket = std::stoull(metrics.raw_body->substr(value_start, value_end - value_start));
+    EXPECT_GE(bucket, previous_bucket) << "histogram buckets must be cumulative at " << bound;
+    previous_bucket = bucket;
+  }
   EXPECT_EQ(metrics.raw_body->find(path_canary), std::string::npos);
   EXPECT_EQ(metrics.raw_body->find(body_canary), std::string::npos);
   EXPECT_EQ(metrics.raw_body->find(credential_canary), std::string::npos);
@@ -4480,6 +4493,15 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   run.error = error_secret;
   storage->commit({{RecordKind::Run, run.id, run.id, Json(run)}});
 
+  NodeExecution attempt;
+  attempt.id = "operator-attempt";
+  attempt.run_id = run.id;
+  attempt.node_id = "operator-node";
+  attempt.state = NodeState::Failed;
+  attempt.error = error_secret;
+  attempt.external_job_id = "fixture-canary-provider-handle";
+  storage->commit({{RecordKind::Attempt, attempt.id, run.id, Json(attempt)}});
+
   WorkerJob job;
   job.id = "operator-worker-job";
   job.run_id = run.id;
@@ -4496,7 +4518,7 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   artifact.id = "operator-artifact";
   artifact.name = artifact_secret;
   artifact.location = "/private/operator/artifact";
-  artifact.object_id = "sha256:operator-object";
+  artifact.object_id = "/private/operator/object/path-canary";
   artifact.sha256 = "operator-sha256";
   artifact.metadata = {{"private", artifact_secret},
                        {"attempt_id", "operator-attempt"},
@@ -4537,6 +4559,9 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_EQ(status.body.at("storage").at("schema_state"), "current");
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/runs?limit=1&offset=0", "").status, 200U);
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/runs?limit=101", "").status, 400U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/attempts?limit=1000000000000", "").status, 400U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/attempts?after=1", "").status, 400U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/status?limit=1", "").status, 400U);
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/unknown", "").status, 404U);
   EXPECT_EQ(api.handle("POST", "/api/v1/operator/status", "{}").status, 405U);
 
@@ -4549,11 +4574,19 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   ASSERT_EQ(turns.body.size(), 1U);
   EXPECT_TRUE(turns.body[0].at("input_present"));
   EXPECT_EQ(turns.body[0].size(), 7U);
+  const auto attempts = api.handle("GET", "/api/v1/operator/attempts?limit=1&offset=0", "");
+  ASSERT_EQ(attempts.status, 200U);
+  ASSERT_EQ(attempts.body.size(), 1U);
+  EXPECT_FALSE(attempts.body[0].contains("external_job_id"));
+  EXPECT_TRUE(attempts.body[0].contains("error_summary"));
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/attempts?limit=1&offset=1", "").body.size(), 0U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/attempts?limit=0", "").status, 400U);
   const auto artifacts = api.handle("GET", "/api/v1/operator/artifacts", "");
   ASSERT_EQ(artifacts.status, 200U);
   ASSERT_EQ(artifacts.body.size(), 1U);
   EXPECT_FALSE(artifacts.body[0].contains("name"));
   EXPECT_FALSE(artifacts.body[0].contains("location"));
+  EXPECT_FALSE(artifacts.body[0].contains("object_id"));
   EXPECT_TRUE(artifacts.body[0].contains("metadata"));
   const auto integrity = api.handle("GET", "/api/v1/operator/artifacts/integrity", "");
   ASSERT_EQ(integrity.status, 200U);
@@ -4595,12 +4628,13 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_TRUE(providers.body[0].contains("capability_count"));
 
   const auto all_responses = status.body.dump() + runs.body.dump() + turns.body.dump() +
-                             artifacts.body.dump() + integrity.body.dump() + requests.body.dump() +
-                             jobs.body.dump() + providers.body.dump();
+                             attempts.body.dump() + artifacts.body.dump() + integrity.body.dump() +
+                             requests.body.dump() + jobs.body.dump() + providers.body.dump();
   EXPECT_EQ(all_responses.find(prompt_secret), std::string::npos);
   EXPECT_EQ(all_responses.find("operator-private-idempotency-key"), std::string::npos);
   EXPECT_EQ(all_responses.find(error_secret), std::string::npos);
   EXPECT_EQ(all_responses.find(artifact_secret), std::string::npos);
+  EXPECT_EQ(all_responses.find("/private/operator/object/path-canary"), std::string::npos);
   EXPECT_EQ(all_responses.find(request_secret), std::string::npos);
   EXPECT_EQ(all_responses.find("fixture-canary-provider-handle"), std::string::npos);
   EXPECT_EQ(all_responses.find("fixture-canary-worker-result"), std::string::npos);
@@ -4622,4 +4656,5 @@ TEST(Api, OperatorViewsRespectIdentityAuthorization) {
   Api api(service, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/status", "").status, 403U);
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/runs", "").status, 403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/attempts", "").status, 403U);
 }

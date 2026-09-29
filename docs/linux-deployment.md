@@ -55,7 +55,7 @@ journalctl -u laso --since today
 
 The compatibility `/api/v1/health` route is a process liveness check.
 `/api/v1/health/ready` reports PostgreSQL availability, schema compatibility,
-and runtime drain state for a supervisor or proxy to use in routing decisions;
+and runtime shutdown state for a supervisor or proxy to use in routing decisions;
 it does not itself gate normal API requests. Prometheus-compatible
 metrics are available at `/api/v1/metrics`; the route uses the configured API
 identity authorization and must stay on a private or deployment-authenticated

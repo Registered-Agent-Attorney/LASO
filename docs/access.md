@@ -35,7 +35,7 @@ authentication and authorization boundary before exposing operator data/actions.
 | GET | `/sessions/{id}`, `/sessions/{id}/turns`, `/sessions/{id}/events`, `/sessions/{id}/events/stream` |
 | POST | `/sessions/{id}/turns`, `/sessions/{id}/close` |
 | GET | `/operator/status`, `/operator/artifacts/integrity` |
-| GET | `/operator/runs`, `/operator/node-work`, `/operator/worker-jobs`, `/operator/artifacts`, `/operator/sessions`, `/operator/approvals`, `/operator/worker-requests`, `/operator/providers`, `/operator/plugins`, `/operator/workers`, `/operator/instances`, `/operator/leases` |
+| GET | `/operator/runs`, `/operator/node-work`, `/operator/worker-jobs`, `/operator/attempts`, `/operator/artifacts`, `/operator/sessions`, `/operator/approvals`, `/operator/worker-requests`, `/operator/providers`, `/operator/plugins`, `/operator/workers`, `/operator/instances`, `/operator/leases` |
 | GET | `/operator/sessions/{id}/turns` |
 
 All paths above are relative to `/api/v1`. Creation/decisions return 201/202; callers
@@ -46,9 +46,16 @@ connection, with 15-second I/O deadlines. Malformed/oversized HTTP transport inp
 closes the connection. List endpoints accept `?limit=50&offset=0`; limits are
 1..100, default 50. Responses are capped at 4 MiB; reduce the page size for large
 stored messages. The C++ storage interface also supports bounded pagination.
+The shipped `laso-server` currently uses an unauthenticated local-development
+identity. Enabling `allow_remote_api` changes the bind policy only; it does not
+install authentication. Keep the Core API loopback-bound or protect it with an
+independent deployment-owned authentication and authorization boundary.
+
 The operator endpoints use the same `IdentityProvider` authorization boundary as
 the rest of the API. Their list responses are paged and omit prompt/input bodies,
 provider-native continuation values, arbitrary metadata, DSNs, and artifact paths.
+Artifact object-store keys are withheld; content digests remain available for
+integrity comparison.
 Artifact integrity returns counts and a bounded status only; it never returns
 filesystem locations or raw error text. The operator scan examines at most ten
 filesystem/metadata entries and verifies at most 16 MiB of local object data per
@@ -59,7 +66,7 @@ bodies; the local CLI integrity command performs full content verification.
 
 `/health` remains the compatibility liveness route; `/health/live` names the
 same process-only check explicitly. `/health/ready` returns `200` only when the
-PostgreSQL storage/schema check succeeds and the runtime is not draining. It
+PostgreSQL storage/schema check succeeds and the runtime has not begun shutdown. It
 returns `503` with bounded `storage`, `schema`, and `runtime` states otherwise.
 Readiness does not probe every provider or artifact operation, and configured
 admission limits do not mark the instance unready. It is a signal for a
