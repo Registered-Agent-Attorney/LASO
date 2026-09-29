@@ -22,8 +22,8 @@ void validate_ttl(std::uint64_t ttl_ms) {
 }
 
 void validate_instance_state(const std::string &state) {
-  if (state != "STARTING" && state != "ACTIVE" && state != "DRAINING" && state != "STOPPED" &&
-      state != "STALE")
+  if (state != "STARTING" && state != "ACTIVE" && state != "DRAINING" && state != "DRAINED" &&
+      state != "MAINTENANCE" && state != "STOPPED" && state != "STALE")
     throw Error(ErrorCode::Validation, "Invalid LASO instance state");
 }
 
@@ -93,6 +93,15 @@ public:
     auto lease = pool_.acquire();
     try {
       pqxx::work tx(lease.connection());
+      // The registry row lock serializes ownership acquisition with a drain
+      // transition. Once DRAINING commits, this instance cannot acquire leases.
+      const auto instance = tx.exec_params(
+          "SELECT state FROM laso_instances WHERE instance_id = $1 FOR SHARE", owner_);
+      if (instance.empty() || std::string(instance.front()[0].c_str()) != "ACTIVE") {
+        tx.commit();
+        ++acquisition_failures_;
+        return std::nullopt;
+      }
       const auto result = tx.exec_params(
           "INSERT INTO laso_coordination_leases "
           "(resource_key, owner_instance, fencing_token, acquired_at, heartbeat_at, expires_at) "
@@ -256,8 +265,9 @@ public:
     return result;
   }
 
-  void register_instance(const std::string &software_version,
-                         const std::string &capabilities) override {
+  void register_instance(const std::string &software_version, const std::string &capabilities,
+                         const std::string &state) override {
+    validate_instance_state(state);
     if (software_version.size() > 128 || capabilities.size() > 4096)
       throw Error(ErrorCode::Validation, "LASO instance metadata exceeds limits");
     auto lease = pool_.acquire();
@@ -266,11 +276,11 @@ public:
       tx.exec_params(
           "INSERT INTO laso_instances (instance_id, started_at, last_heartbeat_at, "
           "software_version, capabilities, state) VALUES ($1, clock_timestamp(), "
-          "clock_timestamp(), $2, $3, 'ACTIVE') ON CONFLICT (instance_id) DO UPDATE SET "
+          "clock_timestamp(), $2, $3, $4) ON CONFLICT (instance_id) DO UPDATE SET "
           "started_at = EXCLUDED.started_at, last_heartbeat_at = EXCLUDED.last_heartbeat_at, "
           "software_version = EXCLUDED.software_version, capabilities = EXCLUDED.capabilities, "
-          "state = 'ACTIVE'",
-          owner_, software_version, capabilities);
+          "state = EXCLUDED.state",
+          owner_, software_version, capabilities, state);
       tx.commit();
     } catch (const pqxx::sql_error &error) {
       translate_sql(error);
@@ -360,6 +370,36 @@ public:
       throw;
     } catch (const std::exception &) {
       throw Error(ErrorCode::Storage, "Instance listing failed");
+    }
+  }
+
+  std::optional<InstanceRecord> current_instance(std::uint64_t stale_after_ms) const override {
+    if (stale_after_ms > 86400000)
+      throw Error(ErrorCode::Validation, "Invalid instance stale interval");
+    auto lease = pool_.acquire();
+    try {
+      pqxx::work tx(lease.connection());
+      const auto result = tx.exec_params(
+          "SELECT instance_id, started_at, last_heartbeat_at, software_version, capabilities, "
+          "CASE WHEN $2::bigint > 0 AND last_heartbeat_at + ($2::double precision * "
+          "interval '1 millisecond') <= clock_timestamp() THEN 'STALE' ELSE state END "
+          "FROM laso_instances WHERE instance_id = $1",
+          owner_, stale_after_ms);
+      tx.commit();
+      if (result.empty())
+        return std::nullopt;
+      const auto &row = result.front();
+      return InstanceRecord{row[0].c_str(), row[1].c_str(), row[2].c_str(),
+                            row[3].c_str(), row[4].c_str(), row[5].c_str()};
+    } catch (const pqxx::sql_error &error) {
+      translate_sql(error);
+    } catch (const pqxx::broken_connection &) {
+      lease.mark_broken();
+      translate_connection();
+    } catch (const Error &) {
+      throw;
+    } catch (const std::exception &) {
+      throw Error(ErrorCode::Storage, "Instance status query failed");
     }
   }
 

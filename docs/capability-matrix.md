@@ -17,7 +17,8 @@ successful local unit test does not imply support in every backend mode.
 | Large artifact transport | Local filesystem by default; optional S3 build | Shared filesystem, authenticated gateway, or optional S3-compatible store; objects remain bounded and content-addressed |
 | Arbitrary remote tools | Not supported | Not supported |
 | PostgreSQL/schema readiness probe | Supported | Supported |
-| Prometheus API/SSE metrics | Supported; same API authorization boundary | Supported; same API authorization boundary |
+| Prometheus API/SSE and maintenance metrics | Supported; same API authorization boundary | Supported; same API authorization boundary |
+| Coordinated drain / maintenance | Supported; local intent and safe-stop status | Supported; PostgreSQL registry blocks new ownership and preserves lease fencing |
 
 LASO provides at-least-once attempt semantics with one authoritative fenced
 completion. It does not claim exactly-once execution. Remote side effects,

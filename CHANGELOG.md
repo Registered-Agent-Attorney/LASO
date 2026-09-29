@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add coordinated instance drain and maintenance control with admission and
+  ownership-claim gating, readiness integration, bounded maintenance metrics,
+  local actor-attributed transition history, and restart/rolling-operation
+  guidance. Drain preserves normal lease renewal and stale-fence rejection; it
+  does not claim zero-downtime operation. See `docs/maintenance.md`.
 - Add `/api/v1/health/ready` with bounded PostgreSQL, schema, and runtime-drain
   status while preserving `/api/v1/health` as the compatibility liveness route.
 - Add authorization-aware Prometheus text metrics for bounded API request

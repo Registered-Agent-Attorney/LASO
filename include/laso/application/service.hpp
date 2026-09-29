@@ -9,6 +9,7 @@
 #include <laso/storage/coordination.hpp>
 #include <laso/storage/factory.hpp>
 #include <laso/workers/process_transport.hpp>
+#include <mutex>
 
 namespace laso {
 class Service {
@@ -59,6 +60,11 @@ public:
   Json artifact_gc(bool dry_run, std::uint64_t grace_seconds = 0);
   Json operator_status() const;
   Json readiness() const;
+  Json operator_maintenance() const;
+  Json maintenance_metrics() const;
+  void request_drain(const Actor &actor);
+  void resume_instance(const Actor &actor);
+  void enter_maintenance(const Actor &actor);
   Json operator_artifact_integrity() const;
   Json operator_page(const std::string &resource, std::size_t limit = 50, std::size_t offset = 0,
                      const std::string &parent_id = "") const;
@@ -125,6 +131,11 @@ public:
 private:
   Config config_;
   std::string instance_id_;
+  std::filesystem::path maintenance_state_path_;
+  mutable std::mutex maintenance_mutex_;
+  MaintenanceMode maintenance_mode_ = MaintenanceMode::Active;
+  std::string maintenance_started_at_, maintenance_actor_;
+  std::vector<Json> operator_events_;
   std::unique_ptr<Storage> storage_;
   std::unique_ptr<Coordination> coordination_;
   InProcessEventBus events_;
@@ -147,5 +158,12 @@ private:
   Json pipeline_record(const std::string &reference) const;
   PipelineDefinition resolve_pipeline(const std::string &reference) const;
   void recover_history();
+  void load_maintenance_state();
+  void persist_maintenance_state(MaintenanceMode mode, const std::string &started_at,
+                                 const std::string &actor, Json event);
+  void require_operator_actor(const Actor &actor) const;
+  void sync_maintenance_registry(const std::string &state, const Actor &actor,
+                                 const std::string &action, const std::string &from,
+                                 const std::string &to);
 };
 } // namespace laso

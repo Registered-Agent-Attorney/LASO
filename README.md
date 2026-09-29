@@ -157,20 +157,22 @@ curl -fsS -X POST http://127.0.0.1:8080/api/v1/pipelines/hello@1/runs \
   -H 'Content-Type: application/json' -d '{"input":{"value":42}}'
 ```
 
-Development identity is unauthenticated and bound to `127.0.0.1:8080`. Remote
-binding requires deliberate `allow_remote_api` configuration, but that setting
-only changes the bind policy: the shipped server still uses the unauthenticated
-local-development identity. Keep the Core API private behind an independently
-authenticated and authorized proxy, or embed LASO with a deployment-owned
-`IdentityProvider`. The API never accepts filesystem paths for pipeline
-registration.
+The default development identity is unauthenticated and bound to
+`127.0.0.1:8080`. Remote binding requires `allow_remote_api` configuration and
+`LASO_API_GATEWAY_TOKEN`; this selects Core's provider-neutral trusted-gateway
+identity, which requires a bearer service credential and bounded principal and
+role headers (`user`, `operator`, or `admin`). Core does not verify the proxy's
+network peer, so restrict direct access to the trusted gateway and protect the
+service credential. The gateway still owns user authentication, or embedders may
+provide a deployment-owned `IdentityProvider`. The API never accepts filesystem
+paths for pipeline registration.
 [API and CLI reference](docs/access.md) lists all endpoints and commands. The
-readiness route checks PostgreSQL/schema compatibility and runtime shutdown state;
+readiness route checks PostgreSQL/schema compatibility, runtime shutdown, and maintenance state;
 the Prometheus metrics route uses the same API authorization boundary and should
 remain on a private or deployment-authenticated scrape path. The [session SSE
 contract](docs/session-sse.md) documents stream admission, `Retry-After`,
 heartbeat, and replay behavior. See [readiness and metrics](docs/observability.md)
-for probe semantics and the exported metric set.
+for probe semantics and the exported metric set. The [coordinated drain guide](docs/maintenance.md) documents instance maintenance, readiness, and restart safety.
 
 ## Native plugins
 

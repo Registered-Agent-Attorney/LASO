@@ -15,12 +15,14 @@ struct ApiResponse {
   Json body = Json::object();
   std::string content_type = "application/json";
   std::optional<std::string> raw_body = std::nullopt;
+  std::optional<unsigned> retry_after = std::nullopt;
 };
 class Api {
 public:
   Api(Service &service, IdentityProvider &identity) : service_(service), identity_(identity) {}
   ApiResponse handle(const std::string &method, const std::string &target, const std::string &body,
-                     const std::string &credential = "") noexcept;
+                     const std::string &credential = "", const std::string &principal = "",
+                     const std::string &role = "") noexcept;
 
 private:
   Service &service_;

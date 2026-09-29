@@ -34,7 +34,8 @@ enum class ErrorCode {
   Cancellation,
   NotFound,
   Conflict,
-  Capacity
+  Capacity,
+  Unavailable
 };
 class Error : public std::runtime_error {
 public:

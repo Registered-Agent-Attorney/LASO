@@ -71,6 +71,54 @@ struct IsolatedSchema {
 };
 } // namespace
 
+TEST(DistributedExecution, DrainFailsClosedWhenPostgresCannotMarkRegistry) {
+  IsolatedSchema database;
+  TemporaryDirectory data;
+  asio::io_context io;
+  Config options = config(data.path);
+  options.postgres_dsn = database.dsn;
+  options.postgres_schema = database.schema;
+  options.execution_mode = "multi_instance";
+  options.validate();
+  Service service(io, options);
+
+  {
+    pqxx::connection connection(database.dsn);
+    pqxx::work transaction(connection);
+    transaction.exec("CREATE FUNCTION \"" + database.schema +
+                     "\".reject_drain_state() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                     "BEGIN IF NEW.state = 'DRAINING' THEN "
+                     "RAISE EXCEPTION 'test coordination update unavailable'; "
+                     "END IF; RETURN NEW; END; $$");
+    transaction.exec("CREATE TRIGGER reject_drain_state BEFORE UPDATE ON \"" + database.schema +
+                     "\".laso_instances FOR EACH ROW "
+                     "EXECUTE FUNCTION \"" +
+                     database.schema + "\".reject_drain_state()");
+    transaction.commit();
+  }
+  const Actor actor{"maintenance-operator", true, "operator"};
+  try {
+    service.request_drain(actor);
+    FAIL() << "drain unexpectedly reported success without the coordination registry";
+  } catch (const Error &error) {
+    EXPECT_EQ(error.code, ErrorCode::Storage);
+  }
+  const auto state = service.operator_maintenance();
+  EXPECT_EQ(state.at("desired_state"), "draining");
+  EXPECT_EQ(state.at("cluster_state"), "ACTIVE");
+  EXPECT_TRUE(state.at("cluster_visible"));
+  EXPECT_FALSE(state.at("safe_to_stop"));
+  std::ifstream input(data.path / "operator-maintenance.json");
+  ASSERT_TRUE(input.good());
+  EXPECT_EQ(Json::parse(input).at("state"), "draining");
+  try {
+    (void)service.create_session("not-registered@1");
+    FAIL() << "new session admission succeeded after a failed drain coordination update";
+  } catch (const Error &error) {
+    EXPECT_EQ(error.code, ErrorCode::Unavailable);
+  }
+}
+
 TEST(DistributedExecution, TwoServicesSharePostgresAndOneCompletesQueuedRun) {
   IsolatedSchema database;
   TemporaryDirectory first_data;
@@ -124,6 +172,194 @@ edges:
   EXPECT_FALSE(result.owner_instance_id.empty());
   EXPECT_EQ(result.pipeline_version, 1U);
   EXPECT_EQ(result.message.payload, Json({{"value", "shared"}}));
+}
+
+TEST(DistributedExecution, CoordinatedDrainFinishesOwnedWorkAndStopsNewClaims) {
+  IsolatedSchema database;
+  TemporaryDirectory first_data;
+  TemporaryDirectory second_data;
+  Config first = config(first_data.path);
+  first.postgres_dsn = database.dsn;
+  first.postgres_schema = database.schema;
+  first.execution_mode = "multi_instance";
+  first.max_runs = 4;
+  first.coordination_lease_ttl_ms = 3000;
+  first.coordination_heartbeat_interval_ms = 250;
+  first.validate();
+  auto second = first;
+  second.data_dir = second_data.path;
+
+  Executor first_executor(first.workers), second_executor(second.workers);
+  Service first_service(first_executor.context(), first);
+  Service second_service(second_executor.context(), second);
+  std::atomic<unsigned> executions{0};
+  auto delay = std::make_shared<Function>(
+      [&executions](ExecutionContext &context, const Json &input) -> Task<Json> {
+        executions.fetch_add(1, std::memory_order_relaxed);
+        co_await context.delay(Milliseconds{700});
+        co_return input;
+      });
+  first_service.functions().add("m10_drain_delay", delay);
+  second_service.functions().add("m10_drain_delay", delay);
+  const auto pipeline = R"yaml(
+laso: '1'
+name: m10-drain
+version: 1
+nodes:
+  input: {type: input}
+  hold: {type: function, function: m10_drain_delay}
+  output: {type: output}
+edges:
+  - {from: input, to: hold}
+  - {from: hold, to: output}
+)yaml";
+  first_service.register_pipeline(pipeline);
+  second_service.register_pipeline(pipeline);
+  const auto child_pipeline = R"yaml(
+laso: '1'
+name: m10-drain-child
+version: 1
+nodes:
+  input: {type: input}
+  hold: {type: function, function: m10_drain_delay}
+  output: {type: output}
+edges:
+  - {from: input, to: hold}
+  - {from: hold, to: output}
+)yaml";
+  first_service.register_pipeline(child_pipeline);
+  second_service.register_pipeline(child_pipeline);
+  const auto parent_pipeline = R"yaml(
+laso: '1'
+name: m10-drain-parent
+version: 1
+nodes:
+  input: {type: input}
+  hold: {type: function, function: m10_drain_delay}
+  child: {type: subpipeline, pipeline: m10-drain-child@1}
+  output: {type: output}
+edges:
+  - {from: input, to: hold}
+  - {from: hold, to: child}
+  - {from: child, to: output}
+)yaml";
+  first_service.register_pipeline(parent_pipeline);
+  second_service.register_pipeline(parent_pipeline);
+  first_executor.start();
+  const auto owned_run_id = first_service.start("m10-drain-parent@1", Json{{"value", "owned"}});
+  laso::Run owned;
+  for (unsigned attempt = 0; attempt < 300; ++attempt) {
+    owned = first_service.get(RecordKind::Run, owned_run_id).get<laso::Run>();
+    if (owned.owner_instance_id == first_service.instance_id() &&
+        owned.state == RunState::Running && owned.active_node == "hold")
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(owned.owner_instance_id, first_service.instance_id());
+  ASSERT_EQ(owned.state, RunState::Running);
+  second_executor.start();
+  const Actor operator_actor{"m10-operator", true, "operator"};
+  first_service.request_drain(operator_actor);
+  const auto draining_status = first_service.operator_maintenance();
+  EXPECT_EQ(draining_status.at("state"), "draining");
+  EXPECT_FALSE(draining_status.at("safe_to_stop"));
+  EXPECT_THROW(first_service.start("m10-drain@1", Json{{"value", "rejected"}}), Error);
+
+  const auto other_run_id = second_service.start("m10-drain@1", Json{{"value", "other"}});
+  laso::Run owned_result, other_result;
+  for (unsigned attempt = 0; attempt < 500; ++attempt) {
+    owned_result = first_service.get(RecordKind::Run, owned_run_id).get<laso::Run>();
+    other_result = second_service.get(RecordKind::Run, other_run_id).get<laso::Run>();
+    if (terminal(owned_result.state) && terminal(other_result.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(owned_result.state, RunState::Completed);
+  ASSERT_EQ(other_result.state, RunState::Completed);
+  EXPECT_FALSE(owned_result.owner_instance_id.empty());
+  EXPECT_EQ(other_result.owner_instance_id, second_service.instance_id());
+  ASSERT_EQ(owned_result.child_runs.size(), 1U);
+  EXPECT_EQ(
+      first_service.get(RecordKind::Run, owned_result.child_runs.front()).get<laso::Run>().state,
+      RunState::Completed);
+  EXPECT_EQ(executions.load(), 3U);
+  EXPECT_EQ(first_service.operator_maintenance().at("state"), "drained");
+  EXPECT_TRUE(first_service.operator_maintenance().at("safe_to_stop"));
+
+  second_service.request_drain(operator_actor);
+  first_service.resume_instance(operator_actor);
+  const auto resumed_id = first_service.start("m10-drain@1", Json{{"value", "resumed"}});
+  laso::Run resumed;
+  for (unsigned attempt = 0; attempt < 300; ++attempt) {
+    resumed = first_service.get(RecordKind::Run, resumed_id).get<laso::Run>();
+    if (terminal(resumed.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(resumed.state, RunState::Completed);
+  EXPECT_EQ(resumed.owner_instance_id, first_service.instance_id());
+  EXPECT_EQ(executions.load(), 4U);
+  second_service.resume_instance(operator_actor);
+  first_service.shutdown();
+  second_service.shutdown();
+  first_executor.join();
+  second_executor.join();
+}
+
+TEST(DistributedExecution, MaintenanceIntentSurvivesInstanceRestart) {
+  IsolatedSchema database;
+  TemporaryDirectory data;
+  Config options = config(data.path);
+  options.postgres_dsn = database.dsn;
+  options.postgres_schema = database.schema;
+  options.execution_mode = "multi_instance";
+  options.coordination_heartbeat_interval_ms = 100;
+  options.coordination_lease_ttl_ms = 1000;
+  options.validate();
+  const Actor operator_actor{"restart-operator", true, "operator"};
+  const auto pipeline = R"yaml(
+laso: '1'
+name: m10-restart
+version: 1
+nodes:
+  input: {type: input}
+  output: {type: output}
+edges:
+  - {from: input, to: output}
+)yaml";
+
+  {
+    Executor executor(options.workers);
+    Service service(executor.context(), options);
+    service.register_pipeline(pipeline);
+    executor.start();
+    service.request_drain(operator_actor);
+    const auto state = service.operator_maintenance();
+    ASSERT_EQ(state.at("state"), "drained");
+    ASSERT_TRUE(state.at("safe_to_stop"));
+    service.shutdown();
+    executor.join();
+  }
+
+  {
+    Executor executor(options.workers);
+    Service restarted(executor.context(), options);
+    executor.start();
+    const auto state = restarted.operator_maintenance();
+    EXPECT_EQ(state.at("desired_state"), "draining");
+    EXPECT_EQ(state.at("state"), "drained");
+    EXPECT_EQ(state.at("cluster_state"), "DRAINING");
+    EXPECT_TRUE(state.at("safe_to_stop"));
+    EXPECT_EQ(restarted.readiness().at("status"), "not_ready");
+    EXPECT_THROW(restarted.create_session("m10-restart@1"), Error);
+
+    restarted.resume_instance(operator_actor);
+    EXPECT_EQ(restarted.operator_maintenance().at("state"), "active");
+    EXPECT_EQ(restarted.readiness().at("status"), "ready");
+    EXPECT_NO_THROW(restarted.create_session("m10-restart@1"));
+    restarted.shutdown();
+    executor.join();
+  }
 }
 
 TEST(DistributedExecution, ShortLeaseRenewsDuringLongAsyncWork) {
@@ -1184,6 +1420,8 @@ TEST(DistributedExecution, StaleNodeCompletionIsRejectedByFencing) {
   coordination_options.postgres_schema = database.schema;
   auto first = create_coordination(coordination_options, "stale-first");
   auto second = create_coordination(coordination_options, "stale-second");
+  first->register_instance("test", "test");
+  second->register_instance("test", "test");
   NodeWork work;
   work.id = "stale-node-work";
   work.run_id = "run-1";

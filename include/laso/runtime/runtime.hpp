@@ -43,6 +43,7 @@ struct RuntimeDependencies {
   std::string instance_id;
   std::filesystem::path workspace_root;
 };
+enum class MaintenanceMode : unsigned char { Active, Draining, Maintenance };
 struct RuntimeDiagnostics {
   std::size_t active_runs = 0;
   std::size_t active_nodes = 0;
@@ -67,6 +68,20 @@ public:
   void shutdown();
   bool idle() const;
   RuntimeDiagnostics diagnostics() const;
+  using AdmissionGuard = std::unique_lock<std::recursive_mutex>;
+  AdmissionGuard admission_guard() const {
+    return AdmissionGuard(admission_mutex_);
+  }
+  void set_maintenance_mode(MaintenanceMode mode) {
+    std::lock_guard<std::recursive_mutex> guard(admission_mutex_);
+    maintenance_mode_.store(mode, std::memory_order_release);
+  }
+  MaintenanceMode maintenance_mode() const noexcept {
+    return maintenance_mode_.load(std::memory_order_acquire);
+  }
+  bool accepts_new_work() const noexcept {
+    return maintenance_mode() == MaintenanceMode::Active;
+  }
   void start_distributed();
   void dispatch_session(const std::string &session_id);
 #ifdef LASO_ENABLE_SESSION_TEST_HOOKS
@@ -96,6 +111,8 @@ private:
   std::map<std::string, ActiveRun> active_;
   std::map<std::string, ActiveNode> active_nodes_;
   std::stop_source context_reduction_stop_;
+  mutable std::recursive_mutex admission_mutex_;
+  std::atomic<MaintenanceMode> maintenance_mode_{MaintenanceMode::Active};
   bool stopping_ = false;
   bool distributed_started_ = false;
 #ifdef LASO_ENABLE_SESSION_TEST_HOOKS

@@ -6,11 +6,19 @@ bodies, `/api/v1`, and loopback port 8080 by default. Registration accepts
 `{"yaml":"..."}`; run creation accepts
 `{"input":{...}}`. Approval accepts
 `{"comment":"..."}`. Actor identity comes from the identity provider rather than
-an arbitrary request-body actor. The shipped server uses unauthenticated local
-development identity; LASO core has no built-in user authentication platform.
-An embedding application may provide its own `IdentityProvider` implementation.
-Remote deployments must keep LASO private or place it behind a deployment-owned
-authentication and authorization boundary before exposing operator data/actions.
+an arbitrary request-body actor. The default loopback development server uses
+an unauthenticated local identity and must not be exposed remotely. Remote binds
+require explicit `allow_remote_api` configuration and `LASO_API_GATEWAY_TOKEN`,
+which selects Core's provider-neutral trusted-gateway identity. Requests must
+carry that bearer service credential plus one `X-LASO-Principal` and
+`X-LASO-Role` (`user`, `operator`, or `admin`). A principal must start with an
+ASCII letter or digit and then use only ASCII letters, digits, `.`, `_`, `@`,
+`:`, or `-`, with a maximum length of 128 characters. The gateway token must be
+at least 32 bytes. Core does not
+verify a proxy peer address: restrict network access to the trusted gateway and
+protect the token as a service credential. This is not a user-login system; the
+gateway remains responsible for authenticating people. An embedding application
+may instead provide its own `IdentityProvider` implementation.
 
 | Method | Path |
 |---|---|
@@ -34,13 +42,14 @@ authentication and authorization boundary before exposing operator data/actions.
 | GET, POST | `/sessions` |
 | GET | `/sessions/{id}`, `/sessions/{id}/turns`, `/sessions/{id}/events`, `/sessions/{id}/events/stream` |
 | POST | `/sessions/{id}/turns`, `/sessions/{id}/close` |
-| GET | `/operator/status`, `/operator/artifacts/integrity` |
+| GET | `/operator/status`, `/operator/artifacts/integrity`, `/operator/maintenance` |
+| POST | `/operator/maintenance/drain`, `/operator/maintenance/enter`, `/operator/maintenance/resume` |
 | GET | `/operator/runs`, `/operator/node-work`, `/operator/worker-jobs`, `/operator/attempts`, `/operator/artifacts`, `/operator/sessions`, `/operator/approvals`, `/operator/worker-requests`, `/operator/providers`, `/operator/plugins`, `/operator/workers`, `/operator/instances`, `/operator/leases` |
 | GET | `/operator/sessions/{id}/turns` |
 
 All paths above are relative to `/api/v1`. Creation/decisions return 201/202; callers
 inspect run state separately. Errors use 400 (validation), 403 (policy), 404, 409
-(state conflict), 429 (capacity), or 503 (storage). Request bodies are capped at
+(state conflict), 429 (capacity), or 503 (storage or instance admission closed; `INSTANCE_NOT_ACCEPTING_WORK` includes `Retry-After`). Request bodies are capped at
 1 MiB, headers at 16 KiB and connections at 128. One request is served per
 connection, with 15-second I/O deadlines. Malformed/oversized HTTP transport input
 closes the connection. List endpoints accept `?limit=50&offset=0`; limits are
@@ -139,3 +148,5 @@ file is documentation, not automatically loaded. Plugin directory environment
 override replaces the YAML directory list. API host override still requires
 `allow_remote_api` for any non-loopback binding. Configuration uses no shell or
 environment interpolation in YAML payloads.
+
+Maintenance transitions require an authenticated operator/admin identity and `{"confirmed":true}`. Read [coordinated drain](maintenance.md) for the state model, restart-safety conditions, failure behavior, and systemd workflow.

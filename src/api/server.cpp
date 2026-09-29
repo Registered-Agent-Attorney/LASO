@@ -76,6 +76,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
       const auto target = std::string(request.target());
       const auto body = request.body();
       const auto authorization = std::string(request[http::field::authorization]);
+      const auto principal = std::string(request["X-LASO-Principal"]);
+      const auto role = std::string(request["X-LASO-Role"]);
       const auto event_stream = target.find("/api/v1/sessions/") == 0 &&
                                 target.find("/events/stream") != std::string::npos;
       if (event_stream) {
@@ -85,8 +87,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
         const auto base = session_path + "/events";
         const auto check = co_await asio::co_spawn(
             api_strand,
-            [this, target, authorization]() -> Task<ApiResponse> {
-              co_return api.handle("GET", target, "", authorization);
+            [this, target, authorization, principal, role]() -> Task<ApiResponse> {
+              co_return api.handle("GET", target, "", authorization, principal, role);
             },
             asio::use_awaitable);
         if (check.status != 200) {
@@ -173,8 +175,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
           const auto poll_target = base + "?after=" + std::to_string(cursor) + "&limit=1";
           auto page = co_await asio::co_spawn(
               api_strand,
-              [this, poll_target, authorization]() -> Task<ApiResponse> {
-                co_return api.handle("GET", poll_target, "", authorization);
+              [this, poll_target, authorization, principal, role]() -> Task<ApiResponse> {
+                co_return api.handle("GET", poll_target, "", authorization, principal, role);
               },
               asio::use_awaitable);
           if (page.status != 200)
@@ -200,8 +202,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
           if (!sent) {
             auto session = co_await asio::co_spawn(
                 api_strand,
-                [this, session_path, authorization]() -> Task<ApiResponse> {
-                  co_return api.handle("GET", session_path, "", authorization);
+                [this, session_path, authorization, principal, role]() -> Task<ApiResponse> {
+                  co_return api.handle("GET", session_path, "", authorization, principal, role);
                 },
                 asio::use_awaitable);
             if (session.status != 200)
@@ -209,8 +211,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
             if (session.body.value("state", std::string{}) == "closed") {
               auto final_events = co_await asio::co_spawn(
                   api_strand,
-                  [this, poll_target, authorization]() -> Task<ApiResponse> {
-                    co_return api.handle("GET", poll_target, "", authorization);
+                  [this, poll_target, authorization, principal, role]() -> Task<ApiResponse> {
+                    co_return api.handle("GET", poll_target, "", authorization, principal, role);
                   },
                   asio::use_awaitable);
               if (final_events.status != 200)
@@ -234,8 +236,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
       }
       auto result = co_await asio::co_spawn(
           api_strand,
-          [this, method, target, body, authorization]() -> Task<ApiResponse> {
-            co_return api.handle(method, target, body, authorization);
+          [this, method, target, body, authorization, principal, role]() -> Task<ApiResponse> {
+            co_return api.handle(method, target, body, authorization, principal, role);
           },
           asio::use_awaitable);
       if (target == "/api/v1/metrics" && result.status == 200 && result.raw_body)
@@ -248,6 +250,8 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
       http::response<http::string_body> response{static_cast<http::status>(result.status), 11};
       response.set(http::field::content_type, result.content_type);
       response.set(http::field::server, "LASO/0.1");
+      if (result.retry_after)
+        response.set(http::field::retry_after, std::to_string(*result.retry_after));
       if (result.raw_body)
         response.set(http::field::cache_control, "no-store");
       response.keep_alive(false);

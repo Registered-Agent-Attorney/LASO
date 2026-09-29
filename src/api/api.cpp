@@ -13,13 +13,14 @@ namespace laso {
 // NOLINTBEGIN(bugprone-exception-escape): this noexcept boundary converts all exceptions to HTTP
 // responses.
 ApiResponse Api::handle(const std::string &method, const std::string &target,
-                        const std::string &body, const std::string &credential) noexcept {
+                        const std::string &body, const std::string &credential,
+                        const std::string &principal, const std::string &role) noexcept {
   const auto started = std::chrono::steady_clock::now();
   auto response = [&]() -> ApiResponse {
     try {
       if (target.size() > 2048 || body.size() > max_document_bytes || credential.size() > 8192)
         return {413, {{"error", "Request exceeds size limit"}}};
-      auto actor = identity_.authenticate(credential);
+      auto actor = identity_.authenticate_request(credential, principal, role);
       if (!identity_.authorize({actor, method, target}))
         return {403, {{"error", "Access denied"}}};
       auto input = body.empty() ? Json::object() : Json::parse(body);
@@ -80,11 +81,29 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
         status = 409;
       else if (error.code == ErrorCode::Capacity)
         status = 429;
+      else if (error.code == ErrorCode::Unavailable)
+        status = 503;
       else if (error.code == ErrorCode::Policy)
         status = 403;
       else if (error.code == ErrorCode::Storage)
         status = 503;
-      return {status, {{"error", status == 503 ? "Storage unavailable" : error.what()}}};
+      if (error.code == ErrorCode::Unavailable)
+        return {503,
+                {{"error", "Instance is not accepting new work"},
+                 {"error_code", "INSTANCE_NOT_ACCEPTING_WORK"},
+                 {"retry_after_seconds", 1}},
+                "application/json",
+                std::nullopt,
+                1};
+      std::string code = error.code == ErrorCode::Validation ? "INVALID_REQUEST"
+                         : error.code == ErrorCode::Conflict ? "CONFLICT"
+                         : error.code == ErrorCode::Capacity ? "CAPACITY_EXHAUSTED"
+                         : error.code == ErrorCode::Policy   ? "ACCESS_DENIED"
+                         : error.code == ErrorCode::Storage  ? "STORAGE_UNAVAILABLE"
+                                                             : "SERVICE_ERROR";
+      return {
+          status,
+          {{"error", status == 503 ? "Storage unavailable" : error.what()}, {"error_code", code}}};
     } catch (const Json::exception &) {
       return {400, {{"error", "Malformed JSON request"}}};
     } catch (...) {
@@ -148,6 +167,20 @@ std::string Api::prometheus_metrics() const {
          << (static_cast<double>(request_duration_nanoseconds_.load(std::memory_order_relaxed)) /
              1000000000.0)
          << '\n';
+  const auto maintenance = service_.maintenance_metrics();
+  output << "# HELP laso_instance_maintenance_state Current instance state as a one-hot gauge.\n"
+         << "# TYPE laso_instance_maintenance_state gauge\n";
+  static constexpr std::array<std::string_view, 4> maintenance_states{"active", "draining",
+                                                                      "drained", "maintenance"};
+  for (const auto state : maintenance_states)
+    output << "laso_instance_maintenance_state{state=\"" << state << "\"} "
+           << (maintenance.at("state") == state ? 1 : 0) << '\n';
+  output << "# HELP laso_instance_owned_runs Number of currently owned active runs.\n"
+         << "# TYPE laso_instance_owned_runs gauge\n"
+         << "laso_instance_owned_runs " << maintenance.at("owned_runs") << '\n'
+         << "# HELP laso_instance_owned_nodes Number of currently owned active nodes.\n"
+         << "# TYPE laso_instance_owned_nodes gauge\n"
+         << "laso_instance_owned_nodes " << maintenance.at("owned_nodes") << '\n';
   return output.str();
 }
 // NOLINTEND(bugprone-exception-escape)
@@ -160,6 +193,35 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
   static const std::regex operator_session_turns_route(
       "/api/v1/operator/sessions/([A-Za-z0-9_.@-]{1,128})/turns");
   std::smatch operator_match;
+  static const std::regex maintenance_action_route(
+      "/api/v1/operator/maintenance/(drain|resume|enter)");
+  std::smatch maintenance_match;
+  if (target == "/api/v1/operator/maintenance") {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    if (!actor.authenticated || (actor.role != "operator" && actor.role != "admin"))
+      return {403, {{"error", "Operator access required"}}};
+    return {200, service_.operator_maintenance()};
+  }
+  if (std::regex_match(target, maintenance_match, maintenance_action_route)) {
+    if (method != "POST")
+      return {405, {{"error", "Method not supported"}}};
+    if (!actor.authenticated || (actor.role != "operator" && actor.role != "admin"))
+      return {403, {{"error", "Operator access required"}}};
+    if (body.size() != 1 || !body.contains("confirmed") || !body.at("confirmed").is_boolean() ||
+        !body.at("confirmed").get<bool>())
+      return {400,
+              {{"error", "Explicit confirmation is required"},
+               {"error_code", "CONFIRMATION_REQUIRED"}}};
+    const auto action = maintenance_match[1].str();
+    if (action == "drain")
+      service_.request_drain(actor);
+    else if (action == "resume")
+      service_.resume_instance(actor);
+    else
+      service_.enter_maintenance(actor);
+    return {200, service_.operator_maintenance()};
+  }
   if (target == "/api/v1/operator/status") {
     if (method != "GET")
       return {405, {{"error", "Method not supported"}}};
@@ -216,7 +278,8 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
                       "sessions.context_generations",
                       "sessions.run_context_snapshots",
                       "health.readiness",
-                      "observability.prometheus_api_metrics"};
+                      "observability.prometheus_api_metrics",
+                      "operator.coordinated_drain"};
     if (service_.context_reduction_available())
       capabilities.push_back("sessions.context_reduction");
     return {200,

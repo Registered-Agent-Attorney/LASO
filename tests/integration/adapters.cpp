@@ -2490,6 +2490,8 @@ TEST(Sessions, PostgresStaleCompletionCannotReplaceContinuation) {
   coordination_options.postgres_schema = schema;
   auto owner_a = create_coordination(coordination_options, "session-owner-a");
   auto owner_b = create_coordination(coordination_options, "session-owner-b");
+  owner_a->register_instance("test", "session-owner");
+  owner_b->register_instance("test", "session-owner");
   StorageOptions storage_options;
   storage_options.postgres_dsn = dsn;
   storage_options.postgres_schema = schema;
@@ -3421,7 +3423,7 @@ TEST(Api, HealthAndVersion) {
             (Json{"sessions.durable", "sessions.ordered_turns", "sessions.sequential_execution",
                   "sessions.event_replay", "sessions.sse", "sessions.context_generations",
                   "sessions.run_context_snapshots", "health.readiness",
-                  "observability.prometheus_api_metrics"}));
+                  "observability.prometheus_api_metrics", "operator.coordinated_drain"}));
 }
 TEST(Api, PrometheusMetricsHaveBoundedLabelsAndOmitRequestData) {
   TemporaryDirectory dir;
@@ -4641,6 +4643,191 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_EQ(all_responses.find("fixture-canary-provider-metadata"), std::string::npos);
   EXPECT_EQ(all_responses.find(cfg.postgres_dsn), std::string::npos);
 }
+TEST(Api, OperatorMaintenanceAuthorizationAndStateTransitions) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto options = config(dir.path);
+  Service service(io, options);
+  constexpr auto gateway_token = "synthetic-maintenance-gateway-token-0123456789";
+  TrustedGatewayIdentity identity(gateway_token);
+  Api api(service, identity);
+  service.register_pipeline(R"yaml(
+laso: '1'
+name: maintenance-session-test
+version: 1
+nodes:
+  input: {type: input}
+  output: {type: output}
+edges:
+  - {from: input, to: output}
+)yaml");
+  const auto session = service.create_session("maintenance-session-test@1");
+
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/maintenance", "").status, 403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/maintenance", "",
+                       "Bearer " + std::string(gateway_token), "reader@example.test", "user")
+                .status,
+            403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/maintenance", "",
+                       "Bearer " + std::string(gateway_token), "operator@example.test", "operator")
+                .status,
+            200U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/maintenance", "",
+                       "Bearer " + std::string(gateway_token), "operator@example.test",
+                       "operator,admin")
+                .status,
+            403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/metrics", "").status, 403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/metrics", "", "Bearer " + std::string(gateway_token),
+                       "reader@example.test", "user")
+                .status,
+            200U);
+  EXPECT_EQ(api.handle("POST", "/api/v1/operator/maintenance/drain", R"({"confirmed":true})",
+                       "Bearer " + std::string(gateway_token), "reader@example.test", "user")
+                .status,
+            403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/metrics", "").status, 403U);
+  const auto missing_confirmation =
+      api.handle("POST", "/api/v1/operator/maintenance/drain", "{}",
+                 "Bearer " + std::string(gateway_token), "operator@example.test", "operator");
+  EXPECT_EQ(missing_confirmation.status, 400U);
+  EXPECT_EQ(missing_confirmation.body.at("error_code"), "CONFIRMATION_REQUIRED");
+  const auto invalid_transition =
+      api.handle("POST", "/api/v1/operator/maintenance/enter", R"({"confirmed":true})",
+                 "Bearer " + std::string(gateway_token), "operator@example.test", "operator");
+  EXPECT_EQ(invalid_transition.status, 409U);
+  EXPECT_EQ(invalid_transition.body.at("error_code"), "CONFLICT");
+
+  const auto draining =
+      api.handle("POST", "/api/v1/operator/maintenance/drain", R"({"confirmed":true})",
+                 "Bearer " + std::string(gateway_token), "operator@example.test", "operator");
+  ASSERT_EQ(draining.status, 200U);
+  EXPECT_EQ(draining.body.at("state"), "drained");
+  EXPECT_TRUE(draining.body.at("safe_to_stop"));
+  const auto rejected_turn =
+      api.handle("POST", "/api/v1/sessions/" + session.id + "/turns",
+                 R"({"idempotency_key":"during-drain","input":{"value":"must-not-queue"}})",
+                 "Bearer " + std::string(gateway_token), "reader@example.test", "user");
+  EXPECT_EQ(rejected_turn.status, 503U);
+  EXPECT_EQ(rejected_turn.body.at("error_code"), "INSTANCE_NOT_ACCEPTING_WORK");
+  EXPECT_TRUE(service.list(RecordKind::SessionTurn, session.id, 10, 0).empty());
+  const auto maintenance_metrics =
+      api.handle("GET", "/api/v1/metrics", "", "Bearer " + std::string(gateway_token),
+                 "reader@example.test", "user");
+  ASSERT_TRUE(maintenance_metrics.raw_body.has_value());
+  EXPECT_NE(
+      maintenance_metrics.raw_body->find("laso_instance_maintenance_state{state=\"drained\"} 1"),
+      std::string::npos);
+  EXPECT_NE(maintenance_metrics.raw_body->find("laso_instance_owned_runs 0"), std::string::npos);
+  EXPECT_EQ(maintenance_metrics.raw_body->find("operator@example.test"), std::string::npos);
+  EXPECT_EQ(maintenance_metrics.raw_body->find(gateway_token), std::string::npos);
+  const auto not_ready = api.handle("GET", "/api/v1/health/ready", "");
+  EXPECT_EQ(not_ready.status, 503U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/health/live", "").status, 200U);
+  const auto rejected =
+      api.handle("POST", "/api/v1/sessions", R"({"pipeline_id":"not-needed@1"})",
+                 "Bearer " + std::string(gateway_token), "reader@example.test", "user");
+  EXPECT_EQ(rejected.status, 503U);
+  EXPECT_EQ(rejected.body.at("error_code"), "INSTANCE_NOT_ACCEPTING_WORK");
+  ASSERT_EQ(rejected.retry_after.value_or(0), 1U);
+
+  const auto maintenance =
+      api.handle("POST", "/api/v1/operator/maintenance/enter", R"({"confirmed":true})",
+                 "Bearer " + std::string(gateway_token), "operator@example.test", "operator");
+  ASSERT_EQ(maintenance.status, 200U);
+  EXPECT_EQ(maintenance.body.at("state"), "maintenance");
+  const auto resumed =
+      api.handle("POST", "/api/v1/operator/maintenance/resume", R"({"confirmed":true})",
+                 "Bearer " + std::string(gateway_token), "operator@example.test", "operator");
+  ASSERT_EQ(resumed.status, 200U);
+  EXPECT_EQ(resumed.body.at("state"), "active");
+}
+
+TEST(Api, ConcurrentMaintenanceRequestsAreIdempotentAndSerialized) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto options = config(dir.path);
+  Service service(io, options);
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const std::string confirmed = R"({"confirmed":true})";
+  ASSERT_EQ(api.handle("POST", "/api/v1/operator/maintenance/drain", confirmed).status, 200U);
+  const auto state_path = dir.path / "operator-maintenance.json";
+  const auto event_count = [&] {
+    std::ifstream input(state_path);
+    return Json::parse(input).at("events").size();
+  };
+  const auto before_repeats = event_count();
+  constexpr std::size_t repeaters = 16;
+  std::barrier start(static_cast<std::ptrdiff_t>(repeaters));
+  std::atomic<unsigned> failures{0};
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < repeaters; ++i)
+    threads.emplace_back([&] {
+      start.arrive_and_wait();
+      if (api.handle("POST", "/api/v1/operator/maintenance/drain", confirmed).status != 200U)
+        failures.fetch_add(1, std::memory_order_relaxed);
+    });
+  for (auto &thread : threads)
+    thread.join();
+  EXPECT_EQ(failures.load(), 0U);
+  EXPECT_EQ(event_count(), before_repeats);
+
+  constexpr std::size_t transitions = 32;
+  std::barrier mixed_start(static_cast<std::ptrdiff_t>(transitions));
+  threads.clear();
+  for (std::size_t i = 0; i < transitions; ++i)
+    threads.emplace_back([&, i] {
+      mixed_start.arrive_and_wait();
+      const auto route =
+          i % 2 == 0 ? "/api/v1/operator/maintenance/resume" : "/api/v1/operator/maintenance/drain";
+      if (api.handle("POST", route, confirmed).status != 200U)
+        failures.fetch_add(1, std::memory_order_relaxed);
+    });
+  for (auto &thread : threads)
+    thread.join();
+  EXPECT_EQ(failures.load(), 0U);
+  const auto concurrent_state = api.handle("GET", "/api/v1/operator/maintenance", "");
+  ASSERT_EQ(concurrent_state.status, 200U);
+  EXPECT_TRUE(concurrent_state.body.at("state") == "active" ||
+              concurrent_state.body.at("state") == "drained");
+  EXPECT_LE(event_count(), before_repeats + transitions);
+
+  EXPECT_EQ(api.handle("POST", "/api/v1/operator/maintenance/resume", confirmed).status, 200U);
+  EXPECT_EQ(api.handle("POST", "/api/v1/operator/maintenance/drain", confirmed).status, 200U);
+  const auto final_state = api.handle("GET", "/api/v1/operator/maintenance", "");
+  EXPECT_EQ(final_state.body.at("state"), "drained");
+}
+
+TEST(Api, OperatorMaintenanceIntentAndAuditSurviveRestart) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  const auto options = config(dir.path);
+  {
+    Service service(io, options);
+    LocalDevelopmentIdentity identity;
+    Api api(service, identity);
+    const auto response =
+        api.handle("POST", "/api/v1/operator/maintenance/drain", R"({"confirmed":true})");
+    ASSERT_EQ(response.status, 200U);
+    EXPECT_EQ(response.body.at("state"), "drained");
+  }
+  {
+    Service restarted(io, options);
+    LocalDevelopmentIdentity identity;
+    Api api(restarted, identity);
+    const auto status = api.handle("GET", "/api/v1/operator/maintenance", "");
+    ASSERT_EQ(status.status, 200U);
+    EXPECT_EQ(status.body.at("desired_state"), "draining");
+    EXPECT_EQ(status.body.at("state"), "drained");
+    EXPECT_EQ(status.body.at("last_event").at("actor"), "local-development");
+    const auto resumed =
+        api.handle("POST", "/api/v1/operator/maintenance/resume", R"({"confirmed":true})");
+    ASSERT_EQ(resumed.status, 200U);
+    EXPECT_EQ(resumed.body.at("state"), "active");
+  }
+}
+
 TEST(Api, OperatorViewsRespectIdentityAuthorization) {
   struct Denied : IdentityProvider {
     Actor authenticate(const std::string &) const override {
