@@ -148,45 +148,58 @@ recovery limits explicit. It is not a production-readiness declaration.
 
 ### M8.0 — repository truth and operator API support
 
-Status: documentation closure is in progress. Current release documentation
-must describe PostgreSQL as the only supported database, place shipped RC2 work
-under the RC2 changelog heading, preserve dated validation history, and state
-known deployment/authentication/plugin boundaries accurately. Add only
-metadata-safe LASO API support that the separate Web operator surface cannot
-obtain through existing safe interfaces.
+Status: complete on public LASO main. Current documentation describes
+PostgreSQL as the only supported database, records shipped RC2 work under the
+`0.1.0-rc.2` changelog section, preserves dated validation history, and states
+deployment, authentication, and plugin limits accurately. SQLite is retained
+only as historical or migration context. The public Core also provides
+bounded, metadata-safe operator views for the separate Web surface.
 
 ### M8.1 — separate LASO-Web operator/admin surface
 
-Status: planned for the private Go LASO-Web repository. Provide a separate
-operator route with role-gated metadata views and explicit, auditable actions.
-The Web application remains an API client and reverse-proxy; LASO remains the
-orchestration authority. Remote administration requires a trustworthy
-deployment-owned principal and operator role. The first boundary uses a
-provider-neutral trusted-proxy contract; full OIDC/JWT integration is deferred
-to a later milestone. No prompts, message bodies, provider-native session IDs,
-credentials, DSNs, absolute sensitive paths, or arbitrary provider metadata are
-part of the operator contract.
+Status: complete on private Go LASO-Web-Internal main. A distinct `/admin`
+area provides sanitized operational metadata and narrowly scoped, confirmed
+actions; normal chat remains separate. Remote administration fails closed
+unless a deployment-owned trusted proxy supplies a trustworthy principal and
+role. Loopback development remains usable, and the Web application remains an
+API client and reverse-proxy. Trusted actor, action, resource, and outcome are
+written to structured Web service logs; durable actor propagation into Core
+remains follow-up work. Full OIDC/JWT integration is deferred.
+
+The operator contract excludes prompts, message bodies, provider-native
+session IDs, credentials, DSNs, absolute sensitive paths, and arbitrary
+provider metadata.
 
 ### M8.2 — native-plugin isolation design
 
-Status: design review is in progress; implementation remains future work.
-Evaluate reuse of the supervised process-worker boundary for worker plugins and
-define the additional contracts for protocol compatibility, lifetime,
-cancellation, crash handling, bounded data, permission/environment allowlists,
-workspace/filesystem access, resource limits, logging/redaction, upgrades,
-plugin identity, and coexistence with the current C ABI. Until an OS isolation
-boundary is implemented and tested, process separation is a lifecycle boundary
-and plugins remain privileged code.
+Status: design complete on public LASO main; implementation remains future
+work. See [plugin isolation design](designs/native-plugin-isolation.md). The
+design evaluates reuse of the supervised process-worker boundary for worker
+plugins and specifies protocol compatibility, lifetime, cancellation, crash
+handling, bounded data, permission and environment allowlists,
+workspace/filesystem access, resource limits, logging and redaction,
+provenance and upgrades, plugin identity, and coexistence with the current C
+ABI. Trusted native in-process plugins remain explicitly privileged. Process
+separation alone is not described as sandboxing; an OS isolation boundary and
+acceptance tests are required before making that claim.
 
 M8 acceptance retains the PostgreSQL-only storage contract, the complete C++
 regression matrix, durable fencing/idempotency/recovery behavior, existing
-two-browser session coverage, and exact-head hosted validation. Environmental
-TSan or dedicated-account systemd failures must remain explicitly unclaimed.
+two-browser session coverage, and exact-head hosted validation. The alternate
+TSan attempt stopped before test bodies with an unexpected-memory-mapping
+runtime failure. Disposable user-manager systemd acceptance passed; the
+dedicated system-account/system-wide sandbox remained unverified because
+available host preflight required privileged system changes. No account or
+system service was created. Neither TSan execution nor dedicated-account
+sandbox acceptance is claimed.
 
 ## M9 — deployment identity integration and production hardening
 
-Recommended next milestone after M8.1: integrate a selected deployment identity
-provider through the provider-neutral principal/role seam, then validate its
-session lifetime, key rotation, proxy boundaries, audit identity, and
-authorization behavior. Keep IdP-specific code outside LASO core unless a
+Recommended next milestone after M8.1: implement M8.2's supervised
+out-of-process plugin host with a tested OS isolation boundary while retaining
+trusted native in-process plugins as an explicit mode. After M8.2, M9 should
+integrate a selected deployment identity provider through the provider-neutral
+principal/role seam and complete production hardening, including identity
+lifecycle, key rotation, proxy boundaries, and durable actor audit where the
+architecture supports it. Keep IdP-specific code outside LASO core unless a
 separate deployment-neutral contract is approved.
