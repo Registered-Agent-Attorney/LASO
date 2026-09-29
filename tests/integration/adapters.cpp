@@ -3179,6 +3179,9 @@ TEST(Artifacts, ContentAddressedObjectsStreamAndMaterialize) {
   const auto report = artifacts.integrity();
   EXPECT_EQ(report.invalid, 0U);
   EXPECT_GE(report.verified, 1U);
+  const auto bounded = artifacts.integrity_bounded(100, 1);
+  EXPECT_EQ(bounded.unverified, 1U);
+  EXPECT_FALSE(bounded.complete);
 }
 TEST(Artifacts, GarbageCollectionHandlesFreshStore) {
   TemporaryDirectory dir;

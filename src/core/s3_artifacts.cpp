@@ -506,10 +506,16 @@ ArtifactIntegrityReport S3ArtifactStore::integrity_bounded(std::size_t max_entri
       std::string remote_digest;
       if (!impl_->head(object_id, &remote_size, &remote_digest))
         throw Error(ErrorCode::NotFound, "Artifact object is missing");
-      if (remote_size > impl_->limits.max_object_bytes || remote_size != size ||
-          remote_digest != validate_object_id(object_id))
+      if (remote_size > impl_->limits.max_object_bytes || remote_size != size)
         throw Error(ErrorCode::Conflict, "Artifact metadata integrity check failed");
-      ++report.verified;
+      if (remote_digest.empty()) {
+        ++report.unverified;
+        report.complete = false;
+      } else if (remote_digest != validate_object_id(object_id)) {
+        throw Error(ErrorCode::Conflict, "Artifact metadata integrity check failed");
+      } else {
+        ++report.verified;
+      }
     } catch (const Error &) {
       ++report.invalid;
       report.errors.push_back({{"object_id", object_id}, {"error", "integrity-check-failed"}});

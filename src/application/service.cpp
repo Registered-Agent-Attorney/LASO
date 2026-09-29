@@ -1169,9 +1169,16 @@ void Service::shutdown() {
 Json Service::instances() const {
   if (!coordination_)
     return Json::array();
+  constexpr std::size_t page_size = 100;
   Json result = Json::array();
-  for (const auto &instance : coordination_->list_instances(config_.instance_stale_after_ms))
-    result.push_back(instance);
+  for (std::size_t offset = 0;; offset += page_size) {
+    const auto page =
+        coordination_->list_instances(config_.instance_stale_after_ms, page_size, offset);
+    for (const auto &instance : page)
+      result.push_back(instance);
+    if (page.size() < page_size)
+      break;
+  }
   return result;
 }
 void Service::recover_history() {
