@@ -1,80 +1,145 @@
+#include <algorithm>
 #include <charconv>
+#include <iomanip>
 #include <laso/api/api.hpp>
 #include <laso/pipeline/parser.hpp>
 #include <limits>
+#include <locale>
 #include <regex>
 #include <set>
+#include <sstream>
 
 namespace laso {
 // NOLINTBEGIN(bugprone-exception-escape): this noexcept boundary converts all exceptions to HTTP
 // responses.
 ApiResponse Api::handle(const std::string &method, const std::string &target,
                         const std::string &body, const std::string &credential) noexcept {
-  try {
-    if (target.size() > 2048 || body.size() > max_document_bytes || credential.size() > 8192)
-      return {413, {{"error", "Request exceeds size limit"}}};
-    auto actor = identity_.authenticate(credential);
-    if (!identity_.authorize({actor, method, target}))
-      return {403, {{"error", "Access denied"}}};
-    auto input = body.empty() ? Json::object() : Json::parse(body);
-    if (!input.is_object())
-      return {400, {{"error", "Request body must be a JSON object"}}};
-    auto path = target;
-    std::size_t limit = 50, offset = 0;
-    std::uint64_t after = 0;
-    auto query = path.find('?');
-    if (query != std::string::npos) {
-      auto parameters = path.substr(query + 1);
-      path.resize(query);
-      std::set<std::string> seen;
-      while (!parameters.empty()) {
-        auto end = parameters.find('&');
-        auto part = parameters.substr(0, end);
-        auto equal = part.find('=');
-        if (equal == std::string::npos)
-          throw Error(ErrorCode::Validation, "Malformed pagination query");
-        auto key = part.substr(0, equal), value = part.substr(equal + 1);
-        std::uint64_t number = 0;
-        auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
-        if (!seen.insert(key).second || parsed.ec != std::errc{} ||
-            parsed.ptr != value.data() + value.size())
-          throw Error(ErrorCode::Validation, "Invalid pagination value");
-        if (key == "limit" && number >= 1 && number <= 100)
-          limit = number;
-        else if (key == "offset" && number <= 100000000)
-          offset = number;
-        else if (key == "after" &&
-                 number <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-          after = number;
-        else
-          throw Error(ErrorCode::Validation, "Pagination limit exceeded or unknown parameter");
-        if (end == std::string::npos)
-          break;
-        parameters.erase(0, end + 1);
+  const auto started = std::chrono::steady_clock::now();
+  auto response = [&]() -> ApiResponse {
+    try {
+      if (target.size() > 2048 || body.size() > max_document_bytes || credential.size() > 8192)
+        return {413, {{"error", "Request exceeds size limit"}}};
+      auto actor = identity_.authenticate(credential);
+      if (!identity_.authorize({actor, method, target}))
+        return {403, {{"error", "Access denied"}}};
+      auto input = body.empty() ? Json::object() : Json::parse(body);
+      if (!input.is_object())
+        return {400, {{"error", "Request body must be a JSON object"}}};
+      auto path = target;
+      std::size_t limit = 50, offset = 0;
+      std::uint64_t after = 0;
+      auto query = path.find('?');
+      if (query != std::string::npos) {
+        auto parameters = path.substr(query + 1);
+        path.resize(query);
+        std::set<std::string> seen;
+        while (!parameters.empty()) {
+          auto end = parameters.find('&');
+          auto part = parameters.substr(0, end);
+          auto equal = part.find('=');
+          if (equal == std::string::npos)
+            throw Error(ErrorCode::Validation, "Malformed pagination query");
+          auto key = part.substr(0, equal), value = part.substr(equal + 1);
+          std::uint64_t number = 0;
+          auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
+          if (!seen.insert(key).second || parsed.ec != std::errc{} ||
+              parsed.ptr != value.data() + value.size())
+            throw Error(ErrorCode::Validation, "Invalid pagination value");
+          if (key == "limit" && number >= 1 && number <= 100)
+            limit = number;
+          else if (key == "offset" && number <= 100000000)
+            offset = number;
+          else if (key == "after" &&
+                   number <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            after = number;
+          else
+            throw Error(ErrorCode::Validation, "Pagination limit exceeded or unknown parameter");
+          if (end == std::string::npos)
+            break;
+          parameters.erase(0, end + 1);
+        }
       }
+      auto result = route(method, path, input, actor, limit, offset, after);
+      const auto response_bytes = result.raw_body ? result.raw_body->size() : result.body.dump().size();
+      if (response_bytes > std::size_t{4} * 1024 * 1024)
+        return {413, {{"error", "Response exceeds limit; request a smaller page"}}};
+      return result;
+    } catch (const Error &error) {
+      unsigned status = 400;
+      if (error.code == ErrorCode::NotFound)
+        status = 404;
+      else if (error.code == ErrorCode::Conflict)
+        status = 409;
+      else if (error.code == ErrorCode::Capacity)
+        status = 429;
+      else if (error.code == ErrorCode::Policy)
+        status = 403;
+      else if (error.code == ErrorCode::Storage)
+        status = 503;
+      return {status, {{"error", status == 503 ? "Storage unavailable" : error.what()}}};
+    } catch (const Json::exception &) {
+      return {400, {{"error", "Malformed JSON request"}}};
+    } catch (...) {
+      return {500, {{"error", "Internal service error"}}};
     }
-    auto response = route(method, path, input, actor, limit, offset, after);
-    if (response.body.dump().size() > std::size_t{4} * 1024 * 1024)
-      return {413, {{"error", "Response exceeds limit; request a smaller page"}}};
-    return response;
-  } catch (const Error &e) {
-    unsigned status = 400;
-    if (e.code == ErrorCode::NotFound)
-      status = 404;
-    else if (e.code == ErrorCode::Conflict)
-      status = 409;
-    else if (e.code == ErrorCode::Capacity)
-      status = 429;
-    else if (e.code == ErrorCode::Policy)
-      status = 403;
-    else if (e.code == ErrorCode::Storage)
-      status = 503;
-    return {status, {{"error", status == 503 ? "Storage unavailable" : e.what()}}};
-  } catch (const Json::exception &) {
-    return {400, {{"error", "Malformed JSON request"}}};
-  } catch (...) {
-    return {500, {{"error", "Internal service error"}}};
-  }
+  }();
+  record_request(method, response.status, std::chrono::steady_clock::now() - started);
+  return response;
+}
+
+void Api::record_request(std::string_view method, unsigned status,
+                         std::chrono::steady_clock::duration duration) noexcept {
+  static constexpr std::array<std::string_view, 6> methods{"GET", "POST", "PUT", "DELETE",
+                                                           "PATCH", "OTHER"};
+  const auto method_it = std::find(methods.begin(), methods.end(), method);
+  const std::size_t method_index = method_it == methods.end()
+                                       ? methods.size() - 1
+                                       : static_cast<std::size_t>(method_it - methods.begin());
+  const std::size_t status_index = status >= 200 && status < 300 ? 0
+                                   : status >= 400 && status < 500 ? 1
+                                   : status >= 500 && status < 600 ? 2
+                                                                   : 3;
+  request_counts_[method_index][status_index].fetch_add(1, std::memory_order_relaxed);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+  const auto elapsed_ns = elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0;
+  request_duration_count_.fetch_add(1, std::memory_order_relaxed);
+  request_duration_nanoseconds_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+  static constexpr std::array<std::uint64_t, 10> bounds_ns{
+      5000000, 10000000, 25000000, 50000000, 100000000,
+      250000000, 500000000, 1000000000, 2500000000, 5000000000};
+  for (std::size_t index = 0; index < bounds_ns.size(); ++index)
+    if (elapsed_ns <= bounds_ns[index])
+      request_duration_buckets_[index].fetch_add(1, std::memory_order_relaxed);
+}
+
+std::string Api::prometheus_metrics() const {
+  static constexpr std::array<std::string_view, 6> methods{"GET", "POST", "PUT", "DELETE",
+                                                           "PATCH", "OTHER"};
+  static constexpr std::array<std::string_view, 4> classes{"2xx", "4xx", "5xx", "other"};
+  static constexpr std::array<std::string_view, 10> bucket_labels{
+      "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5"};
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << "# HELP laso_api_responses_total Completed API responses by bounded method and status class.\n"
+         << "# TYPE laso_api_responses_total counter\n";
+  for (std::size_t method = 0; method < methods.size(); ++method)
+    for (std::size_t status = 0; status < classes.size(); ++status)
+      output << "laso_api_responses_total{method=\"" << methods[method] << "\",status_class=\""
+             << classes[status] << "\"} "
+             << request_counts_[method][status].load(std::memory_order_relaxed) << '\n';
+  output << "# HELP laso_api_request_duration_seconds API request duration in seconds.\n"
+         << "# TYPE laso_api_request_duration_seconds histogram\n";
+  for (std::size_t index = 0; index < bucket_labels.size(); ++index)
+    output << "laso_api_request_duration_seconds_bucket{le=\"" << bucket_labels[index] << "\"} "
+           << request_duration_buckets_[index].load(std::memory_order_relaxed) << '\n';
+  const auto count = request_duration_count_.load(std::memory_order_relaxed);
+  output << "laso_api_request_duration_seconds_bucket{le=\"+Inf\"} " << count << '\n'
+         << "laso_api_request_duration_seconds_count " << count << '\n'
+         << std::setprecision(12) << "laso_api_request_duration_seconds_sum "
+         << (static_cast<double>(request_duration_nanoseconds_.load(std::memory_order_relaxed)) /
+             1000000000.0)
+         << '\n';
+  return output.str();
 }
 // NOLINTEND(bugprone-exception-escape)
 ApiResponse Api::route(const std::string &method, const std::string &target, const Json &body,
@@ -109,6 +174,12 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
   if (target.starts_with("/api/v1/operator/"))
     return {404, {{"error", "Endpoint not found"}}};
 
+  if (target == "/api/v1/metrics") {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    return {200, Json::object(), "text/plain; version=0.0.4; charset=utf-8", prometheus_metrics()};
+  }
+
   static const std::regex session_stream_pattern(
       "/api/v1/sessions/([A-Za-z0-9_.@-]{1,128})/events/stream");
   std::smatch stream_match;
@@ -116,8 +187,17 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     (void)service_.agent_session(stream_match[1].str());
     return {200, {{"status", "streaming"}}};
   }
-  if (method == "GET" && target == "/api/v1/health")
-    return {200, {{"status", "ok"}, {"mode", "local-development"}}};
+  if (target == "/api/v1/health" || target == "/api/v1/health/live" ||
+      target == "/api/v1/health/ready") {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    if (target != "/api/v1/health/ready")
+      return target == "/api/v1/health"
+                 ? ApiResponse{200, {{"status", "ok"}, {"mode", "local-development"}}}
+                 : ApiResponse{200, {{"status", "ok"}}};
+    const auto readiness = service_.readiness();
+    return {readiness.at("status") == "ready" ? 200U : 503U, readiness};
+  }
   if (method == "GET" && target == "/api/v1/version") {
     Json capabilities{"sessions.durable",
                       "sessions.ordered_turns",
@@ -125,7 +205,9 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
                       "sessions.event_replay",
                       "sessions.sse",
                       "sessions.context_generations",
-                      "sessions.run_context_snapshots"};
+                      "sessions.run_context_snapshots",
+                      "health.readiness",
+                      "observability.prometheus_api_metrics"};
     if (service_.context_reduction_available())
       capabilities.push_back("sessions.context_reduction");
     return {200,

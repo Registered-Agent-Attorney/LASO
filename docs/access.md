@@ -1,8 +1,9 @@
 # API and CLI reference
 
-The current development server retains the RC2 API and adds M8 metadata-only
-operator routes. It uses JSON bodies, `/api/v1`, and loopback port 8080 by
-default. Registration accepts `{"yaml":"..."}`; run creation accepts
+The current development server retains the RC2 API, adds M8 metadata-only
+operator routes, and exposes M9 readiness and Prometheus metrics. It uses JSON
+bodies, `/api/v1`, and loopback port 8080 by default. Registration accepts
+`{"yaml":"..."}`; run creation accepts
 `{"input":{...}}`. Approval accepts
 `{"comment":"..."}`. Actor identity comes from the identity provider rather than
 an arbitrary request-body actor. The shipped server uses unauthenticated local
@@ -13,7 +14,7 @@ authentication and authorization boundary before exposing operator data/actions.
 
 | Method | Path |
 |---|---|
-| GET | `/health`, `/version` (`capabilities` advertises implemented API behavior) |
+| GET | `/health`, `/health/live`, `/health/ready`, `/version`, `/metrics` (`capabilities` advertises implemented API behavior) |
 | GET, POST | `/pipelines` |
 | GET | `/pipelines/{id}` |
 | POST | `/pipelines/{id}/runs` |
@@ -55,6 +56,23 @@ request. Larger objects remain unverified in this summary; use the local
 operator CLI for a complete integrity scan. For S3, this dashboard check
 compares bounded object size and digest metadata without downloading object
 bodies; the local CLI integrity command performs full content verification.
+
+`/health` remains the compatibility liveness route; `/health/live` names the
+same process-only check explicitly. `/health/ready` returns `200` only when the
+PostgreSQL storage/schema check succeeds and the runtime is not draining. It
+returns `503` with bounded `storage`, `schema`, and `runtime` states otherwise.
+Readiness does not probe every provider or artifact operation, and configured
+admission limits do not mark the instance unready. It is a signal for a
+supervisor or proxy; the route does not itself block other API requests.
+
+`/metrics` returns Prometheus text exposition format 0.0.4. The route passes
+through the same `IdentityProvider` authorization check as other API routes.
+It reports API response counts by a fixed method/status class set, a bounded
+request-duration histogram, and session-SSE admission counters. It has no
+request-path, principal, session, run, prompt, message, error, or credential
+labels. Keep scrape access on a private or deployment-authenticated path.
+See [readiness and metrics](observability.md) for the metric names and probe
+contract.
 
 ```text
 laso [--config FILE] [--data-dir DIR] version

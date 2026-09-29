@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -51,9 +52,11 @@ struct PostgresConnectionPool::Lease::State {
 
 namespace {
 std::unique_ptr<pqxx::connection>
-connect(const std::shared_ptr<PostgresConnectionPool::Lease::State> &state) {
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(state->options.acquisition_timeout_ms);
+connect(const std::shared_ptr<PostgresConnectionPool::Lease::State> &state,
+        std::chrono::milliseconds max_wait = std::chrono::milliseconds::max()) {
+  const auto timeout =
+      std::min(std::chrono::milliseconds(state->options.acquisition_timeout_ms), max_wait);
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
   pqxx::connecting pending(state->dsn);
   while (!pending.done()) {
     const auto now = std::chrono::steady_clock::now();
@@ -78,6 +81,7 @@ connect(const std::shared_ptr<PostgresConnectionPool::Lease::State> &state) {
   }
   auto connection = std::make_unique<pqxx::connection>(std::move(pending).produce());
   pqxx::work transaction(*connection);
+  transaction.exec("SET LOCAL statement_timeout = '1000ms'");
   transaction.exec("CREATE SCHEMA IF NOT EXISTS " + quoted_schema(state->schema));
   transaction.exec("SET search_path TO " + quoted_schema(state->schema) + ", public");
   transaction.commit();
@@ -186,8 +190,17 @@ PostgresConnectionPool::~PostgresConnectionPool() {
 }
 
 PostgresConnectionPool::Lease PostgresConnectionPool::acquire() {
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(state_->options.acquisition_timeout_ms);
+  return acquire(std::chrono::milliseconds(state_->options.acquisition_timeout_ms));
+}
+
+PostgresConnectionPool::Lease
+PostgresConnectionPool::acquire(std::chrono::milliseconds max_wait) {
+  if (max_wait <= std::chrono::milliseconds::zero())
+    throw Error(ErrorCode::Validation, "PostgreSQL pool wait must be positive");
+  const auto configured_timeout =
+      std::chrono::milliseconds(state_->options.acquisition_timeout_ms);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::min(max_wait, configured_timeout);
   std::unique_lock lock(state_->mutex);
   const auto ready = [&] {
     if (state_->shutting_down)
@@ -207,14 +220,28 @@ PostgresConnectionPool::Lease PostgresConnectionPool::acquire() {
     for (std::size_t i = 0; i < state_->slots.size(); ++i) {
       auto &slot = state_->slots[i];
       if (!slot.in_use) {
-        if (!slot.connection)
-          slot.connection = connect(state_);
+        if (!slot.connection) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= deadline) {
+            ++state_->acquisition_timeouts;
+            throw Error(ErrorCode::Capacity, "PostgreSQL connection pool acquisition timed out");
+          }
+          const auto remaining =
+              std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+          slot.connection = connect(state_, remaining);
+        }
         slot.in_use = true;
         return Lease(state_, i);
       }
     }
     const auto index = state_->slots.size();
-    state_->slots.push_back({connect(state_), true});
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      ++state_->acquisition_timeouts;
+      throw Error(ErrorCode::Capacity, "PostgreSQL connection pool acquisition timed out");
+    }
+    const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+    state_->slots.push_back({connect(state_, remaining), true});
     return Lease(state_, index);
   } catch (const Error &) {
     throw;

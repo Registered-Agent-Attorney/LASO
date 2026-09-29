@@ -13,6 +13,25 @@ namespace laso {
 namespace beast = boost::beast;
 namespace http = beast::http;
 using Tcp = asio::ip::tcp;
+namespace {
+std::string session_stream_metrics(const HttpServerMetrics &metrics) {
+  return "# HELP laso_session_sse_active_streams Active durable session SSE streams.\n"
+         "# TYPE laso_session_sse_active_streams gauge\nlaso_session_sse_active_streams " +
+         std::to_string(metrics.active_session_streams) +
+         "\n# HELP laso_session_sse_stream_limit Configured durable session SSE stream capacity.\n"
+         "# TYPE laso_session_sse_stream_limit gauge\nlaso_session_sse_stream_limit " +
+         std::to_string(metrics.session_stream_limit) +
+         "\n# HELP laso_session_sse_streams_accepted_total Accepted durable session SSE streams.\n"
+         "# TYPE laso_session_sse_streams_accepted_total counter\nlaso_session_sse_streams_accepted_total " +
+         std::to_string(metrics.accepted_session_streams) +
+         "\n# HELP laso_session_sse_streams_rejected_total Durable session SSE admission rejections.\n"
+         "# TYPE laso_session_sse_streams_rejected_total counter\nlaso_session_sse_streams_rejected_total " +
+         std::to_string(metrics.rejected_session_streams) +
+         "\n# HELP laso_session_sse_streams_closed_total Closed durable session SSE streams.\n"
+         "# TYPE laso_session_sse_streams_closed_total counter\nlaso_session_sse_streams_closed_total " +
+         std::to_string(metrics.closed_session_streams) + "\n";
+}
+} // namespace
 struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
   asio::thread_pool api_pool{1};
   asio::strand<asio::thread_pool::executor_type> api_strand;
@@ -215,11 +234,19 @@ struct HttpServer::Impl : std::enable_shared_from_this<HttpServer::Impl> {
             co_return api.handle(method, target, body, authorization);
           },
           asio::use_awaitable);
+      if (target == "/api/v1/metrics" && result.status == 200 && result.raw_body)
+        result.raw_body->append(session_stream_metrics(
+            {active_event_streams.load(std::memory_order_relaxed),
+             accepted_event_streams.load(std::memory_order_relaxed),
+             rejected_event_streams.load(std::memory_order_relaxed),
+             closed_event_streams.load(std::memory_order_relaxed), stream_options.max_session_streams}));
       http::response<http::string_body> response{static_cast<http::status>(result.status), 11};
-      response.set(http::field::content_type, "application/json");
+      response.set(http::field::content_type, result.content_type);
       response.set(http::field::server, "LASO/0.1");
+      if (result.raw_body)
+        response.set(http::field::cache_control, "no-store");
       response.keep_alive(false);
-      response.body() = result.body.dump();
+      response.body() = result.raw_body ? *result.raw_body : result.body.dump();
       response.prepare_payload();
       stream->expires_after(std::chrono::seconds(15));
       co_await http::async_write(*stream, response, asio::use_awaitable);

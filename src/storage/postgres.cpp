@@ -1284,4 +1284,29 @@ Json PostgresStorage::operator_diagnostics() const {
           {"worker_job_states", std::move(worker_job_states)},
           {"recent_failures", std::move(recent_failures)}};
 }
+
+Json PostgresStorage::readiness_diagnostics() const {
+  PostgresConnectionPool::Lease connection;
+  try {
+    connection = impl_->pool->acquire(std::chrono::milliseconds(1000));
+    pqxx::work transaction(connection.connection());
+    transaction.exec("SET LOCAL statement_timeout = '1000ms'");
+    const auto migration = transaction.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations");
+    const auto schema_version = migration.empty() ? 0 : migration.front()[0].as<std::uint64_t>();
+    transaction.commit();
+    return {{"available", true},
+            {"schema_state", schema_version == postgres_schema_version ? "current" : "mismatch"}};
+  } catch (const Error &error) {
+    if (error.code == ErrorCode::Storage)
+      throw;
+    throw Error(ErrorCode::Storage, "PostgreSQL readiness probe failed");
+  } catch (const pqxx::sql_error &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL readiness probe failed");
+  } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
+    throw Error(ErrorCode::Storage, "PostgreSQL readiness probe failed");
+  } catch (const std::exception &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL readiness probe failed");
+  }
+}
 } // namespace laso

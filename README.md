@@ -148,6 +148,7 @@ tracked in [the roadmap](docs/roadmap.md) and [validation record](VALIDATION.md)
 ```sh
 ./build/bin/laso-server --config config/laso.example.yaml
 curl -fsS http://127.0.0.1:8080/api/v1/health
+curl -fsS http://127.0.0.1:8080/api/v1/health/ready
 curl -fsS http://127.0.0.1:8080/api/v1/version
 jq -n --rawfile yaml examples/hello-pipeline/pipeline.yaml '{yaml:$yaml}' |
   curl -fsS http://127.0.0.1:8080/api/v1/pipelines \
@@ -159,7 +160,13 @@ curl -fsS -X POST http://127.0.0.1:8080/api/v1/pipelines/hello@1/runs \
 Development identity is unauthenticated and bound to `127.0.0.1:8080`. Remote
 binding requires deliberate `allow_remote_api` configuration and deployment-owned
 authentication. The API never accepts filesystem paths for pipeline registration.
-[API and CLI reference](docs/access.md) lists all endpoints and commands. The [session SSE contract](docs/session-sse.md) documents stream admission, `Retry-After`, heartbeat, and replay behavior.
+[API and CLI reference](docs/access.md) lists all endpoints and commands. The
+readiness route checks PostgreSQL/schema compatibility and runtime drain state;
+the Prometheus metrics route uses the same API authorization boundary and should
+remain on a private or deployment-authenticated scrape path. The [session SSE
+contract](docs/session-sse.md) documents stream admission, `Retry-After`,
+heartbeat, and replay behavior. See [readiness and metrics](docs/observability.md)
+for probe semantics and the exported metric set.
 
 ## Native plugins
 
