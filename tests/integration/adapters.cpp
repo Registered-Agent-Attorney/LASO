@@ -3405,7 +3405,9 @@ TEST(Api, HealthAndVersion) {
     pqxx::connection connection(options.postgres_dsn);
     pqxx::work transaction(connection);
     transaction.exec("UPDATE \"" + options.postgres_schema +
-                     "\".laso_schema_migrations SET version = 999");
+                     "\".laso_schema_migrations SET version = 999 WHERE version = "
+                     "(SELECT MAX(version) FROM \"" + options.postgres_schema +
+                     "\".laso_schema_migrations)");
     transaction.commit();
   }
   const auto incompatible = api.handle("GET", "/api/v1/health/ready", "");
