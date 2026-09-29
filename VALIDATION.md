@@ -1049,3 +1049,18 @@ across an incompatible schema requires restoring a tested database backup.
 This release candidate's acceptance suite, residual limits, and supported
 upgrade/rollback contract are complete and documented; no arbitrary historic
 LASO-Web compatibility is promised.
+
+### M8 candidate environmental validation (2026-09-29)
+
+On a second authorized Linux validation host, the GCC 13.3 ThreadSanitizer build
+completed, but test discovery aborted with exit status 66 and
+`FATAL: ThreadSanitizer: unexpected memory mapping`. No test body ran, no ASLR or
+kernel/security setting was changed, and TSan remains unclaimed.
+
+The PostgreSQL-backed systemd user-manager lifecycle harness passed against a
+disposable installation. It covered health, a durable approval through graceful
+and forced restart, worker-child cleanup, invalid configuration, and repeated
+start/stop transitions. This runs under the invoking account. The requested
+dedicated-account system-manager acceptance could not pass privileged host
+preflight, so no service account, system unit, StateDirectory, or installation
+was created. That system-unit sandbox remains unverified.
