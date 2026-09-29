@@ -1,4 +1,4 @@
-# Storage backend audit (resolved)
+# Storage backend audit (resolved; historical record)
 
 The original audit documented the SQLite-first architecture and an optional PostgreSQL adapter.
 The storage migration is complete: PostgreSQL is now the only shipped implementation.
@@ -24,7 +24,7 @@ Tests use a disposable PostgreSQL database and unique per-test schemas. Test fix
 those schemas during teardown. CI provisions PostgreSQL for the Debug, Release, sanitizer,
 and optional integration suites.
 
-Existing SQLite files are not imported. Startup detects the default `.laso/laso.db`
+Existing SQLite files are not imported. Startup detects the legacy default `.laso/laso.db`
 SQLite signature and fails with an actionable message. Old `db_path` and `storage_backend`
 configuration keys are rejected. Operators must keep a backup and arrange a data export
 and import before switching; LASO does not ship an automated cross-database converter.

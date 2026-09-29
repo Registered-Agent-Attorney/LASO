@@ -4,7 +4,7 @@
 
 The PostgreSQL-only opt-in `execution_mode: multi_instance` described in
 `docs/distributed-execution.md` supersedes the former single-owner-only scope.
-SQLite and the default PostgreSQL mode still follow this ADR.
+PostgreSQL single-owner mode still follows this ADR.
 
 ## Context
 
@@ -13,9 +13,9 @@ distributed execution protocol.
 
 ## Decision
 
-One LASO service owns a selected database. SQLite uses its process lease and
-PostgreSQL uses a session-held advisory lock. A competing owner fails during
-startup.
+At acceptance, one LASO service owned a selected database. SQLite used its
+process lease and PostgreSQL used a session-held advisory lock. ADR 0009 removed
+SQLite; PostgreSQL single-owner mode remains active.
 
 ## Consequences
 
