@@ -27,6 +27,6 @@ on a trusted configured store; S3 garbage collection remains unsupported and
 arbitrary remote filesystem access is not enabled.
 
 Readiness covers PostgreSQL availability, schema compatibility, and runtime
-drain state; it does not assert provider or artifact-backend health. Metrics
+shutdown state; it does not assert provider or artifact-backend health. Metrics
 use bounded method and status-class labels and exclude request, user, and
 workflow identifiers.

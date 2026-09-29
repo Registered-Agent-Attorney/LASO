@@ -28,8 +28,10 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
       auto path = target;
       std::size_t limit = 50, offset = 0;
       std::uint64_t after = 0;
-      auto query = path.find('?');
-      if (query != std::string::npos) {
+      bool has_after = false;
+      const auto query = path.find('?');
+      const bool has_query = query != std::string::npos;
+      if (has_query) {
         auto parameters = path.substr(query + 1);
         path.resize(query);
         std::set<std::string> seen;
@@ -50,15 +52,20 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
           else if (key == "offset" && number <= 100000000)
             offset = number;
           else if (key == "after" &&
-                   number <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                   number <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
             after = number;
-          else
+            has_after = true;
+          } else
             throw Error(ErrorCode::Validation, "Pagination limit exceeded or unknown parameter");
           if (end == std::string::npos)
             break;
           parameters.erase(0, end + 1);
         }
       }
+      if (path.starts_with("/api/v1/operator/") &&
+          (has_after || (has_query && (path == "/api/v1/operator/status" ||
+                                       path == "/api/v1/operator/artifacts/integrity"))))
+        throw Error(ErrorCode::Validation, "Unsupported operator pagination parameter");
       auto result = route(method, path, input, actor, limit, offset, after);
       const auto response_bytes =
           result.raw_body ? result.raw_body->size() : result.body.dump().size();
@@ -149,7 +156,7 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
                        std::uint64_t after) {
   static const std::regex operator_collection_route(
       "/api/v1/operator/(runs|node-work|worker-jobs|artifacts|sessions|approvals|"
-      "worker-requests|providers|plugins|workers|instances|leases)");
+      "worker-requests|attempts|providers|plugins|workers|instances|leases)");
   static const std::regex operator_session_turns_route(
       "/api/v1/operator/sessions/([A-Za-z0-9_.@-]{1,128})/turns");
   std::smatch operator_match;

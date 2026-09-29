@@ -12,7 +12,7 @@ limits. It reports Core storage, schema, and runtime readiness. Queue and worker
 capacity are reported separately.
 
 The route checks PostgreSQL connectivity, the current schema version, and
-whether the runtime is draining. It returns `200` with `status: ready` only
+whether runtime shutdown has begun (reported as `draining`; this is not an operator drain mode). It returns `200` with `status: ready` only
 when all three checks pass. Otherwise it returns `503` with `status: not_ready`
 and only these bounded state values:
 
@@ -36,9 +36,12 @@ available through the existing sanitized operator API.
 `GET /api/v1/metrics` returns Prometheus text exposition format 0.0.4 on the
 main API listener with `Cache-Control: no-store`. It uses the same
 `IdentityProvider` authentication and authorization check as other API routes.
-The local development identity is unauthenticated, so keep that listener
-loopback-bound. Remote scrapers require the deployment's API authentication
-and network boundary.
+The shipped `laso-server` uses an unauthenticated local-development identity.
+`allow_remote_api=true` only permits a non-loopback bind; it does not add an
+authentication provider. Keep this listener loopback-bound or put it behind an
+independently authenticated and authorized proxy on a private network. An
+embedded deployment may provide a custom `IdentityProvider`. Do not expose the
+shipped Core listener directly to remote scrapers.
 
 The current bounded metric set is:
 
