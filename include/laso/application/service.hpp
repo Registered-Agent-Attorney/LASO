@@ -58,6 +58,7 @@ public:
   Json artifact_integrity() const;
   Json artifact_gc(bool dry_run, std::uint64_t grace_seconds = 0);
   Json operator_status() const;
+  Json readiness() const;
   Json operator_artifact_integrity() const;
   Json operator_page(const std::string &resource, std::size_t limit = 50, std::size_t offset = 0,
                      const std::string &parent_id = "") const;

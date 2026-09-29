@@ -924,6 +924,31 @@ Json Service::operator_status() const {
             {"database_rollback", "restore-compatible-backup"}}}};
 }
 
+Json Service::readiness() const {
+  const auto runtime = runtime_.diagnostics();
+  bool storage_available = false;
+  std::string schema_state = "unknown";
+  try {
+    const auto storage = storage_->readiness_diagnostics();
+    storage_available = storage.value("available", false);
+    const auto reported_schema = storage.value("schema_state", std::string{"unknown"});
+    schema_state = reported_schema == "current"    ? "current"
+                   : reported_schema == "mismatch" ? "incompatible"
+                                                   : "unknown";
+  } catch (const Error &error) {
+    if (error.code != ErrorCode::Storage && error.code != ErrorCode::Capacity)
+      throw;
+  }
+
+  const auto runtime_state = runtime.stopping ? "draining" : "active";
+  const bool ready = storage_available && schema_state == "current" && !runtime.stopping;
+  return {{"status", ready ? "ready" : "not_ready"},
+          {"checks",
+           {{"storage", storage_available ? "available" : "unavailable"},
+            {"schema", schema_state},
+            {"runtime", runtime_state}}}};
+}
+
 Json Service::operator_artifact_integrity() const {
   try {
     const auto report = artifacts_->integrity_bounded(10, 16 * 1024 * 1024);

@@ -49,8 +49,17 @@ sudo install -m 0600 /dev/null /etc/laso/laso.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now laso
 curl -fsS http://127.0.0.1:8080/api/v1/health
+curl -fsS http://127.0.0.1:8080/api/v1/health/ready
 journalctl -u laso --since today
 ```
+
+The compatibility `/api/v1/health` route is a process liveness check.
+`/api/v1/health/ready` reports PostgreSQL availability, schema compatibility,
+and runtime drain state for a supervisor or proxy to use in routing decisions;
+it does not itself gate normal API requests. Prometheus-compatible
+metrics are available at `/api/v1/metrics`; the route uses the configured API
+identity authorization and must stay on a private or deployment-authenticated
+scrape path.
 
 The account-creation commands are one-time setup; skip each command if its group
 or user already exists. The service runs as `laso:laso`, not root. `StateDirectory`

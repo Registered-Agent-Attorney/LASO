@@ -114,10 +114,15 @@ private:
 TEST(PostgresPool, BoundedAcquisitionAndReplacement) {
   IsolatedPostgres database;
 
-  PostgresConnectionPool pool(database.dsn, database.schema, {1, 1, 500});
+  PostgresConnectionPool pool(database.dsn, database.schema, {1, 1, 5000});
   auto held = pool.acquire();
   EXPECT_EQ(pool.diagnostics().in_use, 1U);
-  EXPECT_THROW(pool.acquire(), Error);
+  const auto probe_started = std::chrono::steady_clock::now();
+  EXPECT_THROW(pool.acquire(std::chrono::milliseconds(25)), Error);
+  const auto probe_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - probe_started)
+                                 .count();
+  EXPECT_LT(probe_elapsed, 1000);
   EXPECT_GE(pool.diagnostics().acquisition_timeouts, 1U);
   held.mark_broken();
   held = {};

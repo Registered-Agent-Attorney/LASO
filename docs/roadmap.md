@@ -196,13 +196,19 @@ available host preflight required privileged system changes. No account or
 system service was created. Neither TSan execution nor dedicated-account
 sandbox acceptance is claimed.
 
-## M9 — deployment identity integration and production hardening
+## M9 — operational diagnostics and integration foundations
 
-Recommended next milestone after M8.1: implement M8.2's supervised
-out-of-process plugin host with a tested OS isolation boundary while retaining
-trusted native in-process plugins as an explicit mode. After M8.2, M9 should
-integrate a selected deployment identity provider through the provider-neutral
-principal/role seam and complete production hardening, including identity
-lifecycle, key rotation, proxy boundaries, and durable actor audit where the
-architecture supports it. Keep IdP-specific code outside LASO core unless a
-separate deployment-neutral contract is approved.
+M9 follows the merged M8 operator/API work. The feature-gap audit found that
+LASO-Web already has loopback-only runtime diagnostics and separate liveness /
+readiness routes, while LASO Core exposed only process liveness and an
+in-process SSE counter snapshot. M9.1 adds a Core readiness signal for
+PostgreSQL/schema compatibility and runtime drain state, plus an authorization-aware,
+low-cardinality Prometheus endpoint for API request latency/outcomes and
+session-SSE admission. It does not claim provider, artifact backend, or worker
+health through readiness, and it is not a complete tracing/metrics system.
+
+Subsequent work should establish a versioned machine-readable API contract,
+then advance the durable principal/audit boundary and out-of-process plugin
+execution. Credentialed remote MCP and webhook integrations remain dependent on
+a safe secret-reference contract and explicit network policy. Preserve the
+distinction between a supervised child process and an OS-sandboxed plugin.

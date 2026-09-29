@@ -3390,16 +3390,65 @@ TEST(Plugins, SymlinksNotLoaded) {
 TEST(Api, HealthAndVersion) {
   TemporaryDirectory dir;
   asio::io_context io;
-  Service s(io, config(dir.path));
+  const auto options = config(dir.path);
+  Service s(io, options);
   LocalDevelopmentIdentity identity;
   Api api(s, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/health", "").status, 200U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/health/live", "").status, 200U);
+  const auto readiness = api.handle("GET", "/api/v1/health/ready", "");
+  ASSERT_EQ(readiness.status, 200U);
+  EXPECT_EQ(readiness.body.at("status"), "ready");
+  EXPECT_EQ(readiness.body.at("checks").at("storage"), "available");
+  EXPECT_EQ(readiness.body.at("checks").at("schema"), "current");
+  {
+    pqxx::connection connection(options.postgres_dsn);
+    pqxx::work transaction(connection);
+    transaction.exec("UPDATE \"" + options.postgres_schema +
+                     "\".laso_schema_migrations SET version = 999 WHERE version = "
+                     "(SELECT MAX(version) FROM \"" +
+                     options.postgres_schema + "\".laso_schema_migrations)");
+    transaction.commit();
+  }
+  const auto incompatible = api.handle("GET", "/api/v1/health/ready", "");
+  ASSERT_EQ(incompatible.status, 503U);
+  EXPECT_EQ(incompatible.body.at("status"), "not_ready");
+  EXPECT_EQ(incompatible.body.at("checks").at("schema"), "incompatible");
+  EXPECT_EQ(incompatible.body.dump().find(options.postgres_dsn), std::string::npos);
   const auto version = api.handle("GET", "/api/v1/version", "");
   EXPECT_EQ(version.body.at("version"), laso::version);
   EXPECT_EQ(version.body.at("capabilities"),
             (Json{"sessions.durable", "sessions.ordered_turns", "sessions.sequential_execution",
                   "sessions.event_replay", "sessions.sse", "sessions.context_generations",
-                  "sessions.run_context_snapshots"}));
+                  "sessions.run_context_snapshots", "health.readiness",
+                  "observability.prometheus_api_metrics"}));
+}
+TEST(Api, PrometheusMetricsHaveBoundedLabelsAndOmitRequestData) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  Service service(io, config(dir.path));
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  constexpr auto path_canary = "metric-path-canary";
+  constexpr auto body_canary = "metric-body-canary";
+  constexpr auto credential_canary = "metric-credential-canary";
+  EXPECT_EQ(api.handle("GET", "/api/v1/unknown/metric-path-canary",
+                       Json{{"prompt", body_canary}}.dump(), credential_canary)
+                .status,
+            404U);
+  const auto metrics = api.handle("GET", "/api/v1/metrics", "");
+  ASSERT_EQ(metrics.status, 200U);
+  EXPECT_EQ(metrics.content_type, "text/plain; version=0.0.4; charset=utf-8");
+  ASSERT_TRUE(metrics.raw_body.has_value());
+  EXPECT_LT(metrics.raw_body->size(), 8192U);
+  EXPECT_NE(
+      metrics.raw_body->find("laso_api_responses_total{method=\"GET\",status_class=\"4xx\"} 1"),
+      std::string::npos);
+  EXPECT_NE(metrics.raw_body->find("laso_api_request_duration_seconds_bucket{le=\"+Inf\"} 1"),
+            std::string::npos);
+  EXPECT_EQ(metrics.raw_body->find(path_canary), std::string::npos);
+  EXPECT_EQ(metrics.raw_body->find(body_canary), std::string::npos);
+  EXPECT_EQ(metrics.raw_body->find(credential_canary), std::string::npos);
 }
 TEST(Api, RegistersAndCreatesRun) {
   TemporaryDirectory dir;
@@ -4259,6 +4308,7 @@ TEST(Api, AuthenticationBoundaryApplies) {
   Service s(io, config(dir.path));
   Api api(s, identity);
   EXPECT_EQ(api.handle("GET", "/api/v1/runs", "").status, 403U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/metrics", "").status, 403U);
 }
 TEST(Api, ServesRealHTTPHealth) {
   TemporaryDirectory dir;
@@ -4270,19 +4320,32 @@ TEST(Api, ServesRealHTTPHealth) {
   auto port = server.port();
   server.start();
   std::jthread worker([&] { io.run(); });
-  asio::io_context peer_io;
-  boost::beast::tcp_stream stream(peer_io);
-  stream.expires_after(std::chrono::seconds(5));
-  stream.connect({asio::ip::make_address("127.0.0.1"), port});
-  boost::beast::http::request<boost::beast::http::empty_body> request{boost::beast::http::verb::get,
-                                                                      "/api/v1/health", 11};
-  request.set(boost::beast::http::field::host, "localhost");
-  boost::beast::http::write(stream, request);
-  boost::beast::flat_buffer buffer;
-  boost::beast::http::response<boost::beast::http::string_body> response;
-  boost::beast::http::read(stream, buffer, response);
+  const auto get = [port](const std::string &target) {
+    asio::io_context peer_io;
+    boost::beast::tcp_stream stream(peer_io);
+    stream.expires_after(std::chrono::seconds(5));
+    stream.connect({asio::ip::make_address("127.0.0.1"), port});
+    boost::beast::http::request<boost::beast::http::empty_body> request{
+        boost::beast::http::verb::get, target, 11};
+    request.set(boost::beast::http::field::host, "localhost");
+    boost::beast::http::write(stream, request);
+    boost::beast::flat_buffer buffer;
+    boost::beast::http::response<boost::beast::http::string_body> response;
+    boost::beast::http::read(stream, buffer, response);
+    return response;
+  };
+  const auto response = get("/api/v1/health/live");
   EXPECT_EQ(response.result_int(), 200U);
   EXPECT_EQ(Json::parse(response.body()).at("status"), "ok");
+  const auto readiness = get("/api/v1/health/ready");
+  EXPECT_EQ(readiness.result_int(), 200U);
+  EXPECT_EQ(Json::parse(readiness.body()).at("status"), "ready");
+  const auto metrics = get("/api/v1/metrics");
+  EXPECT_EQ(metrics.result_int(), 200U);
+  EXPECT_EQ(metrics[boost::beast::http::field::content_type],
+            "text/plain; version=0.0.4; charset=utf-8");
+  EXPECT_NE(metrics.body().find("laso_api_responses_total"), std::string::npos);
+  EXPECT_NE(metrics.body().find("laso_session_sse_streams_rejected_total"), std::string::npos);
   server.stop();
   worker.join();
 }

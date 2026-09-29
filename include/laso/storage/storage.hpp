@@ -143,6 +143,11 @@ public:
   virtual Json operator_diagnostics() const {
     return {{"backend", "unknown"}, {"available", false}, {"schema_state", "unsupported"}};
   }
+  // Cheap readiness probe. Implementations should bound database work and must
+  // not return connection strings, schema names, or stored payloads.
+  virtual Json readiness_diagnostics() const {
+    return {{"available", false}, {"schema_state", "unsupported"}};
+  }
 };
 
 } // namespace laso

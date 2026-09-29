@@ -52,6 +52,11 @@ provides safe operator inspections that omit prompts, message payloads, and
 absolute artifact locations. M8 adds paged operator endpoints for diagnostics,
 run/session/worker state, approvals, integrations, artifacts, instances, and
 leases; artifact integrity results omit filesystem locations and raw errors.
+Current untagged development also has a cheap PostgreSQL/schema/runtime
+readiness probe and an authorization-aware Prometheus endpoint for bounded API
+response/latency and session-SSE admission metrics. These M9 additions are not
+part of the published RC2 tag. See [readiness and metrics](docs/observability.md)
+for scope and security boundaries.
 
 The PostgreSQL schema migrates forward at startup. Binary rollback across an
 incompatible schema requires restoration of a compatible database backup.
@@ -81,8 +86,9 @@ rerun specifically for this release candidate.
 ## Current limitations
 
 LASO does not provide a model-serving service, persistent secret store,
-built-in authentication platform, native-plugin sandbox, general remote shell,
-cluster scheduler, or exactly-once external side-effect guarantee. Multi-instance
+built-in authentication platform, native-plugin sandbox, full tracing or a
+complete service metrics suite, general remote shell, cluster scheduler, or
+exactly-once external side-effect guarantee. Multi-instance
 execution is opt-in and constrained by the supported worker and deterministic
 branch contracts. PostgreSQL schema rollback requires a compatible backup when
 the prior binary cannot read the migrated schema. These limits and their

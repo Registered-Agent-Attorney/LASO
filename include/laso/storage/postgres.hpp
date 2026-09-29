@@ -37,6 +37,7 @@ public:
   std::vector<Json> list(RecordKind, const std::string &run_id = "", std::size_t limit = 1000,
                          std::size_t offset = 0) const override;
   Json operator_diagnostics() const override;
+  Json readiness_diagnostics() const override;
 
 private:
   struct Impl;

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `/api/v1/health/ready` with bounded PostgreSQL, schema, and runtime-drain
+  status while preserving `/api/v1/health` as the compatibility liveness route.
+- Add authorization-aware Prometheus text metrics for bounded API request
+  counts/latency and session-SSE admission. Metric labels exclude paths,
+  principals, workflow IDs, prompts, messages, and errors.
 - Added bounded, metadata-only operator API views for service compatibility and
   capacity, runs, durable sessions and turns, NodeWork, worker jobs and
   requests, approvals, providers, plugins, artifacts, instances, and leases.

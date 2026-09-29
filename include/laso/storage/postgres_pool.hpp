@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -58,6 +59,7 @@ public:
   PostgresConnectionPool &operator=(const PostgresConnectionPool &) = delete;
 
   Lease acquire();
+  Lease acquire(std::chrono::milliseconds max_wait);
   PostgresPoolDiagnostics diagnostics() const;
 
 private:

@@ -1,8 +1,9 @@
 # Security threat model
 
-This document describes the trust boundaries that exist in LASO `v0.1.0-rc.2`. It is a
-deployment guide, not a claim that LASO is a sandbox or a complete security
-boundary.
+This document describes the merged development trust boundaries based on LASO
+`v0.1.0-rc.2`; later untagged changes are not included in that published tag.
+It is a deployment guide, not a claim that LASO is a sandbox or a complete
+security boundary.
 
 ## Trust boundaries
 
@@ -37,6 +38,8 @@ boundary.
 | Provider process leaks | Explicit owned process groups with bounded graceful/escalated teardown. |
 | Credential leakage through workers | Narrow environment allowlists; credentials are not persisted in PostgreSQL state. |
 | Accidental PostgreSQL exposure | Bind PostgreSQL privately/loopback-only, authenticate, and use a dedicated database/schema. |
+| Sensitive data in metrics or probes | Metrics use fixed method/status labels with no request data; readiness exposes only bounded storage/schema/runtime states. |
+| Unauthorized metrics scraping | `/api/v1/metrics` uses the same `IdentityProvider` authorization boundary as other Core API routes. |
 | Native plugin compromise | Plugins are privileged in-process code; load only explicitly trusted plugin directories. |
 | Arbitrary remote side effects | Not enabled by default; remote scope is limited to supported agent/worker workloads. |
 
@@ -44,7 +47,9 @@ boundary.
 
 Run LASO under a dedicated OS account with a dedicated state/workspace root,
 restrict file permissions, and keep the API on loopback unless a separately
-authenticated deployment is in place. Do not pass SSH keys, GitHub tokens,
+authenticated deployment is in place. Metrics scraping must use that same API
+authentication boundary or remain on a private loopback path; the default
+development identity is unauthenticated. Do not pass SSH keys, GitHub tokens,
 provider credentials, or unrelated environment variables to workers.
 
 LASO does not promise OS-level sandboxing, arbitrary tool isolation, exactly-once
