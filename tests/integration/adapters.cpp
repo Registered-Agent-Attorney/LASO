@@ -4523,7 +4523,7 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
 
   const auto providers = api.handle("GET", "/api/v1/operator/providers", "");
   ASSERT_EQ(providers.status, 200U);
-  ASSERT_EQ(providers.body.size(), 1U);
+  ASSERT_EQ(providers.body.size(), 2U);
   EXPECT_FALSE(providers.body[0].contains("plugin"));
   EXPECT_FALSE(providers.body[0].contains("capabilities"));
   EXPECT_TRUE(providers.body[0].contains("capability_count"));
