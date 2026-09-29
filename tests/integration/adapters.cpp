@@ -4400,12 +4400,12 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   session.id = "operator-session";
   session.pipeline_id = "operator-pipeline@1";
   storage->commit({{RecordKind::AgentSession, session.id, session.id, Json(session)}});
-  ASSERT_TRUE(storage->submit_session_turn(
-      session.id, "operator-turn",
-      Json{{"idempotency_key", "operator-private-idempotency-key"},
-           {"input", {{"text", prompt_secret}}},
-           {"state", "queued"}},
-      Json::object()));
+  ASSERT_TRUE(
+      storage->submit_session_turn(session.id, "operator-turn",
+                                   Json{{"idempotency_key", "operator-private-idempotency-key"},
+                                        {"input", {{"text", prompt_secret}}},
+                                        {"state", "queued"}},
+                                   Json::object()));
 
   laso::Run run;
   run.id = "operator-run";

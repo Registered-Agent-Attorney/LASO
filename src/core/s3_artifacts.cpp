@@ -482,7 +482,7 @@ ArtifactIntegrityReport S3ArtifactStore::integrity() const {
 }
 
 ArtifactIntegrityReport S3ArtifactStore::integrity_bounded(std::size_t max_entries,
-                                                            std::uint64_t) const {
+                                                           std::uint64_t) const {
   ArtifactIntegrityReport report;
   if (max_entries == 0) {
     report.complete = false;

@@ -99,8 +99,7 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
   if (std::regex_match(target, operator_match, operator_session_turns_route)) {
     if (method != "GET")
       return {405, {{"error", "Method not supported"}}};
-    return {200, service_.operator_page("session-turns", limit, offset,
-                                        operator_match[1].str())};
+    return {200, service_.operator_page("session-turns", limit, offset, operator_match[1].str())};
   }
   if (std::regex_match(target, operator_match, operator_collection_route)) {
     if (method != "GET")

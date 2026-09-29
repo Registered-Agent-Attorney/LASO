@@ -77,7 +77,7 @@ public:
                                                      std::size_t limit = 100,
                                                      std::size_t offset = 0) const = 0;
   virtual std::vector<LeaseRecord> list_leases(std::size_t limit = 100,
-                                              std::size_t offset = 0) const = 0;
+                                               std::size_t offset = 0) const = 0;
 };
 
 std::unique_ptr<Coordination> create_coordination(const CoordinationOptions &,

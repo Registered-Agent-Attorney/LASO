@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <cctype>
 #include <functional>
-#include <iomanip>
 #include <initializer_list>
+#include <iomanip>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
 #include <limits>
@@ -815,8 +815,8 @@ std::string safe_worker_request_type(const Json &value) {
 }
 std::string safe_worker_request_state(const Json &value) {
   const auto state = value.value("state", std::string{});
-  if (state == "pending" || state == "approved" || state == "denied" ||
-      state == "answered" || state == "cancelled" || state == "expired")
+  if (state == "pending" || state == "approved" || state == "denied" || state == "answered" ||
+      state == "cancelled" || state == "expired")
     return state;
   return "unknown";
 }
@@ -914,8 +914,9 @@ Json Service::operator_status() const {
               {"worker_jobs_per_worker", config_.max_worker_jobs_per_worker},
               {"session_sse_streams", config_.max_session_sse_streams},
               {"postgres_pool_connections", config_.postgres_pool_max_connections}}}}},
-          {"queues", {{"runs_by_state", storage.value("run_states", Json::object())},
-                       {"worker_jobs_by_state", storage.value("worker_job_states", Json::object())}}},
+          {"queues",
+           {{"runs_by_state", storage.value("run_states", Json::object())},
+            {"worker_jobs_by_state", storage.value("worker_job_states", Json::object())}}},
           {"recent_failures", storage.value("recent_failures", Json::array())},
           {"recovery_contract",
            {{"provider_attempts", "at-least-once"},
@@ -929,8 +930,8 @@ Json Service::operator_artifact_integrity() const {
     const auto has_errors = !report.errors.empty();
     return {{"supported", true},
             {"state", report.invalid || has_errors ? "degraded"
-                     : report.complete      ? "verified"
-                                            : "partial"},
+                      : report.complete            ? "verified"
+                                                   : "partial"},
             {"objects", report.objects},
             {"verified", report.verified},
             {"invalid", report.invalid},
@@ -1078,8 +1079,8 @@ Json Service::operator_page(const std::string &resource, std::size_t limit, std:
     }
   } else if (resource == "instances") {
     if (coordination_)
-      for (const auto &instance : coordination_->list_instances(config_.instance_stale_after_ms,
-                                                                 limit, offset))
+      for (const auto &instance :
+           coordination_->list_instances(config_.instance_stale_after_ms, limit, offset))
         result.push_back({{"instance_id", instance.instance_id},
                           {"started_at", instance.started_at},
                           {"last_heartbeat_at", instance.last_heartbeat_at},

@@ -427,7 +427,7 @@ ArtifactIntegrityReport LocalArtifactStore::integrity() const {
 }
 
 ArtifactIntegrityReport LocalArtifactStore::integrity_bounded(std::size_t max_entries,
-                                                               std::uint64_t max_bytes) const {
+                                                              std::uint64_t max_bytes) const {
   ArtifactIntegrityReport report;
   std::uint64_t bytes_verified = 0;
   if (max_entries == 0) {

@@ -1233,7 +1233,8 @@ Json PostgresStorage::operator_diagnostics() const {
     try {
       connection = impl_->pool->acquire();
       pqxx::work tx(connection.connection());
-      const auto migration = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations");
+      const auto migration =
+          tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations");
       if (!migration.empty())
         schema_version = migration.front()[0].as<std::uint64_t>();
       const auto runs = tx.exec(
@@ -1246,11 +1247,10 @@ Json PostgresStorage::operator_diagnostics() const {
       for (const auto &row : jobs)
         if (!row[0].is_null())
           worker_job_states[row[0].as<std::string>()] = row[1].as<std::uint64_t>();
-      const auto failures = tx.exec(
-          "SELECT id, body::jsonb->>'state', body::jsonb->>'updated_at', "
-          "COALESCE(body::jsonb->>'error', '') <> '' FROM runs "
-          "WHERE body::jsonb->>'state' IN ('Failed','TimedOut','Paused') "
-          "ORDER BY sequence DESC LIMIT 10");
+      const auto failures = tx.exec("SELECT id, body::jsonb->>'state', body::jsonb->>'updated_at', "
+                                    "COALESCE(body::jsonb->>'error', '') <> '' FROM runs "
+                                    "WHERE body::jsonb->>'state' IN ('Failed','TimedOut','Paused') "
+                                    "ORDER BY sequence DESC LIMIT 10");
       for (const auto &row : failures) {
         recent_failures.push_back({{"id", row[0].as<std::string>()},
                                    {"state", row[1].as<std::string>()},

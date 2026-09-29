@@ -63,7 +63,7 @@ public:
                    const std::string &sha256 = {}, std::uint64_t size = 0) const override;
   ArtifactIntegrityReport integrity() const override;
   ArtifactIntegrityReport integrity_bounded(std::size_t max_entries,
-                                           std::uint64_t max_bytes) const override;
+                                            std::uint64_t max_bytes) const override;
   Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) override;
   const std::filesystem::path &root() const override {
     return root_;
@@ -96,7 +96,7 @@ public:
                    const std::string &sha256 = {}, std::uint64_t size = 0) const override;
   ArtifactIntegrityReport integrity() const override;
   ArtifactIntegrityReport integrity_bounded(std::size_t max_entries,
-                                           std::uint64_t max_bytes) const override;
+                                            std::uint64_t max_bytes) const override;
   Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) override;
   const std::filesystem::path &root() const override {
     return cache_root_;
@@ -149,7 +149,7 @@ public:
                    const std::string &sha256 = {}, std::uint64_t size = 0) const override;
   ArtifactIntegrityReport integrity() const override;
   ArtifactIntegrityReport integrity_bounded(std::size_t max_entries,
-                                           std::uint64_t max_bytes) const override;
+                                            std::uint64_t max_bytes) const override;
   Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) override;
   const std::filesystem::path &root() const override;
 
