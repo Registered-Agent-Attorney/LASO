@@ -263,7 +263,8 @@ struct S3ArtifactStore::Impl {
   }
 
   void download_verified(const std::string &object_id, const std::filesystem::path &path,
-                         const std::string &expected_sha256, std::uint64_t expected_size) const {
+                         const std::string &expected_sha256, std::uint64_t expected_size,
+                         std::uint64_t max_bytes) const {
     const auto hex = validate_object_id(object_id);
     if (!expected_sha256.empty() && validate_object_id(expected_sha256) != hex)
       throw Error(ErrorCode::Conflict, "Artifact object identity does not match expected digest");
@@ -271,7 +272,7 @@ struct S3ArtifactStore::Impl {
     std::string remote_digest;
     if (!head(object_id, &remote_size, &remote_digest))
       throw Error(ErrorCode::NotFound, "Artifact object is missing from S3 storage");
-    if (remote_size > limits.max_object_bytes ||
+    if (remote_size > limits.max_object_bytes || remote_size > max_bytes ||
         (expected_size != 0 && remote_size != expected_size))
       throw Error(ErrorCode::Conflict, "Artifact object size does not match expected size");
     download(object_id, path);
@@ -284,7 +285,7 @@ struct S3ArtifactStore::Impl {
   void verify_existing(const std::string &object_id, const std::string &digest,
                        std::uint64_t size) const {
     TemporaryFile staged(scratch_root / "temp");
-    download_verified(object_id, staged.path(), digest, size);
+    download_verified(object_id, staged.path(), digest, size, limits.max_object_bytes);
   }
 
   Artifact publish(Artifact metadata, const std::filesystem::path &staged,
@@ -417,7 +418,8 @@ bool S3ArtifactStore::exists(const std::string &object_id) const {
 void S3ArtifactStore::verify(const std::string &object_id, const std::string &expected_sha256,
                              std::uint64_t expected_size) const {
   TemporaryFile staged(impl_->scratch_root / "temp");
-  impl_->download_verified(object_id, staged.path(), expected_sha256, expected_size);
+  impl_->download_verified(object_id, staged.path(), expected_sha256, expected_size,
+                           impl_->limits.max_object_bytes);
 }
 
 void S3ArtifactStore::materialize(const std::string &object_id,
@@ -431,7 +433,8 @@ void S3ArtifactStore::materialize(const std::string &object_id,
   if (error)
     throw Error(ErrorCode::Storage, "Unable to create artifact destination");
   TemporaryFile staged(parent);
-  impl_->download_verified(object_id, staged.path(), expected_sha256, expected_size);
+  impl_->download_verified(object_id, staged.path(), expected_sha256, expected_size,
+                           impl_->limits.max_object_bytes);
   const auto fd = open(staged.path().c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0 || fsync(fd) != 0) {
     if (fd >= 0)
@@ -475,6 +478,43 @@ ArtifactIntegrityReport S3ArtifactStore::integrity() const {
       ++report.temporary;
   if (error)
     throw Error(ErrorCode::Storage, "Unable to inspect S3 artifact staging files");
+  return report;
+}
+
+ArtifactIntegrityReport S3ArtifactStore::integrity_bounded(std::size_t max_entries,
+                                                            std::uint64_t) const {
+  ArtifactIntegrityReport report;
+  if (max_entries == 0) {
+    report.complete = false;
+    return report;
+  }
+  const auto limit = std::min<std::size_t>(max_entries, 100);
+  const auto records = impl_->storage.list(RecordKind::Artifact, "", limit, 0);
+  std::map<std::string, std::uint64_t> referenced;
+  for (const auto &record : records) {
+    const auto artifact = record.get<Artifact>();
+    if (!artifact.object_id.empty())
+      referenced.emplace(artifact.object_id, artifact.size);
+  }
+  report.entries_scanned = records.size();
+  report.complete = records.size() < limit;
+  report.objects = referenced.size();
+  report.verification = "remote_metadata";
+  for (const auto &[object_id, size] : referenced) {
+    try {
+      std::uint64_t remote_size = 0;
+      std::string remote_digest;
+      if (!impl_->head(object_id, &remote_size, &remote_digest))
+        throw Error(ErrorCode::NotFound, "Artifact object is missing");
+      if (remote_size > impl_->limits.max_object_bytes || remote_size != size ||
+          remote_digest != validate_object_id(object_id))
+        throw Error(ErrorCode::Conflict, "Artifact metadata integrity check failed");
+      ++report.verified;
+    } catch (const Error &) {
+      ++report.invalid;
+      report.errors.push_back({{"object_id", object_id}, {"error", "integrity-check-failed"}});
+    }
+  }
   return report;
 }
 

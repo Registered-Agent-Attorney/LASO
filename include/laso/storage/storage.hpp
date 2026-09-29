@@ -138,6 +138,11 @@ public:
   virtual Json get(RecordKind kind, const std::string &id) const = 0;
   virtual std::vector<Json> list(RecordKind kind, const std::string &run_id = "",
                                  std::size_t limit = 1000, std::size_t offset = 0) const = 0;
+  // Bounded, metadata-only diagnostics for the operator API. Implementations
+  // must not return connection strings, schema names, or stored payloads.
+  virtual Json operator_diagnostics() const {
+    return {{"backend", "unknown"}, {"available", false}, {"schema_state", "unsupported"}};
+  }
 };
 
 } // namespace laso

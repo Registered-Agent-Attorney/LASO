@@ -1,6 +1,6 @@
 # Capability matrix
 
-The matrix describes the supported contract in this release candidate. A
+The matrix describes the supported contract in `v0.1.0-rc.2`. A
 successful local unit test does not imply support in every backend mode.
 
 | Capability | PostgreSQL single-owner | PostgreSQL multi-instance |

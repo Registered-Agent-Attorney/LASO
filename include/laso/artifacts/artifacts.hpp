@@ -19,7 +19,11 @@ struct ArtifactIntegrityReport {
   std::size_t objects = 0;
   std::size_t verified = 0;
   std::size_t invalid = 0;
+  std::size_t unverified = 0;
   std::size_t temporary = 0;
+  std::size_t entries_scanned = 0;
+  bool complete = true;
+  std::string verification = "content_hash";
   std::vector<Json> errors;
 };
 
@@ -34,6 +38,11 @@ public:
   virtual void materialize(const std::string &object_id, const std::filesystem::path &destination,
                            const std::string &sha256 = {}, std::uint64_t size = 0) const = 0;
   virtual ArtifactIntegrityReport integrity() const = 0;
+  // Inspects no more than max_entries filesystem or metadata entries and
+  // verifies at most max_bytes of local object data. Remote stores may report
+  // that local integrity inspection is unsupported.
+  virtual ArtifactIntegrityReport integrity_bounded(std::size_t max_entries,
+                                                    std::uint64_t max_bytes) const = 0;
   virtual Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) = 0;
   virtual const std::filesystem::path &root() const = 0;
 };
@@ -53,6 +62,8 @@ public:
   void materialize(const std::string &object_id, const std::filesystem::path &destination,
                    const std::string &sha256 = {}, std::uint64_t size = 0) const override;
   ArtifactIntegrityReport integrity() const override;
+  ArtifactIntegrityReport integrity_bounded(std::size_t max_entries,
+                                           std::uint64_t max_bytes) const override;
   Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) override;
   const std::filesystem::path &root() const override {
     return root_;
@@ -84,6 +95,8 @@ public:
   void materialize(const std::string &object_id, const std::filesystem::path &destination,
                    const std::string &sha256 = {}, std::uint64_t size = 0) const override;
   ArtifactIntegrityReport integrity() const override;
+  ArtifactIntegrityReport integrity_bounded(std::size_t max_entries,
+                                           std::uint64_t max_bytes) const override;
   Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) override;
   const std::filesystem::path &root() const override {
     return cache_root_;
@@ -135,6 +148,8 @@ public:
   void materialize(const std::string &object_id, const std::filesystem::path &destination,
                    const std::string &sha256 = {}, std::uint64_t size = 0) const override;
   ArtifactIntegrityReport integrity() const override;
+  ArtifactIntegrityReport integrity_bounded(std::size_t max_entries,
+                                           std::uint64_t max_bytes) const override;
   Json collect_garbage(bool dry_run, std::uint64_t grace_seconds = 0) override;
   const std::filesystem::path &root() const override;
 

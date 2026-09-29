@@ -1,5 +1,8 @@
+#include <algorithm>
+#include <cctype>
 #include <functional>
 #include <iomanip>
+#include <initializer_list>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
 #include <limits>
@@ -761,7 +764,7 @@ Json operator_artifact_summary(const Json &value) {
   Json result = {{"id", artifact.id},
                  {"run_id", artifact.run_id},
                  {"node_id", artifact.node_id},
-                 {"name", artifact.name},
+                 {"name_present", !artifact.name.empty()},
                  {"media_type", artifact.media_type},
                  {"created_at", artifact.created_at},
                  {"object_id", artifact.object_id},
@@ -774,6 +777,48 @@ Json operator_artifact_summary(const Json &value) {
     if (artifact.metadata.contains(key))
       result["metadata"][key] = artifact.metadata.at(key);
   return result;
+}
+std::string safe_error_summary(std::string error) {
+  std::transform(error.begin(), error.end(), error.begin(),
+                 [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+  if (error.find("timeout") != std::string::npos || error.find("timed out") != std::string::npos)
+    return "Operation timed out";
+  if (error.find("cancel") != std::string::npos)
+    return "Operation was cancelled";
+  if (error.find("capacity") != std::string::npos || error.find("limit") != std::string::npos)
+    return "Capacity limit was reached";
+  if (error.find("policy") != std::string::npos || error.find("denied") != std::string::npos ||
+      error.find("permission") != std::string::npos)
+    return "Policy or permission check failed";
+  if (error.find("postgres") != std::string::npos || error.find("database") != std::string::npos ||
+      error.find("storage") != std::string::npos)
+    return "Storage operation failed";
+  if (error.find("provider") != std::string::npos || error.find("worker") != std::string::npos)
+    return "Provider or worker operation failed";
+  return "Execution failed; details are withheld";
+}
+void redact_error(Json &value, const char *field, const char *summary_field) {
+  if (!value.contains(field) || !value.at(field).is_string()) {
+    value.erase(field);
+    return;
+  }
+  const auto error = value.at(field).get<std::string>();
+  value.erase(field);
+  if (!error.empty())
+    value[summary_field] = safe_error_summary(error);
+}
+std::string safe_worker_request_type(const Json &value) {
+  const auto type = value.value("request_type", std::string{});
+  if (type == "approval" || type == "permission" || type == "question")
+    return type;
+  return "other";
+}
+std::string safe_worker_request_state(const Json &value) {
+  const auto state = value.value("state", std::string{});
+  if (state == "pending" || state == "approved" || state == "denied" ||
+      state == "answered" || state == "cancelled" || state == "expired")
+    return state;
+  return "unknown";
 }
 } // namespace
 std::vector<Json> Service::inspect_runs() const {
@@ -835,6 +880,227 @@ Json Service::artifact_integrity() const {
 Json Service::artifact_gc(bool dry_run, std::uint64_t grace_seconds) {
   return artifacts_->collect_garbage(dry_run, grace_seconds);
 }
+Json Service::operator_status() const {
+  const auto storage = storage_->operator_diagnostics();
+  const auto runtime = runtime_.diagnostics();
+  Json coordination = {{"enabled", coordination_ != nullptr}};
+  if (coordination_) {
+    const auto diagnostics = coordination_->diagnostics();
+    coordination.update({{"pool_size", diagnostics.pool_size},
+                         {"pool_in_use", diagnostics.pool_in_use},
+                         {"pool_acquisition_timeouts", diagnostics.pool_acquisition_timeouts},
+                         {"pool_replacements", diagnostics.pool_replacements},
+                         {"lease_acquisition_failures", diagnostics.lease_acquisition_failures},
+                         {"renewal_failures", diagnostics.renewal_failures},
+                         {"fencing_rejections", diagnostics.fencing_rejections}});
+  }
+  return {{"system",
+           {{"version", version}, {"api_version", 1}, {"pipeline_schema", 1}, {"plugin_abi", 1}}},
+          {"storage", storage},
+          {"execution",
+           {{"mode", config_.execution_mode},
+            {"instance_id", instance_id_},
+            {"state", runtime.stopping ? "draining" : "active"}}},
+          {"coordination", std::move(coordination)},
+          {"capacity",
+           {{"active_runs", runtime.active_runs},
+            {"active_nodes", runtime.active_nodes},
+            {"limits",
+             {{"active_runs", config_.max_runs},
+              {"pending_runs", config_.max_pending_runs},
+              {"active_nodes", config_.max_nodes},
+              {"nodes_per_run", config_.max_nodes_per_run},
+              {"worker_jobs", config_.max_worker_jobs},
+              {"worker_jobs_per_worker", config_.max_worker_jobs_per_worker},
+              {"session_sse_streams", config_.max_session_sse_streams},
+              {"postgres_pool_connections", config_.postgres_pool_max_connections}}}}},
+          {"queues", {{"runs_by_state", storage.value("run_states", Json::object())},
+                       {"worker_jobs_by_state", storage.value("worker_job_states", Json::object())}}},
+          {"recent_failures", storage.value("recent_failures", Json::array())},
+          {"recovery_contract",
+           {{"provider_attempts", "at-least-once"},
+            {"explicit_resume_may_replay_unfinished_node", true},
+            {"database_rollback", "restore-compatible-backup"}}}};
+}
+
+Json Service::operator_artifact_integrity() const {
+  try {
+    const auto report = artifacts_->integrity_bounded(10, 16 * 1024 * 1024);
+    const auto has_errors = !report.errors.empty();
+    return {{"supported", true},
+            {"state", report.invalid || has_errors ? "degraded"
+                     : report.complete      ? "verified"
+                                            : "partial"},
+            {"objects", report.objects},
+            {"verified", report.verified},
+            {"invalid", report.invalid},
+            {"unverified", report.unverified},
+            {"entries_scanned", report.entries_scanned},
+            {"complete", report.complete},
+            {"truncated", !report.complete},
+            {"verification", report.verification},
+            {"temporary", report.temporary},
+            {"errors_present", has_errors}};
+  } catch (const Error &error) {
+    if (error.code != ErrorCode::Policy)
+      throw;
+    return {{"supported", false}, {"state", "not_supported"}};
+  }
+}
+
+Json Service::operator_page(const std::string &resource, std::size_t limit, std::size_t offset,
+                            const std::string &parent_id) const {
+  if (limit == 0 || limit > 100 || offset > 100000000)
+    throw Error(ErrorCode::Validation, "Operator pagination limit exceeded");
+  Json result = Json::array();
+  if (resource == "runs") {
+    for (const auto &value : storage_->list(RecordKind::Run, "", limit, offset)) {
+      auto summary = operator_run_summary(value.get<Run>());
+      redact_error(summary, "error", "error_summary");
+      result.push_back(std::move(summary));
+    }
+  } else if (resource == "node-work") {
+    for (const auto &value : storage_->list(RecordKind::NodeWork, "", limit, offset)) {
+      auto summary = operator_node_work_summary(value.get<NodeWork>());
+      redact_error(summary, "error", "error_summary");
+      result.push_back(std::move(summary));
+    }
+  } else if (resource == "worker-jobs") {
+    for (const auto &value : worker_manager_->jobs("", limit, offset)) {
+      auto summary = operator_worker_job_summary(value);
+      summary.erase("external_job_id");
+      redact_error(summary, "error", "error_summary");
+      redact_error(summary, "cancellation_error", "cancellation_error_summary");
+      for (const auto *key : {"provider", "model", "executor"})
+        summary["usage"].erase(key);
+      result.push_back(std::move(summary));
+    }
+  } else if (resource == "artifacts") {
+    for (const auto &value : storage_->list(RecordKind::Artifact, "", limit, offset))
+      result.push_back(operator_artifact_summary(value));
+  } else if (resource == "sessions") {
+    for (const auto &value : storage_->list(RecordKind::AgentSession, "", limit, offset)) {
+      const auto session = value.get<AgentSession>();
+      result.push_back({{"id", session.id},
+                        {"pipeline_id", session.pipeline_id},
+                        {"state", session.state},
+                        {"created_at", session.created_at},
+                        {"updated_at", session.updated_at},
+                        {"active_turn_id", session.active_turn_id},
+                        {"active_run_id", session.active_run_id},
+                        {"next_sequence", session.next_sequence}});
+    }
+  } else if (resource == "session-turns") {
+    if (parent_id.empty())
+      throw Error(ErrorCode::Validation, "Session id is required");
+    for (const auto &value : storage_->list(RecordKind::SessionTurn, parent_id, limit, offset)) {
+      Json summary = {{"id", value.value("id", std::string{})},
+                      {"session_id", value.value("session_id", std::string{})},
+                      {"sequence", value.value("sequence", std::uint64_t{0})},
+                      {"state", value.value("state", std::string{})},
+                      {"accepted_at", value.value("accepted_at", std::string{})},
+                      {"run_id", value.value("run_id", std::string{})},
+                      {"input_present", value.contains("input")}};
+      result.push_back(std::move(summary));
+    }
+  } else if (resource == "approvals") {
+    for (const auto &value : storage_->list(RecordKind::Approval, "", limit, offset)) {
+      const auto approval = value.get<Approval>();
+      result.push_back({{"id", approval.id},
+                        {"run_id", approval.run_id},
+                        {"node_id", approval.node_id},
+                        {"action", approval.action},
+                        {"visit", approval.visit},
+                        {"decision", approval.decision},
+                        {"created_at", approval.created_at},
+                        {"decided_at", approval.decided_at},
+                        {"actor", approval.actor}});
+    }
+  } else if (resource == "worker-requests") {
+    for (const auto &value : worker_manager_->worker_interactions("", limit, offset)) {
+      result.push_back({{"id", value.value("id", std::string{})},
+                        {"worker_job_id", value.value("worker_job_id", std::string{})},
+                        {"worker_id", value.value("worker_id", std::string{})},
+                        {"run_id", value.value("run_id", std::string{})},
+                        {"session_id", value.value("session_id", std::string{})},
+                        {"request_type", safe_worker_request_type(value)},
+                        {"state", safe_worker_request_state(value)},
+                        {"created_at", value.value("created_at", std::string{})},
+                        {"deadline", value.value("deadline", std::string{})},
+                        {"details_withheld", true},
+                        {"actor", value.value("actor", std::string{})},
+                        {"decided_at", value.value("decided_at", std::string{})}});
+    }
+  } else if (resource == "providers") {
+    const auto names = providers_.names();
+    const auto end = std::min(names.size(), offset + limit);
+    for (auto index = offset; index < end; ++index) {
+      const auto &name = names[index];
+      const auto provider = providers_.get(name);
+      const auto metadata = provider->metadata();
+      result.push_back({{"name", name},
+                        {"version", metadata.version},
+                        {"remote", metadata.remote},
+                        {"streaming", metadata.streaming},
+                        {"context_size", metadata.context_size},
+                        {"continuation_mode", continuation_mode_name(metadata.continuation_mode)},
+                        {"healthy", provider->health().healthy},
+                        {"capability_count", metadata.capabilities.size()}});
+    }
+  } else if (resource == "plugins") {
+    const auto &plugin_infos = plugins_.plugins();
+    const auto end = std::min(plugin_infos.size(), offset + limit);
+    for (auto index = offset; index < end; ++index) {
+      const auto &plugin = plugin_infos[index];
+      Json summary = {{"name", plugin.name},
+                      {"version", plugin.version},
+                      {"abi", plugin.abi},
+                      {"loaded", plugin.loaded}};
+      if (!plugin.error.empty())
+        summary["error_summary"] = "Plugin load failed; deployment details are withheld";
+      result.push_back(std::move(summary));
+    }
+  } else if (resource == "workers") {
+    const auto names = worker_registry_.names();
+    const auto end = std::min(names.size(), offset + limit);
+    for (auto index = offset; index < end; ++index) {
+      const auto metadata = worker_registry_.get(names[index])->metadata();
+      result.push_back({{"id", metadata.id},
+                        {"version", metadata.version},
+                        {"status", metadata.status},
+                        {"local", metadata.local},
+                        {"remote", metadata.remote},
+                        {"healthy", metadata.healthy},
+                        {"enabled", metadata.enabled},
+                        {"supports_recovery", metadata.supports_recovery},
+                        {"supports_cancellation", metadata.supports_cancellation},
+                        {"capability_count", metadata.capabilities.size()}});
+    }
+  } else if (resource == "instances") {
+    if (coordination_)
+      for (const auto &instance : coordination_->list_instances(config_.instance_stale_after_ms,
+                                                                 limit, offset))
+        result.push_back({{"instance_id", instance.instance_id},
+                          {"started_at", instance.started_at},
+                          {"last_heartbeat_at", instance.last_heartbeat_at},
+                          {"software_version", instance.software_version},
+                          {"state", instance.state}});
+  } else if (resource == "leases") {
+    if (coordination_)
+      for (const auto &lease : coordination_->list_leases(limit, offset))
+        result.push_back({{"resource_key", lease.resource_key},
+                          {"owner_instance", lease.owner_instance},
+                          {"fencing_token", lease.fencing_token},
+                          {"acquired_at", lease.acquired_at},
+                          {"heartbeat_at", lease.heartbeat_at},
+                          {"expires_at", lease.expires_at},
+                          {"active", lease.active}});
+  } else {
+    throw Error(ErrorCode::NotFound, "Operator resource is not available");
+  }
+  return result;
+}
+
 std::vector<Json> Service::inspect_worker_jobs(const std::string &run_id) const {
   std::vector<Json> result;
   for (const auto &value : worker_manager_->jobs(run_id, 10000, 0))

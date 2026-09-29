@@ -140,3 +140,53 @@ restoring a compatible database backup; TSan could not start in the validation
 runtime; and the dedicated system-account filesystem sandbox was statically
 checked but not exercised with a system-wide service. These boundaries remain
 explicit release limitations.
+
+## M8 — operator/admin and production boundary
+
+M8 makes the shipped system easier to operate while keeping its trust and
+recovery limits explicit. It is not a production-readiness declaration.
+
+### M8.0 — repository truth and operator API support
+
+Status: documentation closure is in progress. Current release documentation
+must describe PostgreSQL as the only supported database, place shipped RC2 work
+under the RC2 changelog heading, preserve dated validation history, and state
+known deployment/authentication/plugin boundaries accurately. Add only
+metadata-safe LASO API support that the separate Web operator surface cannot
+obtain through existing safe interfaces.
+
+### M8.1 — separate LASO-Web operator/admin surface
+
+Status: planned for the private Go LASO-Web repository. Provide a separate
+operator route with role-gated metadata views and explicit, auditable actions.
+The Web application remains an API client and reverse-proxy; LASO remains the
+orchestration authority. Remote administration requires a trustworthy
+deployment-owned principal and operator role. The first boundary uses a
+provider-neutral trusted-proxy contract; full OIDC/JWT integration is deferred
+to a later milestone. No prompts, message bodies, provider-native session IDs,
+credentials, DSNs, absolute sensitive paths, or arbitrary provider metadata are
+part of the operator contract.
+
+### M8.2 — native-plugin isolation design
+
+Status: design review is in progress; implementation remains future work.
+Evaluate reuse of the supervised process-worker boundary for worker plugins and
+define the additional contracts for protocol compatibility, lifetime,
+cancellation, crash handling, bounded data, permission/environment allowlists,
+workspace/filesystem access, resource limits, logging/redaction, upgrades,
+plugin identity, and coexistence with the current C ABI. Until an OS isolation
+boundary is implemented and tested, process separation is a lifecycle boundary
+and plugins remain privileged code.
+
+M8 acceptance retains the PostgreSQL-only storage contract, the complete C++
+regression matrix, durable fencing/idempotency/recovery behavior, existing
+two-browser session coverage, and exact-head hosted validation. Environmental
+TSan or dedicated-account systemd failures must remain explicitly unclaimed.
+
+## M9 — deployment identity integration and production hardening
+
+Recommended next milestone after M8.1: integrate a selected deployment identity
+provider through the provider-neutral principal/role seam, then validate its
+session lifetime, key rotation, proxy boundaries, audit identity, and
+authorization behavior. Keep IdP-specific code outside LASO core unless a
+separate deployment-neutral contract is approved.

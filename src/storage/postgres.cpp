@@ -1222,4 +1222,66 @@ std::vector<Json> PostgresStorage::list(RecordKind kind, const std::string &run_
     throw Error(ErrorCode::Storage, "PostgreSQL list failed");
   }
 }
+
+Json PostgresStorage::operator_diagnostics() const {
+  std::uint64_t schema_version = 0;
+  Json run_states = Json::object();
+  Json worker_job_states = Json::object();
+  Json recent_failures = Json::array();
+  {
+    PostgresConnectionPool::Lease connection;
+    try {
+      connection = impl_->pool->acquire();
+      pqxx::work tx(connection.connection());
+      const auto migration = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations");
+      if (!migration.empty())
+        schema_version = migration.front()[0].as<std::uint64_t>();
+      const auto runs = tx.exec(
+          "SELECT body::jsonb->>'state', COUNT(*) FROM runs GROUP BY body::jsonb->>'state'");
+      for (const auto &row : runs)
+        if (!row[0].is_null())
+          run_states[row[0].as<std::string>()] = row[1].as<std::uint64_t>();
+      const auto jobs = tx.exec("SELECT body::jsonb->>'state', COUNT(*) FROM worker_jobs "
+                                "GROUP BY body::jsonb->>'state'");
+      for (const auto &row : jobs)
+        if (!row[0].is_null())
+          worker_job_states[row[0].as<std::string>()] = row[1].as<std::uint64_t>();
+      const auto failures = tx.exec(
+          "SELECT id, body::jsonb->>'state', body::jsonb->>'updated_at', "
+          "COALESCE(body::jsonb->>'error', '') <> '' FROM runs "
+          "WHERE body::jsonb->>'state' IN ('Failed','TimedOut','Paused') "
+          "ORDER BY sequence DESC LIMIT 10");
+      for (const auto &row : failures) {
+        recent_failures.push_back({{"id", row[0].as<std::string>()},
+                                   {"state", row[1].as<std::string>()},
+                                   {"updated_at", row[2].as<std::string>()},
+                                   {"error_present", row[3].as<bool>()}});
+      }
+      tx.commit();
+    } catch (const Error &) {
+      throw;
+    } catch (const pqxx::sql_error &error) {
+      translate_sql_error(error);
+    } catch (const pqxx::broken_connection &) {
+      connection.mark_broken();
+      translate_connection_error();
+    } catch (const std::exception &) {
+      throw Error(ErrorCode::Storage, "PostgreSQL diagnostics failed");
+    }
+  }
+  const auto pool = impl_->pool->diagnostics();
+  return {{"backend", "postgresql"},
+          {"available", true},
+          {"schema_version", schema_version},
+          {"supported_schema_version", postgres_schema_version},
+          {"schema_state", schema_version == postgres_schema_version ? "current" : "mismatch"},
+          {"connection_pool",
+           {{"size", pool.size},
+            {"in_use", pool.in_use},
+            {"acquisition_timeouts", pool.acquisition_timeouts},
+            {"replacements", pool.replacements}}},
+          {"run_states", std::move(run_states)},
+          {"worker_job_states", std::move(worker_job_states)},
+          {"recent_failures", std::move(recent_failures)}};
+}
 } // namespace laso

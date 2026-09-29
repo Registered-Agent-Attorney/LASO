@@ -1,147 +1,94 @@
-# LASO v0.1 implementation report
+# LASO implementation report
 
-> Historical report for an earlier SQLite-first snapshot. SQLite dependencies and architecture described below no longer apply; see [storage migration guidance](docs/storage.md) and the current validation record in [VALIDATION.md](VALIDATION.md).
+Current development starts from `v0.1.0-rc.2`; untagged M8 commits retain that
+release version until a later candidate is published. The RC2 validation record
+describes the release source at public `main` SHA
+`568edd2c9934ad10553c822af977113227379931`. Exact scope and dated historical
+evidence are in [VALIDATION.md](VALIDATION.md). RC2 is a release candidate for
+controlled evaluation, not a general production-readiness declaration.
 
-The repository contains a native Linux C++20 baseline. **Implementation, static
-review, Ubuntu GCC/Clang builds, the complete test suite, and ASan/UBSan validation
-are complete for this snapshot.** See [the evidence record](VALIDATION.md).
+## Current implementation
 
-## Architecture and repository
+LASO is a Linux-first C++20 workflow orchestration framework. Applications
+provide their own pipeline definitions and integrations. The API and CLI use
+shared application services; the runtime owns pipeline execution, policies,
+durable state transitions, scheduling, recovery, and worker coordination.
 
-```text
-laso/
-├── CMakeLists.txt, README.md, LICENSE, CONTRIBUTING.md, SECURITY.md, CHANGELOG.md
-├── VALIDATION.md, IMPLEMENTATION_REPORT.md
-├── .github/workflows/linux.yml
-├── .clang-format, .clang-tidy, .gitattributes
-├── include/laso/
-│   ├── core/, pipeline/, runtime/, nodes/, events/, policies/
-│   ├── providers/, tools/, storage/, plugins/, scheduler/
-│   └── artifacts/, security/, application/, api/, cli/
-├── src/
-│   ├── core/, pipeline/, nodes/, storage/, plugins/, scheduler/
-│   ├── runtime/{runtime,execution,graph,executor}.cpp
-│   └── application/, api/, cli/
-├── apps/{laso,laso-server}/main.cpp
-├── plugin_sdk/include/laso_plugin.h, examples/echo.c, README.md
-├── tests/{unit,integration,fixtures}/, support.hpp
-├── examples/{hello-pipeline,agent-review,human-approval,native-plugin}/
-├── examples/{parallel-join,bounded-loop,subpipeline}/
-├── templates/README.md
-├── config/laso.example.yaml, .env.example
-├── docs/
-└── Dockerfile, .dockerignore, deploy/{systemd,docker,examples}/
-```
+PostgreSQL is the only supported database implementation and is required for
+single-owner and multi-instance deployments. The storage adapter applies
+versioned migrations and uses bounded connection pools. SQLite storage,
+`storage_backend`, and `db_path` are not shipped. Existing SQLite state is not
+imported automatically; the migration and backup requirements are in
+[storage.md](docs/storage.md#upgrading-from-sqlite).
 
-API and CLI call shared application services. Runtime code has no HTTP dependency.
-Typed domain models, interfaces and registries separate framework mechanisms from
-adapters. Boost.Asio supplies coroutines and a finite worker executor; Boost.Beast
-supplies HTTP parsing/I/O. SQLite, yaml-cpp, nlohmann/json, spdlog, CLI11 and
-GoogleTest use distribution packages through CMake `find_package`.
+The framework includes bounded coroutine execution, approvals, immutable
+pipeline revisions and child runs, schedules and event triggers, durable agent
+sessions and sequential turns, replayable events/SSE, context provenance,
+recovery inspection, and opt-in multi-instance run and deterministic `NodeWork`
+claiming with leases and fencing. Worker attempts are at least once; external
+provider side effects are not guaranteed exactly once.
 
-## Build and binaries
+The local filesystem is the default content-addressed artifact store. An
+optional S3-compatible backend is built only when enabled. Artifact metadata
+retains integrity and run/worker provenance; remote S3 garbage collection is
+unsupported. Provider adapters are optional supervised executables. The
+Codex app-server adapter is the validated real-provider durable-session path;
+other provider adapters remain optional.
 
-```sh
-sudo apt-get update
-sudo apt-get install -y build-essential cmake ninja-build libsqlite3-dev \
-  libyaml-cpp-dev nlohmann-json3-dev libspdlog-dev libcli11-dev \
-  libboost-system-dev libgtest-dev curl jq
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
+## Deployment and trust boundaries
 
-Configured outputs are `build/bin/laso`, `build/bin/laso-server`,
-`build/laso_tests`, `build/plugins/liblaso_example_tool.so`, an incompatible-ABI
-test module, and separate native library targets. These outputs were compiled with
-GCC 13.3.0 and Clang 18.1.3 on Ubuntu 24.04.5. No managed language runtime is
-required by the project.
+The C++ plugin SDK uses a versioned C ABI. Native plugins are loaded in-process
+with `dlopen` and are privileged code; LASO does not sandbox them. Supervised
+process workers provide a lifecycle and transport boundary, not an OS sandbox.
+See the [plugin ABI](docs/plugin-abi.md), [worker process protocol](docs/worker-process-protocol.md),
+and [security threat model](docs/security-threat-model.md).
 
-## Implemented execution and persistence
+The shipped HTTP API defaults to unauthenticated loopback access. LASO Core
+defines an `IdentityProvider` interface but ships only the local-development
+identity; it does not include a user authentication platform. Remote API access
+must be protected by a deployment-owned authentication and authorization
+boundary. The API avoids returning provider-native continuation identifiers and
+provides safe operator inspections that omit prompts, message payloads, and
+absolute artifact locations. M8 adds paged operator endpoints for diagnostics,
+run/session/worker state, approvals, integrations, artifacts, instances, and
+leases; artifact integrity results omit filesystem locations and raw errors.
 
-- Declarative typed YAML parsing, duplicate/unknown-field detection, graph and
-  reference checks, conditional routing and finite cycle/step budgets.
-- Common interfaces for all twelve node types, registered deterministic functions,
-  mock models, tools, schema validators, durable approvals, branch/join tokens,
-  bounded loops and registered subpipelines.
-- Async execution across runs with explicit run/node/model/tool limits, bounded
-  retry attempts/delays, cooperative timeouts and stop-token cancellation.
-- SQLite tables for registrations, runs, attempts, messages, events, approvals and
-  artifacts. Transactions keep important checkpoint records together; WAL and
-  restrictive local process ownership are used.
-- Restart inspection preserves history and approval waits. Explicit resume handles
-  paused checkpoints; interrupted side effects require operator review.
-- In-process event subscriptions, contextual structured logs, filesystem artifacts,
-  finite local scheduling, deployment rules and identity/secret interfaces.
+The PostgreSQL schema migrates forward at startup. Binary rollback across an
+incompatible schema requires restoration of a compatible database backup.
+Deployment examples cover an unprivileged systemd service and a Debian
+container; the RC2 dedicated-account system-unit filesystem sandbox was not
+rerun specifically for this release candidate.
 
-## Plugin ABI
+## Validation status
 
-Linux `.so` discovery uses configured directories only and `dlopen`/`dlsym`/`dlclose`.
-ABI 1 uses size/version headers, plain C types, borrowed input buffers and
-host-owned output callbacks. Registered tool wrappers retain library lifetime.
-The example is a harmless C JSON echo tool. Tests include invalid files and an
-incompatible ABI. Other extension-kind IDs are reserved and explicitly unsupported
-until adapters are implemented. Native plugins are privileged in-process code.
+- Clean-source RC2 validation passed 272 LASO tests, GCC/Clang build and
+  regression coverage, Go static analysis and race tests for the paired Web
+  client, 11/11 frontend tests, and 7/7 PostgreSQL browser-acceptance scenarios.
+- Exact public `main` Actions passed all 8 jobs. The private Go Web repository's
+  exact `main` passed its 4 Go jobs and PostgreSQL browser-acceptance workflow.
+- PostgreSQL backup/restore and durable-session recovery passed. The actual
+  Codex app-server completed three durable turns across LASO restart and a
+  further turn after database restore; provider-native IDs and session values
+  are excluded from this report.
+- The TSan binary built, but the runtime failed before test discovery with
+  `unexpected memory mapping`; no test body ran under TSan and no TSan pass is
+  claimed. ASan/UBSan and Go race validation passed.
+- RC2 systemd validation covered the installed unit and user-service lifecycle.
+  The dedicated-account system-unit filesystem sandbox was not rerun
+  specifically for RC2. Earlier system-account evidence remains dated in
+  `VALIDATION.md`.
 
-## API and CLI
+## Current limitations
 
-Working implementations exist for health/version; pipeline list/register/show;
-run start/list/show/cancel/resume; events/attempts/messages; approval list/approve/
-reject; and provider/tool/plugin lists. API routes are under `/api/v1`, defaulting
-to `127.0.0.1:8080`, with size limits and bounded pagination.
+LASO does not provide a model-serving service, persistent secret store,
+built-in authentication platform, native-plugin sandbox, general remote shell,
+cluster scheduler, or exactly-once external side-effect guarantee. Multi-instance
+execution is opt-in and constrained by the supported worker and deterministic
+branch contracts. PostgreSQL schema rollback requires a compatible backup when
+the prior binary cannot read the migrated schema. These limits and their
+validation boundaries are not evidence of production readiness.
 
-The `laso` CLI exposes the same services locally, with validate/register/list/show,
-run start/cancel/resume and approval commands. Database commands cannot run beside
-a daemon owning the same database; use the API while it is running. See
-[the full endpoint/command reference](docs/access.md). CLI, HTTP, approval,
-restart, persistence, and plugin behavior are covered by executed Linux tests.
-
-## Examples and deployment
-
-Seven complete YAML examples cover deterministic hello, offline agent review,
-human approval, native plugin invocation, parallel/join, bounded loops and a child
-pipeline. Native installation, a foreground systemd service, a multi-stage Debian
-Dockerfile, persistent data volume, unprivileged runtime and local healthcheck are
-provided. The Compose example retains loopback API exposure using Linux host networking.
-
-## Tests, static analysis and sanitizers
-
-- **Implemented:** 73 GoogleTest cases plus CLI and process/restart CTest entries.
-- **Development-host-tested:** clang-format 18.1.8 verification of 48 C/C++ files;
-  CMake/YAML/source grammar, local references, and security-pattern checks passed.
-- **Statically reviewed:** boundaries, CMake targets, include/symbol consistency,
-  ABI ownership, checkpoint handling, failure paths and deployment configuration.
-- **Ubuntu-tested:** GCC and Clang Debug/Release builds and 177/177 CTest entries
-  each; ASan/UBSan 177/177; Linux formatting; clang-tidy exit 0; API/CLI/process/plugin
-  tests; and a loopback local-model GPU inference run.
-- **Debian-tested:** the public Debian workflow; the multi-stage runtime image
-  built and served its health endpoint with host networking as the unprivileged
-  `laso` user.
-- **Pending/blocked:** full systemd deployment remains pending; TSan is blocked on this host by an `unexpected memory mapping` runtime
-  abort during GoogleTest discovery.
-
-CI specifies Ubuntu 24.04 GCC and Clang, Debian 13, clang-format, clang-tidy and
-ASan/UBSan. Optional TSan is a separate CMake configuration. The GitHub Actions workflow completed successfully for the initial public commit.
-
-## Known limitations and deferred work
-
-This is a single-process SQLite skeleton. Branches execute concurrently within
-the bounded run scheduler. Cancellation is cooperative; a
-noncooperative native plugin can block or crash the process. In-flight effects
-are not exactly once, child creation is not one transaction with its parent, and
-general automatic crash replay is deferred. JSON Schema validation uses the pinned
-Draft 7 library with local-root and resource-limit enforcement; remote references
-and external recursive reference cycles are rejected. Only Mock models and the native tool adapter ship. Durable
-cron schedules, remote model/storage adapters, streaming, distributed execution,
-authentication implementations and plugin sandboxing belong to later releases.
-Deployment validation may expose environment-specific issues outside the executed
-Ubuntu build and integration-test scope.
-
-## Security review
-
-No organization-specific configuration, private data or credentials were added;
-terminology and obvious credential-pattern scans found no matching private material.
-No default external AI call, automatic model download or unrestricted shell tool
-exists. Plugins load only from configured paths; the unauthenticated API defaults
-to loopback. Plugin native-code trust limits and untrusted model output handling
-are documented. This is a source review, not an independent security audit.
+SQLite references in dated sections of [VALIDATION.md](VALIDATION.md) describe
+historical builds only. Current installation, runtime, and deployment support
+is PostgreSQL-only. M8 operator API additions are not part of the published
+RC2 tag until a later release candidate includes them.

@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <laso/artifacts/artifacts.hpp>
 #include <laso/core/async.hpp>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -421,34 +422,90 @@ void LocalArtifactStore::materialize(const std::string &object_id,
 }
 
 ArtifactIntegrityReport LocalArtifactStore::integrity() const {
+  return integrity_bounded(std::numeric_limits<std::size_t>::max(),
+                           std::numeric_limits<std::uint64_t>::max());
+}
+
+ArtifactIntegrityReport LocalArtifactStore::integrity_bounded(std::size_t max_entries,
+                                                               std::uint64_t max_bytes) const {
   ArtifactIntegrityReport report;
+  std::uint64_t bytes_verified = 0;
+  if (max_entries == 0) {
+    report.complete = false;
+    return report;
+  }
   std::error_code error;
   const auto objects = root_ / "objects";
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(objects, error)) {
+  auto object = std::filesystem::recursive_directory_iterator(objects, error);
+  if (error)
+    throw Error(ErrorCode::Storage, "Unable to enumerate artifact objects");
+  const std::filesystem::recursive_directory_iterator object_end;
+  for (; object != object_end;) {
+    ++report.entries_scanned;
+    if (object->is_regular_file(error)) {
+      ++report.objects;
+      const auto filename = object->path().filename().string();
+      const auto parent = object->path().parent_path().filename().string();
+      if (parent.size() != 2 || filename.size() != 62) {
+        ++report.invalid;
+        report.errors.push_back({{"path", "object-name"}});
+      } else {
+        const auto size = object->file_size(error);
+        if (error) {
+          ++report.invalid;
+          report.errors.push_back({{"object_id", "sha256:" + parent + filename},
+                                   {"error", "Unable to inspect object size"}});
+          error.clear();
+        } else if (size > max_bytes - bytes_verified) {
+          ++report.unverified;
+          report.complete = false;
+        } else {
+          bytes_verified += size;
+          try {
+            verify("sha256:" + parent + filename);
+            ++report.verified;
+          } catch (const Error &e) {
+            ++report.invalid;
+            report.errors.push_back(
+                {{"object_id", "sha256:" + parent + filename}, {"error", e.what()}});
+          }
+        }
+      }
+    }
+    if (error)
+      throw Error(ErrorCode::Storage, "Unable to inspect artifact object entry");
+    object.increment(error);
     if (error)
       throw Error(ErrorCode::Storage, "Unable to enumerate artifact objects");
-    if (!entry.is_regular_file(error))
-      continue;
-    ++report.objects;
-    const auto filename = entry.path().filename().string();
-    const auto parent = entry.path().parent_path().filename().string();
-    if (parent.size() != 2 || filename.size() != 62) {
-      ++report.invalid;
-      report.errors.push_back({{"path", "object-name"}});
-      continue;
-    }
-    try {
-      verify("sha256:" + parent + filename);
-      ++report.verified;
-    } catch (const Error &e) {
-      ++report.invalid;
-      report.errors.push_back({{"object_id", "sha256:" + parent + filename}, {"error", e.what()}});
+    if (report.entries_scanned >= max_entries && object != object_end) {
+      report.complete = false;
+      return report;
     }
   }
+
   const auto temp = root_ / "temp";
-  for (const auto &entry : std::filesystem::directory_iterator(temp, error))
-    if (!error && entry.is_regular_file(error))
+  auto temporary = std::filesystem::directory_iterator(temp, error);
+  if (error)
+    throw Error(ErrorCode::Storage, "Unable to enumerate artifact staging files");
+  const std::filesystem::directory_iterator temporary_end;
+  if (report.entries_scanned >= max_entries && temporary != temporary_end) {
+    report.complete = false;
+    return report;
+  }
+  for (; temporary != temporary_end;) {
+    ++report.entries_scanned;
+    if (temporary->is_regular_file(error))
       ++report.temporary;
+    if (error)
+      throw Error(ErrorCode::Storage, "Unable to inspect artifact staging entry");
+    temporary.increment(error);
+    if (error)
+      throw Error(ErrorCode::Storage, "Unable to enumerate artifact staging files");
+    if (report.entries_scanned >= max_entries && temporary != temporary_end) {
+      report.complete = false;
+      break;
+    }
+  }
   return report;
 }
 
@@ -789,6 +846,10 @@ void RemoteArtifactStore::materialize(const std::string &object_id,
 }
 
 ArtifactIntegrityReport RemoteArtifactStore::integrity() const {
+  throw Error(ErrorCode::Policy, "Remote artifact integrity is owned by the gateway");
+}
+
+ArtifactIntegrityReport RemoteArtifactStore::integrity_bounded(std::size_t, std::uint64_t) const {
   throw Error(ErrorCode::Policy, "Remote artifact integrity is owned by the gateway");
 }
 
