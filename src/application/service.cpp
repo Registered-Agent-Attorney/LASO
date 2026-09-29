@@ -1,5 +1,9 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cerrno>
+#include <fcntl.h>
+#include <fstream>
 #include <functional>
 #include <initializer_list>
 #include <iomanip>
@@ -8,6 +12,8 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace laso {
 namespace {
@@ -28,6 +34,64 @@ std::vector<Json> all_pipeline_records(const Storage &storage) {
     if (offset > std::numeric_limits<std::size_t>::max() - page_size)
       throw Error(ErrorCode::Storage, "Pipeline registry is too large to inspect");
     offset += page_size;
+  }
+}
+std::string maintenance_mode_name(MaintenanceMode mode) {
+  switch (mode) {
+  case MaintenanceMode::Active:
+    return "active";
+  case MaintenanceMode::Draining:
+    return "draining";
+  case MaintenanceMode::Maintenance:
+    return "maintenance";
+  }
+  return "active";
+}
+MaintenanceMode parse_maintenance_mode(const std::string &value) {
+  if (value == "active")
+    return MaintenanceMode::Active;
+  if (value == "draining")
+    return MaintenanceMode::Draining;
+  if (value == "maintenance")
+    return MaintenanceMode::Maintenance;
+  throw Error(ErrorCode::Configuration, "Invalid maintenance state; refusing startup");
+}
+void durable_replace(const std::filesystem::path &path, const std::string &contents) {
+  std::error_code filesystem_error;
+  std::filesystem::create_directories(path.parent_path(), filesystem_error);
+  if (filesystem_error)
+    throw Error(ErrorCode::Storage, "Maintenance state could not be persisted");
+  auto temporary = path;
+  temporary += "." + uuid() + ".tmp";
+  const int descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+  if (descriptor < 0)
+    throw Error(ErrorCode::Storage, "Maintenance state could not be persisted");
+  bool open = true;
+  try {
+    std::size_t written = 0;
+    while (written < contents.size()) {
+      const auto count = ::write(descriptor, contents.data() + written, contents.size() - written);
+      if (count < 0 && errno == EINTR)
+        continue;
+      if (count <= 0)
+        throw Error(ErrorCode::Storage, "Maintenance state could not be persisted");
+      written += static_cast<std::size_t>(count);
+    }
+    if (::fsync(descriptor) != 0 || ::close(descriptor) != 0)
+      throw Error(ErrorCode::Storage, "Maintenance state could not be persisted");
+    open = false;
+    if (::rename(temporary.c_str(), path.c_str()) != 0)
+      throw Error(ErrorCode::Storage, "Maintenance state could not be persisted");
+    const int directory = ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory >= 0) {
+      (void)::fsync(directory);
+      (void)::close(directory);
+    }
+  } catch (...) {
+    if (open)
+      (void)::close(descriptor);
+    (void)::unlink(temporary.c_str());
+    throw;
   }
 }
 std::string definition_fingerprint(const std::string &text) {
@@ -86,6 +150,7 @@ std::unique_ptr<ArtifactStore> make_artifact_store(const Config &config, Storage
 } // namespace
 Service::Service(asio::io_context &io, Config config)
     : config_(checked(std::move(config))), instance_id_(generate_service_instance_id()),
+      maintenance_state_path_(config_.data_dir / "operator-maintenance.json"),
       storage_(create_storage(
           {config_.postgres_dsn, config_.postgres_schema, config_.postgres_pool_min_connections,
            config_.postgres_pool_max_connections, config_.postgres_pool_acquisition_timeout_ms,
@@ -139,6 +204,7 @@ Service::Service(asio::io_context &io, Config config)
           },
           std::make_shared<SystemClock>(), config_.max_pending_scheduler_launches,
           config_.max_event_trigger_depth, config_.max_event_trigger_deliveries) {
+  load_maintenance_state();
   configure_logging(config_);
   context_reducers_.add("recent-turns", std::make_shared<RecentTurnsContextReducer>());
   providers_.add("mock", std::make_shared<MockModelProvider>());
@@ -171,6 +237,236 @@ Service::Service(asio::io_context &io, Config config)
   scheduler_.start();
   plugins_.start_event_sources();
   plugins_.start_workers();
+}
+void Service::load_maintenance_state() {
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(maintenance_state_path_, error);
+  if (!error && std::filesystem::is_symlink(status))
+    throw Error(ErrorCode::Configuration, "Invalid maintenance state; refusing startup");
+  if (error == std::errc::no_such_file_or_directory) {
+    runtime_.set_maintenance_mode(MaintenanceMode::Active);
+    return;
+  }
+  if (error)
+    throw Error(ErrorCode::Storage, "Maintenance state could not be read");
+  const auto size = std::filesystem::file_size(maintenance_state_path_, error);
+  if (error || size > 65536)
+    throw Error(ErrorCode::Configuration, "Invalid maintenance state; refusing startup");
+  std::ifstream input(maintenance_state_path_, std::ios::binary);
+  std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  if (!input.good() && !input.eof())
+    throw Error(ErrorCode::Storage, "Maintenance state could not be read");
+  try {
+    const auto value = Json::parse(text);
+    if (value.value("version", 0U) != 1)
+      throw Error(ErrorCode::Configuration, "Invalid maintenance state; refusing startup");
+    maintenance_mode_ = parse_maintenance_mode(value.value("state", std::string{}));
+    maintenance_started_at_ = value.value("since", std::string{});
+    maintenance_actor_ = value.value("actor", std::string{});
+    if (maintenance_actor_.size() > 128 || maintenance_started_at_.size() > 64)
+      throw Error(ErrorCode::Configuration, "Invalid maintenance state; refusing startup");
+    const auto events = value.value("events", Json::array());
+    if (!events.is_array() || events.size() > 128)
+      throw Error(ErrorCode::Configuration, "Invalid maintenance state; refusing startup");
+    operator_events_.assign(events.begin(), events.end());
+    (void)::chmod(maintenance_state_path_.c_str(), 0600);
+    runtime_.set_maintenance_mode(maintenance_mode_);
+  } catch (const Error &) {
+    throw;
+  } catch (...) {
+    throw Error(ErrorCode::Configuration, "Invalid maintenance state; refusing startup");
+  }
+}
+void Service::persist_maintenance_state(MaintenanceMode mode, const std::string &started_at,
+                                        const std::string &actor, Json event) {
+  auto events = operator_events_;
+  events.push_back(std::move(event));
+  if (events.size() > 128)
+    events.erase(events.begin(), events.begin() + static_cast<std::ptrdiff_t>(events.size() - 128));
+  Json value{{"version", 1},
+             {"state", maintenance_mode_name(mode)},
+             {"since", started_at},
+             {"actor", actor},
+             {"events", events}};
+  durable_replace(maintenance_state_path_, value.dump());
+  operator_events_ = std::move(events);
+  maintenance_mode_ = mode;
+  maintenance_started_at_ = started_at;
+  maintenance_actor_ = actor;
+}
+void Service::require_operator_actor(const Actor &actor) const {
+  if (!actor.authenticated || actor.id.empty() || actor.id.size() > 128 ||
+      (actor.role != "operator" && actor.role != "admin"))
+    throw Error(ErrorCode::Policy, "Operator access required");
+  const auto valid = [](unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+           c == '_' || c == '@' || c == ':' || c == '-';
+  };
+  if (!std::all_of(actor.id.begin(), actor.id.end(), valid) ||
+      !std::isalnum(static_cast<unsigned char>(actor.id.front())))
+    throw Error(ErrorCode::Policy, "Operator access required");
+}
+void Service::sync_maintenance_registry(const std::string &state, const Actor &actor,
+                                        const std::string &action, const std::string &from,
+                                        const std::string &to) {
+  if (!coordination_)
+    return;
+  try {
+    coordination_->set_instance_state(state);
+  } catch (...) {
+    const auto now = timestamp();
+    persist_maintenance_state(maintenance_mode_, maintenance_started_at_, actor.id,
+                              {{"at", now},
+                               {"actor", actor.id},
+                               {"action", action},
+                               {"from", from},
+                               {"to", to},
+                               {"instance_id", instance_id_},
+                               {"result", "cluster_sync_failed"}});
+    throw Error(ErrorCode::Storage, "Instance coordination state could not be updated");
+  }
+}
+Json Service::operator_maintenance() const {
+  MaintenanceMode mode;
+  std::string since, actor;
+  Json last_event = nullptr;
+  {
+    std::lock_guard lock(maintenance_mutex_);
+    mode = maintenance_mode_;
+    since = maintenance_started_at_;
+    actor = maintenance_actor_;
+    if (!operator_events_.empty())
+      last_event = operator_events_.back();
+  }
+  const auto runtime = runtime_.diagnostics();
+  const bool drained =
+      mode == MaintenanceMode::Draining && runtime.active_runs == 0 && runtime.active_nodes == 0;
+  const auto state = drained ? std::string("drained") : maintenance_mode_name(mode);
+  bool cluster_visible = coordination_ == nullptr;
+  std::string cluster_state = coordination_ ? "unknown" : "local";
+  if (coordination_) {
+    try {
+      const auto current = coordination_->current_instance(config_.instance_stale_after_ms);
+      if (current) {
+        cluster_visible = current->state != "STALE";
+        cluster_state = current->state;
+      } else {
+        cluster_visible = false;
+        cluster_state = "missing";
+      }
+    } catch (const Error &) {
+      cluster_visible = false;
+      cluster_state = "unavailable";
+    }
+  }
+  const bool cluster_quiescent = coordination_ == nullptr || cluster_state == "DRAINING" ||
+                                 cluster_state == "DRAINED" || cluster_state == "MAINTENANCE";
+  return {{"instance_id", instance_id_},
+          {"state", state},
+          {"desired_state", maintenance_mode_name(mode)},
+          {"since", since.empty() ? Json(nullptr) : Json(since)},
+          {"actor", actor.empty() ? Json(nullptr) : Json(actor)},
+          {"cluster_state", cluster_state},
+          {"cluster_visible", cluster_visible},
+          {"owned_work", {{"runs", runtime.active_runs}, {"nodes", runtime.active_nodes}}},
+          {"safe_to_stop", cluster_visible && cluster_quiescent && runtime.active_runs == 0 &&
+                               runtime.active_nodes == 0 &&
+                               (state == "drained" || state == "maintenance")},
+          {"last_event", std::move(last_event)}};
+}
+Json Service::maintenance_metrics() const {
+  MaintenanceMode mode;
+  {
+    std::lock_guard lock(maintenance_mutex_);
+    mode = maintenance_mode_;
+  }
+  const auto runtime = runtime_.diagnostics();
+  const bool drained =
+      mode == MaintenanceMode::Draining && runtime.active_runs == 0 && runtime.active_nodes == 0;
+  return {{"state", drained ? "drained" : maintenance_mode_name(mode)},
+          {"owned_runs", runtime.active_runs},
+          {"owned_nodes", runtime.active_nodes}};
+}
+void Service::request_drain(const Actor &actor) {
+  require_operator_actor(actor);
+  std::lock_guard lock(maintenance_mutex_);
+  if (maintenance_mode_ == MaintenanceMode::Draining) {
+    sync_maintenance_registry("DRAINING", actor, "drain", "draining", "draining");
+    return;
+  }
+  if (maintenance_mode_ == MaintenanceMode::Maintenance) {
+    sync_maintenance_registry("MAINTENANCE", actor, "drain", "maintenance", "maintenance");
+    return;
+  }
+  const auto now = timestamp();
+  runtime_.set_maintenance_mode(MaintenanceMode::Draining);
+  try {
+    persist_maintenance_state(MaintenanceMode::Draining, now, actor.id,
+                              {{"at", now},
+                               {"actor", actor.id},
+                               {"action", "drain"},
+                               {"from", "active"},
+                               {"to", "draining"},
+                               {"instance_id", instance_id_},
+                               {"result", "requested"}});
+  } catch (...) {
+    runtime_.set_maintenance_mode(MaintenanceMode::Active);
+    throw;
+  }
+  sync_maintenance_registry("DRAINING", actor, "drain", "active", "draining");
+}
+void Service::resume_instance(const Actor &actor) {
+  require_operator_actor(actor);
+  std::lock_guard lock(maintenance_mutex_);
+  if (maintenance_mode_ == MaintenanceMode::Active)
+    return;
+  if (coordination_)
+    sync_maintenance_registry("ACTIVE", actor, "resume", maintenance_mode_name(maintenance_mode_),
+                              "active");
+  const auto now = timestamp();
+  persist_maintenance_state(MaintenanceMode::Active, "", actor.id,
+                            {{"at", now},
+                             {"actor", actor.id},
+                             {"action", "resume"},
+                             {"from", maintenance_mode_name(maintenance_mode_)},
+                             {"to", "active"},
+                             {"instance_id", instance_id_},
+                             {"result", "requested"}});
+  runtime_.set_maintenance_mode(MaintenanceMode::Active);
+}
+void Service::enter_maintenance(const Actor &actor) {
+  require_operator_actor(actor);
+  std::lock_guard lock(maintenance_mutex_);
+  if (maintenance_mode_ == MaintenanceMode::Maintenance) {
+    sync_maintenance_registry("MAINTENANCE", actor, "enter_maintenance", "maintenance",
+                              "maintenance");
+    return;
+  }
+  const auto runtime = runtime_.diagnostics();
+  if (maintenance_mode_ != MaintenanceMode::Draining || runtime.active_runs != 0 ||
+      runtime.active_nodes != 0)
+    throw Error(ErrorCode::Conflict, "Instance must be drained before maintenance");
+  if (coordination_) {
+    const auto current = coordination_->current_instance(config_.instance_stale_after_ms);
+    if (!current || current->state == "STALE")
+      throw Error(ErrorCode::Storage, "Instance coordination state is unavailable");
+  }
+  const auto now = timestamp();
+  runtime_.set_maintenance_mode(MaintenanceMode::Maintenance);
+  try {
+    persist_maintenance_state(MaintenanceMode::Maintenance, now, actor.id,
+                              {{"at", now},
+                               {"actor", actor.id},
+                               {"action", "enter_maintenance"},
+                               {"from", "draining"},
+                               {"to", "maintenance"},
+                               {"instance_id", instance_id_},
+                               {"result", "requested"}});
+  } catch (...) {
+    runtime_.set_maintenance_mode(MaintenanceMode::Draining);
+    throw;
+  }
+  sync_maintenance_registry("MAINTENANCE", actor, "enter_maintenance", "draining", "maintenance");
 }
 Service::~Service() noexcept {
   shutdown();
@@ -364,6 +660,9 @@ std::string Service::start(const std::string &name_or_path, const Json &input,
 }
 
 AgentSession Service::create_session(const std::string &pipeline_id) {
+  auto admission = runtime_.admission_guard();
+  if (!runtime_.accepts_new_work())
+    throw Error(ErrorCode::Unavailable, "Instance is not accepting new work");
   (void)pipeline_record(pipeline_id);
   AgentSession session;
   session.pipeline_id = pipeline_id;
@@ -393,6 +692,9 @@ void Service::close_session(const std::string &id) {
 }
 Json Service::submit_session_turn(const std::string &id, const std::string &idempotency_key,
                                   const Json &input) {
+  auto admission = runtime_.admission_guard();
+  if (!runtime_.accepts_new_work())
+    throw Error(ErrorCode::Unavailable, "Instance is not accepting new work");
   if (idempotency_key.empty() || idempotency_key.size() > 512 || input.dump().size() > 1024 * 1024)
     throw Error(ErrorCode::Validation, "Invalid session input");
   const auto session = agent_session(id);
@@ -901,7 +1203,8 @@ Json Service::operator_status() const {
           {"execution",
            {{"mode", config_.execution_mode},
             {"instance_id", instance_id_},
-            {"state", runtime.stopping ? "draining" : "active"}}},
+            {"state", runtime.stopping ? "stopping" : operator_maintenance().at("state")}}},
+          {"maintenance", operator_maintenance()},
           {"coordination", std::move(coordination)},
           {"capacity",
            {{"active_runs", runtime.active_runs},
@@ -941,13 +1244,20 @@ Json Service::readiness() const {
       throw;
   }
 
-  const auto runtime_state = runtime.stopping ? "draining" : "active";
-  const bool ready = storage_available && schema_state == "current" && !runtime.stopping;
+  // Readiness must stay on the bounded storage probe path. Operator status also
+  // reads the coordination registry, which is unnecessary for local admission
+  // and could add an unbounded second database wait during pool/database failure.
+  const auto maintenance = maintenance_metrics();
+  const auto runtime_state =
+      runtime.stopping ? "stopping" : maintenance.at("state").get<std::string>();
+  const bool ready = storage_available && schema_state == "current" && !runtime.stopping &&
+                     runtime_state == "active";
   return {{"status", ready ? "ready" : "not_ready"},
           {"checks",
            {{"storage", storage_available ? "available" : "unavailable"},
             {"schema", schema_state},
-            {"runtime", runtime_state}}}};
+            {"runtime", runtime_state},
+            {"maintenance", runtime_state == "active" ? "accepting" : "not_accepting"}}}};
 }
 
 Json Service::operator_artifact_integrity() const {

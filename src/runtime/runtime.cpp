@@ -209,10 +209,19 @@ void Runtime::start_distributed() {
     dispatch_sessions();
     return;
   }
-  deps_.coordination->register_instance(version, capability_advertisement(deps_.workers).dump());
-  asio::co_spawn(io_, supervise_claim_loop(), asio::detached);
+  const auto mode = maintenance_mode();
+  const auto instance_state = mode == MaintenanceMode::Active        ? "ACTIVE"
+                              : mode == MaintenanceMode::Maintenance ? "MAINTENANCE"
+                                                                     : "DRAINING";
+  deps_.coordination->register_instance(version, capability_advertisement(deps_.workers).dump(),
+                                        instance_state);
+  if (config_.execution_mode == "multi_instance") {
+    asio::co_spawn(io_, supervise_claim_loop(), asio::detached);
+    asio::co_spawn(io_, supervise_session_loop(), asio::detached);
+  } else {
+    dispatch_sessions();
+  }
   asio::co_spawn(io_, supervise_lease_loop(), asio::detached);
-  asio::co_spawn(io_, supervise_session_loop(), asio::detached);
 }
 Task<void> Runtime::supervise_claim_loop() {
   for (;;) {
@@ -321,11 +330,12 @@ void Runtime::dispatch_sessions() {
 }
 
 void Runtime::dispatch_session(const std::string &session_id) {
+  auto admission = admission_guard();
   if (session_id.empty())
     return;
   {
     std::lock_guard lock(mutex_);
-    if (stopping_)
+    if (stopping_ || !accepts_new_work())
       return;
   }
   AgentSession session;
@@ -366,7 +376,7 @@ void Runtime::dispatch_session(const std::string &session_id) {
   std::string owner = deps_.instance_id;
   std::uint64_t fence = 0;
   std::string expires_at = timestamp();
-  if (deps_.coordination) {
+  if (config_.execution_mode == "multi_instance" && deps_.coordination) {
     lease = deps_.coordination->acquire("session:" + session_id, config_.coordination_lease_ttl_ms);
     if (!lease)
       return;
@@ -724,6 +734,9 @@ void Runtime::reconcile_terminal_worker(const NodeWork &observed,
       // The provider can time out just after the original node lease expires.
       // Reacquire the same resource before reconciling so recovery remains a
       // fenced write instead of weakening ownership checks.
+      auto admission = admission_guard();
+      if (!accepts_new_work())
+        return;
       replacement_lease =
           deps_.coordination->acquire("node:" + current.id, config_.coordination_lease_ttl_ms);
       if (!replacement_lease)
@@ -814,7 +827,19 @@ std::string Runtime::run(const PipelineDefinition &p, Json input, std::string ac
                          unsigned subpipeline_depth, std::string parent_message_id, Json origin,
                          Json message_metadata, std::string session_id, std::string session_turn_id,
                          std::string session_owner, std::uint64_t session_fencing_token) {
+  auto admission = admission_guard();
   std::lock_guard lock(mutex_);
+  const auto parent = parent_id.empty() ? active_.end() : active_.find(parent_id);
+  const bool owned_continuation = parent != active_.end() && !parent->second.ownership_lost;
+  if (!accepts_new_work()) {
+    if (maintenance_mode() != MaintenanceMode::Draining || !owned_continuation)
+      throw Error(ErrorCode::Unavailable, "Instance is not accepting new work");
+    if (deps_.coordination) {
+      if (!parent->second.lease)
+        throw Error(ErrorCode::Conflict, "Owned continuation has no current lease");
+      deps_.coordination->require_current(*parent->second.lease);
+    }
+  }
   if (stopping_ || (!deps_.coordination && active_.size() >= config_.max_runs))
     throw Error(ErrorCode::Capacity, "Concurrent run limit reached");
   if (deps_.coordination) {
@@ -963,6 +988,8 @@ Task<void> Runtime::claim_loop() {
       if (active_.size() >= config_.max_runs)
         continue;
     }
+    if (!accepts_new_work())
+      continue;
     std::vector<Json> candidates;
     try {
       candidates = deps_.storage.list(RecordKind::Run, "", config_.claim_batch_size, 0);
@@ -970,6 +997,9 @@ Task<void> Runtime::claim_loop() {
       continue;
     }
     for (const auto &value : candidates) {
+      auto admission = admission_guard();
+      if (!accepts_new_work())
+        break;
       Run run;
       try {
         run = value.get<Run>();
@@ -1068,6 +1098,9 @@ Task<void> Runtime::claim_loop() {
       continue;
     }
     for (const auto &value : node_candidates) {
+      auto admission = admission_guard();
+      if (!accepts_new_work())
+        break;
       NodeWork work;
       try {
         work = value.get<NodeWork>();
@@ -1238,6 +1271,7 @@ Task<void> Runtime::lease_loop() {
     };
     std::vector<std::pair<std::string, LeaseRecord>> leases;
     std::vector<NodeLeases> node_leases;
+    bool locally_drained = false;
     {
       std::lock_guard lock(mutex_);
       if (stopping_)
@@ -1247,11 +1281,16 @@ Task<void> Runtime::lease_loop() {
           leases.emplace_back(id, *active.lease);
       for (const auto &[id, active] : active_nodes_)
         node_leases.push_back({id, active.work_lease, active.global_slot, active.run_slot});
+      locally_drained = active_.empty() && active_nodes_.empty();
     }
     try {
-      deps_.coordination->register_instance(version,
-                                            capability_advertisement(deps_.workers).dump());
-      if (!deps_.coordination->heartbeat_instance("ACTIVE"))
+      auto admission = admission_guard();
+      const auto mode = maintenance_mode();
+      const auto state = mode == MaintenanceMode::Active        ? "ACTIVE"
+                         : mode == MaintenanceMode::Maintenance ? "MAINTENANCE"
+                         : locally_drained                      ? "DRAINED"
+                                                                : "DRAINING";
+      if (!deps_.coordination->heartbeat_instance(state))
         log_diagnostic("runtime.instance_heartbeat_missing", {{"instance_id", deps_.instance_id}});
     } catch (const Error &) {
       log_diagnostic("runtime.instance_heartbeat_failed", {{"instance_id", deps_.instance_id}});
@@ -1360,7 +1399,10 @@ Task<void> Runtime::lease_loop() {
   }
 }
 void Runtime::resume(const std::string &id) {
+  auto admission = admission_guard();
   std::lock_guard lock(mutex_);
+  if (!accepts_new_work())
+    throw Error(ErrorCode::Unavailable, "Instance is not accepting new work");
   auto r = deps_.storage.get(RecordKind::Run, id).get<Run>();
   if (active_.contains(id))
     throw Error(ErrorCode::Conflict, "Run is still leaving its checkpoint; retry shortly");

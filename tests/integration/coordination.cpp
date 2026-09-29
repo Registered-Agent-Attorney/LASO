@@ -183,6 +183,8 @@ TEST(Coordination, SingleWinnerRenewReleaseAndInspection) {
 
   auto first = create_coordination(database.options(), "instance-a");
   auto second = create_coordination(database.options(), "instance-b");
+  first->register_instance("test", "test");
+  second->register_instance("test", "test");
   auto owner = first->acquire("resource", 5000);
   ASSERT_TRUE(owner);
   EXPECT_FALSE(second->acquire("resource", 5000));
@@ -208,6 +210,8 @@ TEST(Coordination, ExpiryTakeoverRejectsStaleFencingToken) {
 
   auto first = create_coordination(database.options(), "instance-a");
   auto second = create_coordination(database.options(), "instance-b");
+  first->register_instance("test", "test");
+  second->register_instance("test", "test");
   auto old_owner = first->acquire("resource", 100);
   ASSERT_TRUE(old_owner);
   std::this_thread::sleep_for(std::chrono::milliseconds(180));
@@ -220,15 +224,39 @@ TEST(Coordination, ExpiryTakeoverRejectsStaleFencingToken) {
   EXPECT_GE(first->diagnostics().fencing_rejections, 1U);
 }
 
+TEST(Coordination, DrainStopsNewLeasesButPreservesRenewalAndFencing) {
+  IsolatedPostgres database;
+  auto draining = create_coordination(database.options(), "drain-owner");
+  auto recovery = create_coordination(database.options(), "drain-recovery");
+  draining->register_instance("test", "test");
+  recovery->register_instance("test", "test");
+  auto active = draining->acquire("run:existing", 250);
+  ASSERT_TRUE(active);
+
+  draining->set_instance_state("DRAINING");
+  EXPECT_FALSE(draining->acquire("run:new", 1000));
+  EXPECT_TRUE(draining->renew(*active, 250));
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  EXPECT_FALSE(draining->acquire("run:new-after-expiry", 1000));
+  auto takeover = recovery->acquire("run:existing", 1000);
+  ASSERT_TRUE(takeover);
+  EXPECT_EQ(takeover->fencing_token, active->fencing_token + 1);
+  EXPECT_THROW(draining->require_current(*active), Error);
+  EXPECT_NO_THROW(recovery->require_current(*takeover));
+}
+
 TEST(Coordination, ContendedTakeoverHasOneWinner) {
   IsolatedPostgres database;
 
   auto seed = create_coordination(database.options(), "seed");
+  seed->register_instance("test", "test");
   ASSERT_TRUE(seed->acquire("resource", 100));
   std::this_thread::sleep_for(std::chrono::milliseconds(180));
   std::vector<std::unique_ptr<Coordination>> candidates;
   for (int i = 0; i < 8; ++i)
     candidates.push_back(create_coordination(database.options(), "candidate-" + std::to_string(i)));
+  for (auto &candidate : candidates)
+    candidate->register_instance("test", "test");
   std::atomic<int> winners{0};
   std::vector<std::thread> threads;
   for (auto &candidate : candidates)
@@ -249,6 +277,7 @@ TEST(Coordination, ProcessExitAllowsCrashTakeover) {
   if (child == 0) {
     try {
       auto owner = create_coordination(database.options(), "crashed-instance");
+      owner->register_instance("test", "test");
       if (!owner->acquire("resource", 100))
         _exit(2);
       _exit(0);
@@ -262,6 +291,7 @@ TEST(Coordination, ProcessExitAllowsCrashTakeover) {
   ASSERT_EQ(WEXITSTATUS(status), 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(180));
   auto recovery = create_coordination(database.options(), "recovery-instance");
+  recovery->register_instance("test", "test");
   auto takeover = recovery->acquire("resource", 5000);
   ASSERT_TRUE(takeover);
   EXPECT_EQ(takeover->fencing_token, 2U);

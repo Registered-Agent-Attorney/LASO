@@ -7,20 +7,22 @@ the API process can answer a request. `GET /api/v1/health/live` is the explicit
 alias.
 
 `GET /api/v1/health/ready` is a readiness signal for a supervisor or proxy.
-It does not itself block normal API requests or change existing admission
-limits. It reports Core storage, schema, and runtime readiness. Queue and worker
-capacity are reported separately.
+It reports Core storage, schema, runtime, and maintenance readiness. New-work
+admission is enforced by the API when the instance is draining or in
+maintenance. Queue and worker capacity are reported separately.
 
-The route checks PostgreSQL connectivity, the current schema version, and
-whether runtime shutdown has begun (reported as `draining`; this is not an operator drain mode). It returns `200` with `status: ready` only
-when all three checks pass. Otherwise it returns `503` with `status: not_ready`
-and only these bounded state values:
+The route checks PostgreSQL connectivity, the current schema version, runtime
+shutdown, and operator maintenance state. It returns `200` with `status: ready`
+only when storage and schema checks pass, runtime shutdown has not begun, and
+maintenance state is `active`. Draining, drained, and maintenance states return
+`503`; the liveness route remains successful.
 
 | Check | Values |
 | --- | --- |
 | `storage` | `available`, `unavailable` |
 | `schema` | `current`, `incompatible`, `unknown` |
-| `runtime` | `active`, `draining` |
+| `runtime` | `active`, `draining`, `drained`, `maintenance`, `stopping` |
+| `maintenance` | `accepting`, `not_accepting` |
 
 Readiness caps pool acquisition and connection establishment at one second.
 It applies a one-second PostgreSQL statement timeout to connection setup and
@@ -54,6 +56,9 @@ The current bounded metric set is:
 | `laso_session_sse_streams_accepted_total` | Counter | Accepted streams. |
 | `laso_session_sse_streams_rejected_total` | Counter | Rejected at stream admission. |
 | `laso_session_sse_streams_closed_total` | Counter | Closed streams. |
+| `laso_instance_maintenance_state` | Gauge | One-hot fixed state label: `active`, `draining`, `drained`, `maintenance`. |
+| `laso_instance_owned_runs` | Gauge | Active runs owned by this instance. |
+| `laso_instance_owned_nodes` | Gauge | Active nodes owned by this instance. |
 
 No metric labels contain request paths, IDs, principals, user input, prompts,
 message contents, credentials, provider continuation values, filenames, URLs,
@@ -62,4 +67,4 @@ restart. API request metrics cover responses handled by Core, not requests
 rejected before the API handler. The endpoint does not export database pool
 utilization, worker/provider timings, tracing spans, or per-node queue labels.
 Use the sanitized operator status view for existing PostgreSQL pool, queue, and
-capacity summaries.
+capacity summaries. See [coordinated drain](maintenance.md) for its persistence, multi-instance, and restart semantics.

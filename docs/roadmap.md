@@ -212,3 +212,9 @@ then advance the durable principal/audit boundary and out-of-process plugin
 execution. Credentialed remote MCP and webhook integrations remain dependent on
 a safe secret-reference contract and explicit network policy. Preserve the
 distinction between a supervised child process and an OS-sandboxed plugin.
+
+## M10 — coordinated drain and maintenance
+
+The M10 development slice adds instance-scoped drain and maintenance control for safe rolling operations. Drain closes new submissions and ownership claims while valid owned work may finish and renew leases. PostgreSQL registry state prevents new cluster claims; the local desired state survives restart. Readiness reports non-ready while admission is closed, while liveness remains available. Operators can verify the derived drained state and `safe_to_stop` before using their service manager.
+
+The transition record is a bounded, instance-local audit file; this is not a cluster-wide audit service. Forced termination remains governed by lease expiry and fencing and may cause at-least-once side effects. M10 does not claim zero downtime. See [coordinated drain](maintenance.md).

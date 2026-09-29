@@ -1,6 +1,7 @@
 #include <CLI/CLI.hpp>
 #include <boost/system/system_error.hpp>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <laso/api/api.hpp>
 #include <laso/artifacts/server.hpp>
@@ -30,8 +31,19 @@ int main(int argc, char **argv) {
     auto config = laso::load_config(config_path, overrides);
     laso::Executor executor(config.workers);
     laso::Service service(executor.context(), config);
-    laso::LocalDevelopmentIdentity identity;
-    laso::Api api(service, identity);
+    const auto *gateway_token = std::getenv("LASO_API_GATEWAY_TOKEN");
+    const bool remote_bind = config.api_host != "127.0.0.1" && config.api_host != "::1" &&
+                             config.api_host != "localhost";
+    if ((config.allow_remote_api || remote_bind) &&
+        (!gateway_token || std::string(gateway_token).empty()))
+      throw laso::Error(laso::ErrorCode::Configuration,
+                        "Remote API requires LASO_API_GATEWAY_TOKEN");
+    std::unique_ptr<laso::IdentityProvider> identity;
+    if (gateway_token && *gateway_token)
+      identity = std::make_unique<laso::TrustedGatewayIdentity>(gateway_token);
+    else
+      identity = std::make_unique<laso::LocalDevelopmentIdentity>();
+    laso::Api api(service, *identity);
     laso::HttpServer server(
         executor.context(), api, config.api_host, static_cast<unsigned short>(config.api_port),
         laso::HttpServerOptions{.max_session_streams = config.max_session_sse_streams});
