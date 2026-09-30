@@ -205,12 +205,16 @@ struct ProcessWorkerTransport::Impl {
         active.store(false, std::memory_order_release);
       }
     } active_guard{active_submit};
+    const auto timeout_ms = request.timeout_ms == 0
+                                ? config.request_timeout_ms
+                                : std::min(request.timeout_ms, config.request_timeout_ms);
     Json payload{{"job_id", request.job_id},
                  {"worker_id", request.worker_id},
                  {"capability", request.capability},
                  {"task_type", request.task_type},
                  {"instructions", request.instructions},
                  {"deadline", request.deadline},
+                 {"timeout_ms", timeout_ms},
                  {"idempotency_key", request.idempotency_key},
                  {"run_id", request.run_id},
                  {"node_id", request.node_id},
@@ -225,9 +229,6 @@ struct ProcessWorkerTransport::Impl {
       payload["continuation"] = continuation_json(*request.continuation);
     if (request.session_context)
       payload["session_context"] = session_context_json(*request.session_context);
-    const auto timeout_ms = request.timeout_ms == 0
-                                ? config.request_timeout_ms
-                                : std::min(request.timeout_ms, config.request_timeout_ms);
     return parse_submission_locked(
         request.job_id, request_response_locked("submit", request.job_id, "", payload, timeout_ms));
   }

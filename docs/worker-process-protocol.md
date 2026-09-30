@@ -20,7 +20,7 @@ Every request is an object with the following fields:
   "operation": "submit",
   "job_id": "worker-123",
   "external_job_id": "",
-  "payload": {}
+  "payload": {"timeout_ms": 30000}
 }
 ```
 
@@ -40,6 +40,12 @@ provider-neutral context snapshot selected when LASO bound the run. A
 continuation response uses the same three fields. Workers must not publish
 continuation through the result or metadata fields. LASO stores it privately
 and returns it only to the adapter on a later authoritative turn.
+
+`timeout_ms` is an optional positive integer execution budget in milliseconds.
+Core sends the remaining run budget capped by the process worker's configured
+request timeout. Workers should stop or discard the result after that budget
+expires. Omission or zero means the worker uses its own bounded default; the
+transport request itself remains bounded independently by Core.
 
 ## Worker-originated requests
 
@@ -82,6 +88,11 @@ request, and cancelling the owning job cancels its pending requests. The
 configured interaction timeout is bounded; a timeout becomes `expired`.
 Workers cannot call arbitrary LASO methods or submit pipelines through this
 channel.
+
+`Unknown` means the adapter cannot establish the job's outcome. Core persists
+that state and does not resubmit the same durable job. If Core restarts while
+an asynchronous submit has no recorded external job ID, it also records
+`Unknown` rather than guessing that submission never reached the child.
 
 ## Response
 

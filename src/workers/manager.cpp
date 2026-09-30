@@ -358,8 +358,16 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
     return value;
   try {
     const auto status = adapter->status(value.external_job_id);
-    if (status.state == WorkerJobState::Unknown)
+    if (status.state == WorkerJobState::Unknown) {
+      std::lock_guard state_lock(state_mutex_);
+      value = job(value.id);
+      if (!worker_job_terminal(value.state) && value.state != WorkerJobState::Unknown) {
+        value.state = WorkerJobState::Unknown;
+        value.error = "Worker process no longer knows this job; it will not be resubmitted";
+        persist(value);
+      }
       return value;
+    }
     std::lock_guard state_lock(state_mutex_);
     value = job(value.id);
     if (worker_job_terminal(value.state))
@@ -412,6 +420,10 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
 }
 
 WorkerJob WorkerManager::submit(const WorkerRequest &request) {
+  return submit_impl(request, false);
+}
+
+WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchronous_dispatch) {
   std::lock_guard submit_lock(submit_mutex_);
   if (stopped_)
     throw Error(ErrorCode::Conflict, "Worker manager is stopped");
@@ -459,8 +471,28 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
   if (existing.has_value()) {
     if (!worker_id.empty() && existing->worker_id != worker_id)
       throw Error(ErrorCode::Conflict, "Worker idempotency key belongs to another worker");
-    if (worker_job_terminal(existing->state))
+    if (worker_job_terminal(existing->state) || existing->state == WorkerJobState::Unknown)
       return *existing;
+    if (existing->state == WorkerJobState::Submitting && existing->external_job_id.empty()) {
+      bool dispatching = false;
+      {
+        std::lock_guard async_lock(async_mutex_);
+        dispatching = async_submissions_.contains(existing->id);
+      }
+      if (dispatching && !asynchronous_dispatch)
+        return *existing;
+      if (!dispatching) {
+        std::lock_guard state_lock(state_mutex_);
+        existing = job(existing->id);
+        if (existing->state == WorkerJobState::Submitting && existing->external_job_id.empty()) {
+          existing->state = WorkerJobState::Unknown;
+          existing->error =
+              "Worker submission outcome is unknown after restart; it will not be resubmitted";
+          persist(*existing);
+        }
+        return *existing;
+      }
+    }
   }
 
   auto metadata = adapter->metadata();
@@ -757,8 +789,23 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
         throw Error(ErrorCode::Conflict, "Worker idempotency key collision");
       if (created.worker_id != worker_id)
         throw Error(ErrorCode::Conflict, "Worker idempotency key belongs to another worker");
-      if (worker_job_terminal(created.state) || !created.external_job_id.empty())
+      if (worker_job_terminal(created.state) || created.state == WorkerJobState::Unknown ||
+          !created.external_job_id.empty())
         return created;
+      if (created.state == WorkerJobState::Submitting) {
+        bool dispatching = false;
+        {
+          std::lock_guard async_lock(async_mutex_);
+          dispatching = async_submissions_.contains(created.id);
+        }
+        if (!dispatching) {
+          created.state = WorkerJobState::Unknown;
+          created.error =
+              "Worker submission outcome is unknown after restart; it will not be resubmitted";
+          persist(created);
+          return created;
+        }
+      }
     } catch (const Error &error) {
       if (error.code != ErrorCode::NotFound)
         throw;
@@ -804,7 +851,7 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       return created;
     async_threads_.emplace_back([this, request, id = created.id](std::stop_token) {
       try {
-        (void)submit(request);
+        (void)submit_impl(request, true);
       } catch (const Error &error) {
         if (error.code == ErrorCode::Storage) {
           log_diagnostic("worker.submission_deferred_after_storage_error",

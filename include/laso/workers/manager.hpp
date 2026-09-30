@@ -66,6 +66,7 @@ private:
   std::condition_variable interaction_changed_;
   void apply_event(const Event &);
   WorkerJob reconcile(WorkerJob, bool fail_transport);
+  WorkerJob submit_impl(const WorkerRequest &, bool asynchronous_dispatch);
   void retire_superseded_distributed_jobs_locked();
   void persist(WorkerJob &);
   std::string budget_violation(const WorkerJob &) const;

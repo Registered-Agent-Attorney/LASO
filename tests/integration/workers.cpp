@@ -743,6 +743,67 @@ TEST(Workers, ExistingWorkerJobIsReconciledAfterManagerRestart) {
   }
 }
 
+TEST(Workers, RestartedSubmissionWithoutExternalIdIsUnknownAndNotResubmitted) {
+  class RecoveringWorker final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "recovering";
+      result.name = "recovering";
+      result.enabled = true;
+      result.healthy = true;
+      result.status = "healthy";
+      result.supports_recovery = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &) override {
+      ++submissions;
+      return {"external-recovering", WorkerJobState::Queued, Json::object()};
+    }
+    WorkerStatus status(const std::string &) override {
+      return {};
+    }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &) override {
+      return true;
+    }
+    void start() override {}
+    void stop() noexcept override {}
+    std::atomic<unsigned> submissions = 0;
+  };
+
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<RecoveringWorker>();
+  registry.add("recovering", adapter);
+  WorkerRequest request;
+  request.worker_id = "recovering";
+  request.run_id = "run-lost-submit";
+  request.node_id = "work";
+  request.idempotency_key = "run-lost-submit:work:1";
+  WorkerManager restarted(*storage, registry);
+
+  WorkerJob interrupted;
+  interrupted.id = restarted.job_id_for(request.idempotency_key);
+  interrupted.worker_id = request.worker_id;
+  interrupted.run_id = request.run_id;
+  interrupted.node_id = request.node_id;
+  interrupted.idempotency_key = request.idempotency_key;
+  interrupted.state = WorkerJobState::Submitting;
+  ASSERT_TRUE(storage->claim(
+      {RecordKind::WorkerJob, interrupted.id, interrupted.run_id, Json(interrupted)}));
+
+  const auto recovered = restarted.submit_async(request);
+  EXPECT_EQ(recovered.state, WorkerJobState::Unknown);
+  EXPECT_TRUE(recovered.external_job_id.empty());
+  EXPECT_EQ(adapter->submissions.load(), 0U);
+  EXPECT_EQ(storage->get(RecordKind::WorkerJob, interrupted.id).get<WorkerJob>().state,
+            WorkerJobState::Unknown);
+}
+
 TEST(Workers, UsageMetadataIsOptionalPartialAndFullyNormalized) {
   TemporaryDirectory dir;
   auto storage = make_storage(dir.path / "state.db");
