@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <laso/api/api.hpp>
@@ -233,16 +234,34 @@ TEST(Workers, WorkerInteractionsAreDurableIdempotentAndCancellable) {
   request.title = "Need clarification";
   request.summary = "Choose a bounded answer";
   request.created_at = timestamp();
+  request.deadline =
+      format_utc_timestamp(parse_utc_timestamp(request.created_at) + std::chrono::seconds{10});
   request.payload = {{"choices", Json::array({"yes", "no"})}};
   std::optional<WorkerInteractionResponse> result;
-  std::jthread waiter([&] { result = manager.handle_interaction(request); });
-  for (unsigned i = 0; i < 50 && storage->list(RecordKind::WorkerInteraction).empty(); ++i)
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  std::exception_ptr waiter_error;
+  std::jthread waiter([&] {
+    try {
+      result = manager.handle_interaction(request);
+    } catch (...) {
+      waiter_error = std::current_exception();
+    }
+  });
+  const auto persistence_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+  while (std::chrono::steady_clock::now() < persistence_deadline &&
+         storage->list(RecordKind::WorkerInteraction).empty())
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  if (storage->list(RecordKind::WorkerInteraction).empty()) {
+    waiter.join();
+    EXPECT_FALSE(waiter_error);
+    FAIL() << "worker interaction was not persisted within the bounded wait";
+    return;
+  }
   ASSERT_EQ(storage->list(RecordKind::WorkerInteraction).size(), 1U);
   EXPECT_EQ(storage->get(RecordKind::WorkerInteraction, request.request_id).at("state"), "pending");
   manager.resolve_interaction(request.request_id, WorkerInteractionState::Answered,
                               {{"answer", "yes"}}, "tester", "answered by test");
   waiter.join();
+  EXPECT_FALSE(waiter_error);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->state, WorkerInteractionState::Answered);
   EXPECT_EQ(result->payload.at("answer"), "yes");
