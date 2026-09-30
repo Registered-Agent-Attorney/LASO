@@ -10,6 +10,7 @@
 #include <laso/storage/factory.hpp>
 #include <laso/workers/process_transport.hpp>
 #include <mutex>
+#include <optional>
 
 namespace laso {
 class Service {
@@ -68,6 +69,14 @@ public:
   Json operator_artifact_integrity() const;
   Json operator_page(const std::string &resource, std::size_t limit = 50, std::size_t offset = 0,
                      const std::string &parent_id = "") const;
+  std::string begin_operator_action(const Actor &, const std::string &action,
+                                    const std::string &target_type, const std::string &target_id);
+  void complete_operator_action(const Actor &, const std::string &operation_id,
+                                const std::string &action, const std::string &target_type,
+                                const std::string &target_id, const std::string &outcome,
+                                unsigned http_status);
+  Json operator_audit_page(std::size_t limit,
+                           std::optional<std::uint64_t> before_sequence = std::nullopt) const;
   std::vector<Json> inspect_worker_jobs(const std::string &run_id = "") const;
   Json inspect_worker_job(const std::string &id) const;
   Json get(RecordKind kind, const std::string &id) const {

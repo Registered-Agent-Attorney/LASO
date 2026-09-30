@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <charconv>
+#include <exception>
 #include <iomanip>
 #include <laso/api/api.hpp>
 #include <laso/pipeline/parser.hpp>
@@ -10,17 +11,106 @@
 #include <sstream>
 
 namespace laso {
+namespace {
+struct OperatorAction {
+  std::string action;
+  std::string target_type;
+  std::string target_id;
+};
+
+std::optional<OperatorAction> operator_action_for(const std::string &method,
+                                                  const std::string &path, const Actor &actor) {
+  if (!actor.authenticated || (actor.role != "operator" && actor.role != "admin"))
+    return std::nullopt;
+  if (method == "POST") {
+    static const std::regex maintenance(R"(^/api/v1/operator/maintenance/(drain|resume|enter)$)");
+    std::smatch match;
+    if (std::regex_match(path, match, maintenance))
+      return OperatorAction{"maintenance." + match[1].str(), "instance", ""};
+  }
+  static const std::regex item_action(
+      R"(^/api/v1/(sessions|worker-jobs|worker-requests|runs|approvals|event-sources|schedules|triggers|pipelines)/([A-Za-z0-9_.:@-]{1,128})/([a-z-]+)$)");
+  std::smatch match;
+  if (method == "POST" && std::regex_match(path, match, item_action)) {
+    const auto collection = match[1].str();
+    const auto id = match[2].str();
+    const auto action = match[3].str();
+    if (collection == "sessions" && action == "close")
+      return OperatorAction{"session.close", "session", id};
+    if (collection == "worker-jobs" && action == "cancel")
+      return OperatorAction{"worker_job.cancel", "worker_job", id};
+    if (collection == "worker-requests" &&
+        (action == "respond" || action == "answer" || action == "approve" || action == "deny" ||
+         action == "cancel"))
+      return OperatorAction{"worker_request." + action, "worker_request", id};
+    if (collection == "runs" && (action == "cancel" || action == "resume"))
+      return OperatorAction{"run." + action, "run", id};
+    if (collection == "approvals" && (action == "approve" || action == "reject"))
+      return OperatorAction{"approval." + action, "approval", id};
+    if (collection == "event-sources" && (action == "enable" || action == "disable"))
+      return OperatorAction{"event_source." + action, "event_source", id};
+    if ((collection == "schedules" || collection == "triggers") &&
+        (action == "enable" || action == "disable"))
+      return OperatorAction{(collection == "schedules" ? "schedule." : "trigger.") + action,
+                            collection == "schedules" ? "schedule" : "trigger", id};
+    if (collection == "pipelines" && action == "runs")
+      return OperatorAction{"pipeline.run", "pipeline", id};
+  }
+  static const std::regex config_item(
+      R"(^/api/v1/(schedules|triggers)/([A-Za-z0-9_.:@-]{1,128})$)");
+  if ((method == "PATCH" || method == "DELETE") && std::regex_match(path, match, config_item)) {
+    const auto collection = match[1].str();
+    const auto type = collection == "schedules" ? "schedule" : "trigger";
+    return OperatorAction{std::string(type) + (method == "PATCH" ? ".update" : ".delete"), type,
+                          match[2].str()};
+  }
+  if (method == "POST" &&
+      (path == "/api/v1/pipelines" || path == "/api/v1/schedules" || path == "/api/v1/triggers")) {
+    const auto type = path == "/api/v1/pipelines"   ? "pipeline"
+                      : path == "/api/v1/schedules" ? "schedule"
+                                                    : "trigger";
+    return OperatorAction{std::string(type) + ".create", type, ""};
+  }
+  return std::nullopt;
+}
+
+ApiResponse operator_audit_unavailable() {
+  return {503, {{"error", "Operator audit is unavailable"}, {"error_code", "AUDIT_UNAVAILABLE"}}};
+}
+} // namespace
+
 // NOLINTBEGIN(bugprone-exception-escape): this noexcept boundary converts all exceptions to HTTP
 // responses.
 ApiResponse Api::handle(const std::string &method, const std::string &target,
                         const std::string &body, const std::string &credential,
                         const std::string &principal, const std::string &role) noexcept {
   const auto started = std::chrono::steady_clock::now();
+  std::optional<OperatorAction> pending_action;
+  std::string pending_operation_id;
+  Actor pending_actor;
+  const auto finish_audit = [&](unsigned status) {
+    if (!pending_action || pending_operation_id.empty())
+      return true;
+    const auto outcome = status >= 200 && status < 300 ? "succeeded"
+                         : status >= 500               ? "failed"
+                                                       : "rejected";
+    try {
+      service_.complete_operator_action(pending_actor, pending_operation_id, pending_action->action,
+                                        pending_action->target_type, pending_action->target_id,
+                                        outcome, status);
+      pending_operation_id.clear();
+      return true;
+    } catch (...) {
+      pending_operation_id.clear();
+      return false;
+    }
+  };
   auto response = [&]() -> ApiResponse {
     try {
       if (target.size() > 2048 || body.size() > max_document_bytes || credential.size() > 8192)
         return {413, {{"error", "Request exceeds size limit"}}};
       auto actor = identity_.authenticate_request(credential, principal, role);
+      pending_actor = actor;
       if (!identity_.authorize({actor, method, target}))
         return {403, {{"error", "Access denied"}}};
       auto input = body.empty() ? Json::object() : Json::parse(body);
@@ -29,7 +119,9 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
       auto path = target;
       std::size_t limit = 50, offset = 0;
       std::uint64_t after = 0;
+      std::optional<std::uint64_t> before;
       bool has_after = false;
+      bool has_offset = false;
       const auto query = path.find('?');
       const bool has_query = query != std::string::npos;
       if (has_query) {
@@ -50,12 +142,17 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
             throw Error(ErrorCode::Validation, "Invalid pagination value");
           if (key == "limit" && number >= 1 && number <= 100)
             limit = number;
-          else if (key == "offset" && number <= 100000000)
+          else if (key == "offset" && number <= 100000000) {
             offset = number;
-          else if (key == "after" &&
-                   number <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            has_offset = true;
+          } else if (key == "after" && number <= static_cast<std::uint64_t>(
+                                                     std::numeric_limits<std::int64_t>::max())) {
             after = number;
             has_after = true;
+          } else if (key == "before" && path == "/api/v1/operator/audit" && number > 0 &&
+                     number <=
+                         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            before = number;
           } else
             throw Error(ErrorCode::Validation, "Pagination limit exceeded or unknown parameter");
           if (end == std::string::npos)
@@ -63,15 +160,37 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
           parameters.erase(0, end + 1);
         }
       }
-      if (path.starts_with("/api/v1/operator/") &&
-          (has_after || (has_query && (path == "/api/v1/operator/status" ||
-                                       path == "/api/v1/operator/artifacts/integrity"))))
+      if (path.starts_with("/api/v1/operator/") && has_after)
         throw Error(ErrorCode::Validation, "Unsupported operator pagination parameter");
-      auto result = route(method, path, input, actor, limit, offset, after);
+      if (path != "/api/v1/operator/audit" && before)
+        throw Error(ErrorCode::Validation, "Unsupported operator pagination parameter");
+      if (path == "/api/v1/operator/audit" && has_offset)
+        throw Error(ErrorCode::Validation, "Unsupported operator pagination parameter");
+      if (has_query &&
+          (path == "/api/v1/operator/status" || path == "/api/v1/operator/artifacts/integrity"))
+        throw Error(ErrorCode::Validation, "Unsupported operator pagination parameter");
+      pending_action = operator_action_for(method, path, actor);
+      if (pending_action) {
+        try {
+          if (pending_action->target_type == "instance" && pending_action->target_id.empty())
+            pending_action->target_id = service_.instance_id();
+          pending_operation_id = service_.begin_operator_action(actor, pending_action->action,
+                                                                pending_action->target_type,
+                                                                pending_action->target_id);
+        } catch (...) {
+          return operator_audit_unavailable();
+        }
+      }
+      auto result = route(method, path, input, actor, limit, offset, after, before);
       const auto response_bytes =
           result.raw_body ? result.raw_body->size() : result.body.dump().size();
-      if (response_bytes > std::size_t{4} * 1024 * 1024)
+      if (response_bytes > std::size_t{4} * 1024 * 1024) {
+        if (!finish_audit(result.status))
+          return operator_audit_unavailable();
         return {413, {{"error", "Response exceeds limit; request a smaller page"}}};
+      }
+      if (!finish_audit(result.status))
+        return operator_audit_unavailable();
       return result;
     } catch (const Error &error) {
       unsigned status = 400;
@@ -87,7 +206,9 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
         status = 403;
       else if (error.code == ErrorCode::Storage)
         status = 503;
-      if (error.code == ErrorCode::Unavailable)
+      if (error.code == ErrorCode::Unavailable) {
+        if (!finish_audit(503))
+          return operator_audit_unavailable();
         return {503,
                 {{"error", "Instance is not accepting new work"},
                  {"error_code", "INSTANCE_NOT_ACCEPTING_WORK"},
@@ -95,18 +216,25 @@ ApiResponse Api::handle(const std::string &method, const std::string &target,
                 "application/json",
                 std::nullopt,
                 1};
+      }
       std::string code = error.code == ErrorCode::Validation ? "INVALID_REQUEST"
                          : error.code == ErrorCode::Conflict ? "CONFLICT"
                          : error.code == ErrorCode::Capacity ? "CAPACITY_EXHAUSTED"
                          : error.code == ErrorCode::Policy   ? "ACCESS_DENIED"
                          : error.code == ErrorCode::Storage  ? "STORAGE_UNAVAILABLE"
                                                              : "SERVICE_ERROR";
+      if (!finish_audit(status))
+        return operator_audit_unavailable();
       return {
           status,
           {{"error", status == 503 ? "Storage unavailable" : error.what()}, {"error_code", code}}};
     } catch (const Json::exception &) {
+      if (!finish_audit(400))
+        return operator_audit_unavailable();
       return {400, {{"error", "Malformed JSON request"}}};
     } catch (...) {
+      if (!finish_audit(500))
+        return operator_audit_unavailable();
       return {500, {{"error", "Internal service error"}}};
     }
   }();
@@ -186,7 +314,7 @@ std::string Api::prometheus_metrics() const {
 // NOLINTEND(bugprone-exception-escape)
 ApiResponse Api::route(const std::string &method, const std::string &target, const Json &body,
                        const Actor &actor, std::size_t limit, std::size_t offset,
-                       std::uint64_t after) {
+                       std::uint64_t after, std::optional<std::uint64_t> before) {
   static const std::regex operator_collection_route(
       "/api/v1/operator/(runs|node-work|worker-jobs|artifacts|sessions|approvals|"
       "worker-requests|attempts|providers|plugins|workers|instances|leases)");
@@ -221,6 +349,13 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     else
       service_.enter_maintenance(actor);
     return {200, service_.operator_maintenance()};
+  }
+  if (target == "/api/v1/operator/audit") {
+    if (method != "GET")
+      return {405, {{"error", "Method not supported"}}};
+    if (!actor.authenticated || (actor.role != "operator" && actor.role != "admin"))
+      return {403, {{"error", "Operator access required"}}};
+    return {200, service_.operator_audit_page(limit, before)};
   }
   if (target == "/api/v1/operator/status") {
     if (method != "GET")

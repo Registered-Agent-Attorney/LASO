@@ -1,6 +1,7 @@
 #pragma once
 #include <laso/core/types.hpp>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,17 @@ struct Record {
   RecordKind kind;
   std::string id, run_id;
   Json value;
+};
+struct OperatorAuditEvent {
+  std::string event_id;
+  std::string operation_id;
+  std::string actor_id;
+  std::string role;
+  std::string action;
+  std::string target_type;
+  std::string target_id;
+  std::string outcome;
+  unsigned http_status = 0;
 };
 class Storage {
 public:
@@ -134,6 +146,19 @@ public:
     (void)through;
     (void)limit;
     throw Error(ErrorCode::Configuration, "Storage backend does not support session history");
+  }
+  // Operator audit events are append-only, metadata-only records shared by all
+  // instances using this storage backend. `before_sequence` is an exclusive
+  // cursor for descending, stable pagination.
+  virtual Json append_operator_audit_event(const OperatorAuditEvent &) {
+    throw Error(ErrorCode::Configuration, "Storage backend does not support operator audit");
+  }
+  virtual Json
+  operator_audit_page(std::size_t limit,
+                      std::optional<std::uint64_t> before_sequence = std::nullopt) const {
+    (void)limit;
+    (void)before_sequence;
+    throw Error(ErrorCode::Configuration, "Storage backend does not support operator audit");
   }
   virtual Json get(RecordKind kind, const std::string &id) const = 0;
   virtual std::vector<Json> list(RecordKind kind, const std::string &run_id = "",

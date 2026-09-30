@@ -186,7 +186,7 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
     const auto version = tx.exec("SELECT COALESCE(MAX(version), 0) FROM laso_schema_migrations")
                              .front()[0]
                              .as<int>();
-    if (version > 11)
+    if (version > 12)
       throw Error(ErrorCode::Storage, "Unsupported PostgreSQL database schema version");
     if (version == 0) {
       for (const auto name : table_names) {
@@ -310,6 +310,28 @@ PostgresStorage::PostgresStorage(const std::string &dsn, const std::string &sche
       tx.exec("CREATE UNIQUE INDEX IF NOT EXISTS session_context_generation_idempotency "
               "ON session_context_generations(run_id, (body::jsonb->>'idempotency_key'))");
       tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (11)");
+    }
+    if (version < 12) {
+      tx.exec("CREATE TABLE IF NOT EXISTS laso_operator_audit ("
+              "sequence BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
+              "event_id TEXT NOT NULL UNIQUE, operation_id TEXT NOT NULL, "
+              "actor_id TEXT NOT NULL CHECK (actor_id ~ "
+              "'^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$'), "
+              "role TEXT NOT NULL CHECK (role IN ('operator','admin')), "
+              "action TEXT NOT NULL CHECK (action ~ "
+              "'^[a-z][a-z0-9_.-]{0,63}$'), "
+              "target_type TEXT NOT NULL CHECK (target_type ~ "
+              "'^[a-z][a-z0-9_-]{0,31}$'), "
+              "target_id TEXT NOT NULL CHECK (target_id = '' OR target_id ~ "
+              "'^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$'), "
+              "outcome TEXT NOT NULL CHECK (outcome IN "
+              "('requested','succeeded','failed','rejected')), "
+              "http_status SMALLINT NOT NULL CHECK "
+              "(http_status = 0 OR http_status BETWEEN 100 AND 599), "
+              "occurred_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())");
+      tx.exec("CREATE INDEX IF NOT EXISTS laso_operator_audit_operation "
+              "ON laso_operator_audit (operation_id, sequence)");
+      tx.exec("INSERT INTO laso_schema_migrations(version) VALUES (12)");
     }
     tx.commit();
     candidate->pool = std::make_unique<PostgresConnectionPool>(dsn, schema, pool_options);
@@ -1220,6 +1242,155 @@ std::vector<Json> PostgresStorage::list(RecordKind kind, const std::string &run_
     translate_connection_error();
   } catch (const std::exception &) {
     throw Error(ErrorCode::Storage, "PostgreSQL list failed");
+  }
+}
+
+Json PostgresStorage::append_operator_audit_event(const OperatorAuditEvent &event) {
+  const auto valid_uuid = [](const std::string &value) {
+    if (value.size() != 36)
+      return false;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+      if (index == 8 || index == 13 || index == 18 || index == 23) {
+        if (value[index] != '-')
+          return false;
+      } else if (!std::isxdigit(static_cast<unsigned char>(value[index]))) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const auto valid_token = [](const std::string &value, std::size_t max_size, const auto &allowed) {
+    return !value.empty() && value.size() <= max_size &&
+           std::all_of(value.begin(), value.end(), [&](unsigned char c) { return allowed(c); });
+  };
+  const auto actor_character = [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '@' || c == ':' || c == '-';
+  };
+  const auto action_character = [](unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+  };
+  const auto target_character = [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '@' || c == ':' || c == '-';
+  };
+  if (!valid_uuid(event.event_id) || !valid_uuid(event.operation_id) ||
+      !valid_token(event.actor_id, 128, actor_character) ||
+      !std::isalnum(static_cast<unsigned char>(event.actor_id.front())) ||
+      (event.role != "operator" && event.role != "admin") ||
+      !valid_token(event.action, 64, action_character) ||
+      !std::isalpha(static_cast<unsigned char>(event.action.front())) ||
+      !valid_token(event.target_type, 32,
+                   [](unsigned char c) {
+                     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+                            c == '-';
+                   }) ||
+      !std::isalpha(static_cast<unsigned char>(event.target_type.front())) ||
+      event.target_id.size() > 128 ||
+      (!event.target_id.empty() &&
+       (!valid_token(event.target_id, 128, target_character) ||
+        !std::isalnum(static_cast<unsigned char>(event.target_id.front())))) ||
+      (event.outcome != "requested" && event.outcome != "succeeded" && event.outcome != "failed" &&
+       event.outcome != "rejected") ||
+      (event.http_status != 0 && (event.http_status < 100 || event.http_status > 599)))
+    throw Error(ErrorCode::Validation, "Invalid operator audit event");
+
+  PostgresConnectionPool::Lease connection;
+  try {
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
+    const auto result = tx.exec_params(
+        "INSERT INTO laso_operator_audit "
+        "(event_id, operation_id, actor_id, role, action, target_type, "
+        "target_id, outcome, http_status) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+        "RETURNING sequence, to_char(occurred_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')",
+        event.event_id, event.operation_id, event.actor_id, event.role, event.action,
+        event.target_type, event.target_id, event.outcome, static_cast<int>(event.http_status));
+    tx.commit();
+    if (result.empty())
+      throw Error(ErrorCode::Storage, "Operator audit append failed");
+    return {{"sequence", result.front()[0].as<std::uint64_t>()},
+            {"event_id", event.event_id},
+            {"operation_id", event.operation_id},
+            {"actor", event.actor_id},
+            {"role", event.role},
+            {"action", event.action},
+            {"target_type", event.target_type},
+            {"target_id", event.target_id},
+            {"outcome", event.outcome},
+            {"http_status", event.http_status},
+            {"occurred_at", result.front()[1].as<std::string>()}};
+  } catch (const Error &) {
+    throw;
+  } catch (const pqxx::sql_error &error) {
+    translate_sql_error(error);
+  } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
+    translate_connection_error();
+  } catch (const std::exception &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL operator audit append failed");
+  }
+}
+
+Json PostgresStorage::operator_audit_page(std::size_t limit,
+                                          std::optional<std::uint64_t> before_sequence) const {
+  if (limit == 0 || limit > 100 || (before_sequence && *before_sequence == 0) ||
+      (before_sequence &&
+       *before_sequence > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
+    throw Error(ErrorCode::Validation, "Invalid operator audit pagination");
+
+  PostgresConnectionPool::Lease connection;
+  try {
+    connection = impl_->pool->acquire();
+    pqxx::work tx(connection.connection());
+    const auto page_limit = static_cast<long long>(limit + 1);
+    const auto result = before_sequence
+                            ? tx.exec_params("SELECT sequence, event_id, operation_id, "
+                                             "actor_id, role, action, target_type, target_id, "
+                                             "outcome, http_status, "
+                                             "to_char(occurred_at AT TIME ZONE 'UTC', "
+                                             "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') "
+                                             "FROM laso_operator_audit WHERE sequence < $1 "
+                                             "ORDER BY sequence DESC LIMIT $2",
+                                             static_cast<long long>(*before_sequence), page_limit)
+                            : tx.exec_params("SELECT sequence, event_id, operation_id, "
+                                             "actor_id, role, action, target_type, target_id, "
+                                             "outcome, http_status, "
+                                             "to_char(occurred_at AT TIME ZONE 'UTC', "
+                                             "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') "
+                                             "FROM laso_operator_audit "
+                                             "ORDER BY sequence DESC LIMIT $1",
+                                             page_limit);
+    Json events = Json::array();
+    const auto result_size = static_cast<std::size_t>(result.size());
+    for (std::size_t index = 0; index < result_size && index < limit; ++index) {
+      const auto &row = result[index];
+      events.push_back({{"sequence", row[0].as<std::uint64_t>()},
+                        {"event_id", row[1].as<std::string>()},
+                        {"operation_id", row[2].as<std::string>()},
+                        {"actor", row[3].as<std::string>()},
+                        {"role", row[4].as<std::string>()},
+                        {"action", row[5].as<std::string>()},
+                        {"target_type", row[6].as<std::string>()},
+                        {"target_id", row[7].as<std::string>()},
+                        {"outcome", row[8].as<std::string>()},
+                        {"http_status", row[9].as<unsigned>()},
+                        {"occurred_at", row[10].as<std::string>()}});
+    }
+    tx.commit();
+    const bool has_more = result_size > limit;
+    const auto next_before =
+        has_more && !events.empty() ? Json(events.back().at("sequence")) : Json(nullptr);
+    return {{"events", std::move(events)}, {"next_before", next_before}, {"has_more", has_more}};
+  } catch (const Error &) {
+    throw;
+  } catch (const pqxx::sql_error &error) {
+    translate_sql_error(error);
+  } catch (const pqxx::broken_connection &) {
+    connection.mark_broken();
+    translate_connection_error();
+  } catch (const std::exception &) {
+    throw Error(ErrorCode::Storage, "PostgreSQL operator audit read failed");
   }
 }
 

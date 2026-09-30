@@ -255,6 +255,7 @@ See [architecture](docs/architecture.md), [runtime semantics](docs/runtime.md),
 [build and install](docs/build.md), [configuration](docs/configuration.md),
 [capability matrix](docs/capability-matrix.md),
 [operations and recovery](docs/operations.md),
+[operator audit](docs/operator-audit.md),
 [security threat model](docs/security-threat-model.md),
 [Linux deployment](docs/linux-deployment.md), [security](SECURITY.md), and
 [contribution instructions](CONTRIBUTING.md). CI specifies Ubuntu GCC/Clang,

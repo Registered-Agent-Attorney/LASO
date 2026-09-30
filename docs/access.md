@@ -42,7 +42,7 @@ may instead provide its own `IdentityProvider` implementation.
 | GET, POST | `/sessions` |
 | GET | `/sessions/{id}`, `/sessions/{id}/turns`, `/sessions/{id}/events`, `/sessions/{id}/events/stream` |
 | POST | `/sessions/{id}/turns`, `/sessions/{id}/close` |
-| GET | `/operator/status`, `/operator/artifacts/integrity`, `/operator/maintenance` |
+| GET | `/operator/status`, `/operator/artifacts/integrity`, `/operator/maintenance`, `/operator/audit` |
 | POST | `/operator/maintenance/drain`, `/operator/maintenance/enter`, `/operator/maintenance/resume` |
 | GET | `/operator/runs`, `/operator/node-work`, `/operator/worker-jobs`, `/operator/attempts`, `/operator/artifacts`, `/operator/sessions`, `/operator/approvals`, `/operator/worker-requests`, `/operator/providers`, `/operator/plugins`, `/operator/workers`, `/operator/instances`, `/operator/leases` |
 | GET | `/operator/sessions/{id}/turns` |
@@ -63,6 +63,8 @@ independent deployment-owned authentication and authorization boundary.
 The operator endpoints use the same `IdentityProvider` authorization boundary as
 the rest of the API. Their list responses are paged and omit prompt/input bodies,
 provider-native continuation values, arbitrary metadata, DSNs, and artifact paths.
+`/operator/audit` is restricted to authenticated `operator` and `admin` principals. It returns a newest-first PostgreSQL feed using `limit` (1..100, default 50) and an exclusive `before` sequence cursor; `offset` and `after` are rejected. The feed stores fixed action names, actor/role, bounded target identity, outcome, HTTP status, and timestamp, without request bodies or headers. LASO writes the requested event before a supported operator mutation and fails closed if that write fails. If recording the outcome fails after the mutation, the API returns `503 AUDIT_UNAVAILABLE`; check resource state and the feed before retrying. See [operator audit](operator-audit.md) for the complete durability contract.
+
 Artifact object-store keys are withheld; content digests remain available for
 integrity comparison.
 Artifact integrity returns counts and a bounded status only; it never returns
