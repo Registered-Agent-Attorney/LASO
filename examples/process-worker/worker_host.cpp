@@ -186,6 +186,9 @@ int main(int argc, char **argv) {
                   {"state", "Completed"},
                   {"external_job_id", external},
                   {"payload", terminal_result(mode)}};
+        if (mode == "timeout-echo")
+          body["payload"]["timeout_ms"] =
+              request.value("payload", Json::object()).value("timeout_ms", std::uint64_t{0});
         if (mode == "artifact")
           body["payload"]["artifact_path"] = "result/artifact.bin";
         if (mode == "artifact")

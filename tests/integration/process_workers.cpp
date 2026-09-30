@@ -5,6 +5,7 @@
 #include <fstream>
 #include <future>
 #include <laso/api/api.hpp>
+#include <laso/workers/manager.hpp>
 #include <laso/workers/process_transport.hpp>
 #include <thread>
 #include <unistd.h>
@@ -137,6 +138,47 @@ TEST(ProcessWorker, HandshakeAndSubmitStatusResultLifecycle) {
   EXPECT_EQ(submission.usage.total_tokens, std::optional<std::uint64_t>(5));
   EXPECT_EQ(transport.status(submission.external_job_id).state, WorkerJobState::Completed);
   EXPECT_EQ(transport.result(submission.external_job_id).result.at("worker"), "process-reference");
+}
+
+TEST(ProcessWorker, SubmitCarriesBoundedTimeoutInPayload) {
+  ProcessWorkerTransport transport("process", worker_config("timeout-echo", 500));
+  ASSERT_NO_THROW(transport.start());
+
+  auto bounded_request = request();
+  bounded_request.timeout_ms = 125;
+  const auto bounded = transport.submit(bounded_request);
+  EXPECT_EQ(bounded.result.at("timeout_ms"), 125U);
+
+  auto capped_request = request();
+  capped_request.job_id = "job-process-capped";
+  capped_request.idempotency_key = "process-idempotency-capped";
+  capped_request.timeout_ms = 900;
+  const auto capped = transport.submit(capped_request);
+  EXPECT_EQ(capped.result.at("timeout_ms"), 500U);
+}
+
+TEST(ProcessWorker, LostChildJobRemainsUnknownAndIsNotResubmitted) {
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  auto transport = std::make_shared<ProcessWorkerTransport>("process", worker_config("delay"));
+  registry.add("process", transport);
+  WorkerManager manager(*storage, registry);
+  auto worker_request = request();
+  const auto submitted = manager.submit(worker_request);
+  ASSERT_EQ(submitted.state, WorkerJobState::Queued);
+  ASSERT_FALSE(submitted.external_job_id.empty());
+
+  transport->stop();
+  ASSERT_NO_THROW(transport->start());
+  const auto unknown = manager.refresh(submitted.id);
+  EXPECT_EQ(unknown.state, WorkerJobState::Unknown);
+  EXPECT_EQ(storage->get(RecordKind::WorkerJob, submitted.id).get<WorkerJob>().state,
+            WorkerJobState::Unknown);
+
+  const auto retried = manager.submit(worker_request);
+  EXPECT_EQ(retried.state, WorkerJobState::Unknown);
+  EXPECT_EQ(retried.external_job_id, submitted.external_job_id);
 }
 
 TEST(ProcessWorker, VersionMismatchIsTransportFailure) {
