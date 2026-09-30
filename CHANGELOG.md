@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a PostgreSQL-backed, cluster-visible operator audit feed. Successful and rejected operator mutations append bounded requested and outcome records keyed by an operation ID; the API exposes newest-first, cursor-paginated metadata to operator/admin principals. Audit records contain actor, role, fixed action, safe target, result, status, sequence, and timestamp only. The write path fails closed if the initial audit record cannot be stored. A lost final append can leave an explicitly unresolved request after the action has run; inspect current state before retrying. See docs/operator-audit.md.
+
 - Add coordinated instance drain and maintenance control with admission and
   ownership-claim gating, readiness integration, bounded maintenance metrics,
   local actor-attributed transition history, and restart/rolling-operation

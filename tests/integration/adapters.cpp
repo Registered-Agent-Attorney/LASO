@@ -3071,7 +3071,9 @@ TEST(Storage, PostgresUpgradesSchemaSevenToCurrent) {
     pqxx::connection verify_connection(dsn);
     pqxx::read_transaction verify(verify_connection);
     verify.exec("SET search_path TO \"" + schema + "\", public");
-    EXPECT_EQ(verify.exec1("SELECT MAX(version) FROM laso_schema_migrations")[0].as<int>(), 11);
+    EXPECT_EQ(verify.exec1("SELECT MAX(version) FROM laso_schema_migrations")[0].as<int>(), 12);
+    EXPECT_STREQ(verify.exec1("SELECT to_regclass('laso_operator_audit')")[0].c_str(),
+                 "laso_operator_audit");
     EXPECT_STREQ(verify.exec1("SELECT to_regclass('node_work')")[0].c_str(), "node_work");
     EXPECT_STREQ(verify.exec1("SELECT to_regclass('agent_sessions')")[0].c_str(), "agent_sessions");
     EXPECT_STREQ(verify.exec1("SELECT to_regclass('session_context_generations')")[0].c_str(),
@@ -4564,6 +4566,7 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/attempts?limit=1000000000000", "").status, 400U);
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/attempts?after=1", "").status, 400U);
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/status?limit=1", "").status, 400U);
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/status?offset=0", "").status, 400U);
   EXPECT_EQ(api.handle("GET", "/api/v1/operator/unknown", "").status, 404U);
   EXPECT_EQ(api.handle("POST", "/api/v1/operator/status", "{}").status, 405U);
 
@@ -4643,6 +4646,185 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_EQ(all_responses.find("fixture-canary-provider-metadata"), std::string::npos);
   EXPECT_EQ(all_responses.find(cfg.postgres_dsn), std::string::npos);
 }
+TEST(Api, DurableOperatorAuditIsBoundedAuthorizedAndMetadataOnly) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto options = config(dir.path);
+  Service service(io, options);
+  constexpr std::string_view gateway_token = "synthetic-audit-gateway-token-01234567890123456789";
+  TrustedGatewayIdentity identity{std::string(gateway_token)};
+  Api api(service, identity);
+  const std::string operator_auth = "Bearer " + std::string(gateway_token);
+  const auto drain =
+      api.handle("POST", "/api/v1/operator/maintenance/drain", R"({"confirmed":true})",
+                 operator_auth, "operator@example.test", "operator");
+  ASSERT_EQ(drain.status, 200U);
+
+  const auto first = api.handle("GET", "/api/v1/operator/audit?limit=1", "", operator_auth,
+                                "operator@example.test", "operator");
+  ASSERT_EQ(first.status, 200U) << first.body.dump();
+  ASSERT_EQ(first.body.at("events").size(), 1U);
+  EXPECT_TRUE(first.body.at("has_more").get<bool>());
+  EXPECT_TRUE(first.body.at("next_before").is_number_unsigned());
+  const auto newer = first.body.at("events").front();
+  EXPECT_EQ(newer.at("action"), "maintenance.drain");
+  EXPECT_EQ(newer.at("outcome"), "succeeded");
+  EXPECT_EQ(newer.at("actor"), "operator@example.test");
+  EXPECT_EQ(newer.at("role"), "operator");
+  EXPECT_EQ(newer.at("target_type"), "instance");
+  EXPECT_EQ(newer.at("target_id"), drain.body.at("instance_id"));
+  EXPECT_EQ(newer.size(), 11U);
+  auto peer_storage = make_storage(options.data_dir / "service");
+  const auto cluster_visible = peer_storage->operator_audit_page(100);
+  EXPECT_GE(cluster_visible.at("events").size(), 2U);
+  EXPECT_EQ(cluster_visible.at("events")[0].at("operation_id"), newer.at("operation_id"));
+  const auto older = api.handle("GET",
+                                "/api/v1/operator/audit?limit=1&before=" +
+                                    std::to_string(newer.at("sequence").get<std::uint64_t>()),
+                                "", operator_auth, "operator@example.test", "operator");
+  ASSERT_EQ(older.status, 200U) << older.body.dump();
+  ASSERT_EQ(older.body.at("events").size(), 1U);
+  EXPECT_EQ(older.body.at("events")[0].at("outcome"), "requested");
+  EXPECT_EQ(older.body.at("events")[0].at("operation_id"), newer.at("operation_id"));
+  EXPECT_FALSE(older.body.at("has_more").get<bool>());
+
+  EXPECT_EQ(api.handle("GET", "/api/v1/operator/audit", "").status, 403U);
+  const auto user_attempt =
+      api.handle("POST", "/api/v1/operator/maintenance/resume", R"({"confirmed":true})",
+                 operator_auth, "reader@example.test", "user");
+  EXPECT_EQ(user_attempt.status, 403U);
+  for (const auto *path :
+       {"/api/v1/operator/audit?limit=0", "/api/v1/operator/audit?limit=101",
+        "/api/v1/operator/audit?before=0", "/api/v1/operator/audit?before=invalid",
+        "/api/v1/operator/audit?before=1&before=2", "/api/v1/operator/audit?after=1",
+        "/api/v1/operator/audit?offset=0", "/api/v1/operator/audit?offset=1",
+        "/api/v1/operator/audit?before=9223372036854775808"}) {
+    EXPECT_EQ(
+        api.handle("GET", path, "", operator_auth, "operator@example.test", "operator").status,
+        400U)
+        << path;
+  }
+  const auto rejected_body =
+      api.handle("POST", "/api/v1/operator/maintenance/resume",
+                 R"({"confirmed":true,"reason":"audit-canary-private-reason"})", operator_auth,
+                 "operator@example.test", "operator");
+  EXPECT_EQ(rejected_body.status, 400U);
+  const auto empty = api.handle("GET", "/api/v1/operator/audit?before=1", "", operator_auth,
+                                "operator@example.test", "operator");
+  ASSERT_EQ(empty.status, 200U);
+  EXPECT_TRUE(empty.body.at("events").empty());
+  EXPECT_FALSE(empty.body.at("has_more").get<bool>());
+  const auto serialized = first.body.dump() + older.body.dump() + empty.body.dump();
+  const auto all_events = api.handle("GET", "/api/v1/operator/audit?limit=100", "", operator_auth,
+                                     "operator@example.test", "operator");
+  ASSERT_EQ(all_events.status, 200U);
+  EXPECT_EQ(all_events.body.dump().find("audit-canary-private-reason"), std::string::npos);
+  EXPECT_EQ(serialized.find("audit-canary-private-reason"), std::string::npos);
+  {
+    pqxx::connection connection(test_dsn());
+    pqxx::work transaction(connection);
+    const auto columns =
+        transaction.exec_params("SELECT column_name FROM information_schema.columns "
+                                "WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position",
+                                options.postgres_schema, "laso_operator_audit");
+    const std::vector<std::string> expected_columns{
+        "sequence",    "event_id",  "operation_id", "actor_id",    "role",       "action",
+        "target_type", "target_id", "outcome",      "http_status", "occurred_at"};
+    ASSERT_EQ(columns.size(), expected_columns.size());
+    for (std::size_t index = 0; index < expected_columns.size(); ++index)
+      EXPECT_EQ(columns[index][0].as<std::string>(), expected_columns[index]);
+    const auto stored =
+        transaction.exec("SELECT event_id, operation_id, actor_id, role, action, target_type, "
+                         "target_id, outcome, http_status::text, occurred_at::text FROM " +
+                         options.postgres_schema + ".laso_operator_audit ORDER BY sequence");
+    for (const auto &row : stored)
+      for (const auto &field : row)
+        EXPECT_EQ(field.as<std::string>().find("audit-canary-private-reason"), std::string::npos);
+    transaction.commit();
+  }
+  for (std::size_t index = 0; index < 50; ++index) {
+    const auto operation = service.begin_operator_action(
+        Actor{"operator-fixture", true, "operator"}, "audit.fixture", "fixture", "page-boundary");
+    service.complete_operator_action(Actor{"operator-fixture", true, "operator"}, operation,
+                                     "audit.fixture", "fixture", "page-boundary", "succeeded", 200);
+  }
+  const auto maximum_page = api.handle("GET", "/api/v1/operator/audit?limit=100", "", operator_auth,
+                                       "operator@example.test", "operator");
+  ASSERT_EQ(maximum_page.status, 200U);
+  ASSERT_EQ(maximum_page.body.at("events").size(), 100U);
+  EXPECT_TRUE(maximum_page.body.at("has_more").get<bool>());
+  const auto final_page = api.handle(
+      "GET",
+      "/api/v1/operator/audit?limit=100&before=" +
+          std::to_string(maximum_page.body.at("events").back().at("sequence").get<std::uint64_t>()),
+      "", operator_auth, "operator@example.test", "operator");
+  ASSERT_EQ(final_page.status, 200U);
+  EXPECT_EQ(final_page.body.at("events").size(), 4U);
+  EXPECT_FALSE(final_page.body.at("has_more").get<bool>());
+}
+
+TEST(Api, OperatorMutationFailsClosedWhenAuditStorageIsUnavailable) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto options = config(dir.path);
+  Service service(io, options);
+  {
+    pqxx::connection connection(test_dsn());
+    pqxx::work transaction(connection);
+    const auto schema = options.postgres_schema;
+    transaction.exec("CREATE FUNCTION \"" + schema +
+                     "\".reject_operator_audit() RETURNS trigger LANGUAGE plpgsql "
+                     "AS $audit$ BEGIN RAISE EXCEPTION 'audit fixture failure'; "
+                     "END; $audit$");
+    transaction.exec("CREATE TRIGGER reject_operator_audit BEFORE INSERT ON \"" + schema +
+                     "\".laso_operator_audit FOR EACH ROW EXECUTE FUNCTION \"" + schema +
+                     "\".reject_operator_audit()");
+    transaction.commit();
+  }
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto rejected =
+      api.handle("POST", "/api/v1/operator/maintenance/drain", R"({"confirmed":true})");
+  EXPECT_EQ(rejected.status, 503U);
+  EXPECT_EQ(rejected.body.at("error_code"), "AUDIT_UNAVAILABLE");
+  const auto state = api.handle("GET", "/api/v1/operator/maintenance", "");
+  ASSERT_EQ(state.status, 200U);
+  EXPECT_EQ(state.body.at("state"), "active");
+  EXPECT_EQ(state.body.at("desired_state"), "active");
+}
+
+TEST(Api, OperatorAuditOutcomeFailureLeavesRequestedRecordAndReportsUncertainty) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto options = config(dir.path);
+  Service service(io, options);
+  {
+    pqxx::connection connection(test_dsn());
+    pqxx::work transaction(connection);
+    transaction.exec("SET search_path TO " + options.postgres_schema + ", public");
+    transaction.exec(
+        "CREATE FUNCTION reject_operator_audit_outcome() RETURNS trigger LANGUAGE plpgsql AS "
+        "$audit$ BEGIN RAISE EXCEPTION 'audit outcome fixture failure'; END; $audit$");
+    transaction.exec("CREATE TRIGGER reject_operator_audit_outcome BEFORE INSERT ON "
+                     "laso_operator_audit FOR EACH ROW WHEN (NEW.outcome <> 'requested') EXECUTE "
+                     "FUNCTION reject_operator_audit_outcome()");
+    transaction.commit();
+  }
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto response =
+      api.handle("POST", "/api/v1/operator/maintenance/drain", R"({"confirmed":true})");
+  EXPECT_EQ(response.status, 503U);
+  EXPECT_EQ(response.body.at("error_code"), "AUDIT_UNAVAILABLE");
+  const auto state = api.handle("GET", "/api/v1/operator/maintenance", "");
+  ASSERT_EQ(state.status, 200U);
+  EXPECT_EQ(state.body.at("state"), "drained");
+  const auto audit = api.handle("GET", "/api/v1/operator/audit?limit=10", "");
+  ASSERT_EQ(audit.status, 200U);
+  ASSERT_EQ(audit.body.at("events").size(), 1U);
+  EXPECT_EQ(audit.body.at("events")[0].at("outcome"), "requested");
+}
+
 TEST(Api, OperatorMaintenanceAuthorizationAndStateTransitions) {
   TemporaryDirectory dir;
   asio::io_context io;
@@ -4821,6 +5003,10 @@ TEST(Api, OperatorMaintenanceIntentAndAuditSurviveRestart) {
     EXPECT_EQ(status.body.at("desired_state"), "draining");
     EXPECT_EQ(status.body.at("state"), "drained");
     EXPECT_EQ(status.body.at("last_event").at("actor"), "local-development");
+    const auto audit = api.handle("GET", "/api/v1/operator/audit?limit=10", "");
+    ASSERT_EQ(audit.status, 200U);
+    EXPECT_GE(audit.body.at("events").size(), 2U);
+    EXPECT_EQ(audit.body.at("events").back().at("outcome"), "requested");
     const auto resumed =
         api.handle("POST", "/api/v1/operator/maintenance/resume", R"({"confirmed":true})");
     ASSERT_EQ(resumed.status, 200U);

@@ -306,6 +306,50 @@ void Service::require_operator_actor(const Actor &actor) const {
       !std::isalnum(static_cast<unsigned char>(actor.id.front())))
     throw Error(ErrorCode::Policy, "Operator access required");
 }
+std::string Service::begin_operator_action(const Actor &actor, const std::string &action,
+                                           const std::string &target_type,
+                                           const std::string &target_id) {
+  require_operator_actor(actor);
+  const auto valid_identifier = [](const std::string &value) {
+    return !value.empty() && value.size() <= 128 &&
+           std::isalnum(static_cast<unsigned char>(value.front())) &&
+           std::all_of(value.begin(), value.end(), [](unsigned char c) {
+             return std::isalnum(c) || c == '.' || c == '_' || c == '@' || c == ':' || c == '-';
+           });
+  };
+  const auto safe_target =
+      target_id.empty() || valid_identifier(target_id) ? target_id : std::string{};
+  const auto operation_id = uuid();
+  storage_->append_operator_audit_event({uuid(), operation_id, actor.id, actor.role, action,
+                                         target_type, safe_target, "requested", 0});
+  return operation_id;
+}
+void Service::complete_operator_action(const Actor &actor, const std::string &operation_id,
+                                       const std::string &action, const std::string &target_type,
+                                       const std::string &target_id, const std::string &outcome,
+                                       unsigned http_status) {
+  require_operator_actor(actor);
+  const auto valid_identifier = [](const std::string &value) {
+    return !value.empty() && value.size() <= 128 &&
+           std::isalnum(static_cast<unsigned char>(value.front())) &&
+           std::all_of(value.begin(), value.end(), [](unsigned char c) {
+             return std::isalnum(c) || c == '.' || c == '_' || c == '@' || c == ':' || c == '-';
+           });
+  };
+  const auto safe_target =
+      target_id.empty() || valid_identifier(target_id) ? target_id : std::string{};
+  storage_->append_operator_audit_event({uuid(), operation_id, actor.id, actor.role, action,
+                                         target_type, safe_target, outcome, http_status});
+}
+Json Service::operator_audit_page(std::size_t limit,
+                                  std::optional<std::uint64_t> before_sequence) const {
+  if (limit == 0 || limit > 100 || (before_sequence && *before_sequence == 0) ||
+      (before_sequence &&
+       *before_sequence > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
+    throw Error(ErrorCode::Validation, "Invalid operator audit pagination");
+  return storage_->operator_audit_page(limit, before_sequence);
+}
+
 void Service::sync_maintenance_registry(const std::string &state, const Actor &actor,
                                         const std::string &action, const std::string &from,
                                         const std::string &to) {

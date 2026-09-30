@@ -35,7 +35,8 @@ private:
                       std::chrono::steady_clock::duration duration) noexcept;
   std::string prometheus_metrics() const;
   ApiResponse route(const std::string &, const std::string &, const Json &, const Actor &,
-                    std::size_t limit, std::size_t offset, std::uint64_t after);
+                    std::size_t limit, std::size_t offset, std::uint64_t after,
+                    std::optional<std::uint64_t> before);
 };
 struct HttpServerOptions {
   std::size_t max_session_streams = 32;

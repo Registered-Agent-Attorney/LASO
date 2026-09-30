@@ -157,17 +157,16 @@ bounded, metadata-safe operator views for the separate Web surface.
 
 ### M8.1 — separate LASO-Web operator/admin surface
 
-Status: complete in the separate Go LASO-Web service. A distinct `/admin`
-area provides sanitized, read-only operational metadata; normal chat remains
-separate. Operator and admin principals may read the surface, while ordinary
-users are denied. Admin mutations are withheld until LASO can durably attribute
-the authenticated human principal; privileged mutation requests return a stable
-`501` without reaching LASO. Remote administration fails closed unless a
-deployment-owned trusted proxy supplies a trustworthy principal and role from a
-configured direct peer. Explicit loopback development remains available, and
-the Web application remains an API client and reverse-proxy. No durable Core
-actor record or action audit is claimed. Durable actor propagation and full
-OIDC/JWT integration remain follow-up work.
+Status: complete in the separate Go LASO-Web service. A distinct /admin area
+provides sanitized operational metadata; normal chat remains separate.
+Operator and admin principals may read the surface, while ordinary users are
+denied. M10 added maintenance drain/resume controls. The Web operator audit view
+reads the durable metadata-only Core audit feed. Other privileged Web mutations
+remain withheld where the Web/API path lacks a safe attributed operation.
+Remote administration fails closed unless a deployment-owned trusted proxy
+supplies a trustworthy principal and role from a configured direct peer.
+Explicit loopback development remains available, and LASO-Web remains an API
+client and reverse-proxy. Full OIDC/JWT integration remains follow-up work.
 
 The operator contract excludes prompts, message bodies, provider-native
 session IDs, credentials, DSNs, absolute sensitive paths, and arbitrary
@@ -198,23 +197,43 @@ sandbox acceptance is claimed.
 
 ## M9 — operational diagnostics and integration foundations
 
-M9 follows the merged M8 operator/API work. The feature-gap audit found that
-LASO-Web already has loopback-only runtime diagnostics and separate liveness /
-readiness routes, while LASO Core exposed only process liveness and an
-in-process SSE counter snapshot. M9.1 adds a Core readiness signal for
-PostgreSQL/schema compatibility and runtime shutdown state, plus an authorization-aware,
-low-cardinality Prometheus endpoint for API request latency/outcomes and
-session-SSE admission. It does not claim provider, artifact backend, or worker
-health through readiness, and it is not a complete tracing/metrics system.
+M9 added a Core readiness signal for PostgreSQL/schema compatibility and runtime
+shutdown state, plus an authorization-aware, low-cardinality Prometheus
+endpoint for API request latency/outcomes and session-SSE admission. It does not
+claim provider, artifact backend, or worker health through readiness, and it is
+not a complete tracing/metrics system.
 
-Subsequent work should establish a versioned machine-readable API contract,
-then advance the durable principal/audit boundary and out-of-process plugin
-execution. Credentialed remote MCP and webhook integrations remain dependent on
-a safe secret-reference contract and explicit network policy. Preserve the
-distinction between a supervised child process and an OS-sandboxed plugin.
+The durable actor-attributed audit feed is available as a post-M10
+stabilization feature. A versioned machine-readable API contract remains
+unimplemented. Out-of-process plugin execution remains a separate design and
+implementation task. Credentialed remote MCP and webhook integrations remain
+dependent on a safe secret-reference contract and explicit network policy.
+Preserve the distinction between a supervised child process and an
+OS-sandboxed plugin.
 
 ## M10 — coordinated drain and maintenance
 
-The M10 development slice adds instance-scoped drain and maintenance control for safe rolling operations. Drain closes new submissions and ownership claims while valid owned work may finish and renew leases. PostgreSQL registry state prevents new cluster claims; the local desired state survives restart. Readiness reports non-ready while admission is closed, while liveness remains available. Operators can verify the derived drained state and `safe_to_stop` before using their service manager.
+The M10 development slice adds instance-scoped drain and maintenance control
+for safer rolling operations. Drain closes new submissions and ownership claims
+while valid owned work may finish and renew leases. PostgreSQL registry state
+prevents new cluster claims; the local desired state survives restart.
+Readiness reports non-ready while admission is closed, while liveness remains
+available. Operators can verify the derived drained state and safe_to_stop
+before using their service manager.
 
-The transition record is a bounded, instance-local audit file; this is not a cluster-wide audit service. Forced termination remains governed by lease expiry and fencing and may cause at-least-once side effects. M10 does not claim zero downtime. See [coordinated drain](maintenance.md).
+The local transition journal is bounded and used for restart reconciliation.
+The post-M10 PostgreSQL operator audit feed is cluster-visible but does not
+make an instance's local desired maintenance state cluster-owned. Forced
+termination remains governed by lease expiry and fencing and may cause
+at-least-once side effects. M10 does not claim zero downtime. See coordinated
+drain documentation.
+
+## Post-M10 stabilization — durable operator audit
+
+The PostgreSQL schema v12 adds a shared append-only metadata table. Operator
+mutations pass through a fail-closed request record before the operation runs,
+then append a result record with the HTTP outcome. Reads use bounded descending
+sequence pagination. An interrupted action may leave a request without a result,
+which signals uncertainty and requires state inspection. This complements the
+instance-local maintenance journal; it does not replace transactional operation
+records or establish exactly-once side effects. See docs/operator-audit.md.
