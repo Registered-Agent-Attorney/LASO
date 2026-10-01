@@ -707,6 +707,51 @@ TEST(Workers, DifferentWorkerSubmissionsCanRunConcurrently) {
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
 }
 
+TEST(Workers, UnknownJobsDoNotReserveGlobalOrWorkerCapacity) {
+  const auto exercise = [](bool asynchronous) {
+    TemporaryDirectory directory;
+    auto storage = make_storage(directory.path / "state.db");
+    WorkerRegistry registry;
+    auto adapter = std::make_shared<UsageWorker>();
+    registry.add("codex", adapter);
+
+    WorkerJob stale;
+    stale.id = "stale-computer-job";
+    stale.worker_id = "windows-computer";
+    stale.run_id = "stale-computer-run";
+    stale.idempotency_key = "stale-computer-idempotency-key";
+    stale.external_job_id = "lost-after-worker-restart";
+    stale.state = WorkerJobState::Unknown;
+    storage->commit({{RecordKind::WorkerJob, stale.id, stale.run_id, Json(stale)}});
+
+    WorkerManager manager(*storage, registry, 1, 1);
+    WorkerRequest request;
+    request.worker_id = "codex";
+    request.run_id = "independent-codex-run";
+    request.node_id = "agent-one";
+    request.idempotency_key = asynchronous ? "after-stale-async" : "after-stale-sync";
+    WorkerJob submitted;
+    if (asynchronous) {
+      submitted = manager.submit_async(request);
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      do {
+        submitted = manager.job(submitted.id);
+        if (submitted.state != WorkerJobState::Submitting)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      } while (std::chrono::steady_clock::now() < deadline);
+    } else {
+      submitted = manager.submit(request);
+    }
+    EXPECT_EQ(submitted.state, WorkerJobState::Queued);
+    EXPECT_EQ(manager.job(stale.id).state, WorkerJobState::Unknown);
+    manager.stop();
+  };
+
+  exercise(false);
+  exercise(true);
+}
+
 TEST(Workers, ProviderCompletionWinsIfItBeatsCancellationAcknowledgement) {
   class CompletingWorker final : public WorkerAdapter {
   public:

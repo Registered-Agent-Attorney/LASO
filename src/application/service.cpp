@@ -222,7 +222,16 @@ Service::Service(asio::io_context &io, Config config)
         [manager = worker_manager_](const WorkerInteractionRequest &request) {
           return manager->handle_interaction(request);
         });
-    transport->start();
+    try {
+      transport->start();
+    } catch (const std::exception &error) {
+      // A disconnected or misconfigured endpoint is degraded worker health,
+      // not a control-plane startup failure. Keep it registered so operators
+      // can see the failure and later submissions can retry its supervised
+      // transport without restarting Core.
+      log_diagnostic("worker.initial_start_failed",
+                     {{"worker_id", id}, {"error", error.what()}});
+    }
   }
   plugins_.discover(config_.plugin_dirs, config_.event_sources, config_.worker_plugins);
   for (const auto &source : plugins_.event_sources())

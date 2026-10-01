@@ -1,7 +1,17 @@
 #include "../support.hpp"
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <laso/api/api.hpp>
 #include <laso/workers/process_transport.hpp>
+#include <memory>
+#include <set>
+#include <string>
+#include <thread>
 
 using namespace laso;
 using namespace laso::test;
@@ -126,6 +136,138 @@ TEST(CodexWorker, NonDurableSubmissionsStartIndependentCodexThreads) {
   EXPECT_EQ(second.result.value("session_id", ""), "fixture-session-2");
   EXPECT_NE(first.result.value("session_id", ""), second.result.value("session_id", ""));
   transport.stop();
+}
+
+TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
+  TemporaryDirectory root;
+  auto storage = make_storage(root.path / "state.db");
+  WorkerRegistry registry;
+  constexpr std::array<const char *, 3> agent_ids = {"agent-one", "agent-two", "agent-three"};
+  constexpr std::array<const char *, 3> markers = {"MARKER-ONE", "MARKER-TWO", "MARKER-THREE"};
+  std::array<std::shared_ptr<ProcessWorkerTransport>, agent_ids.size()> transports;
+  std::array<std::filesystem::path, agent_ids.size()> started_markers;
+  std::array<std::filesystem::path, agent_ids.size()> completed_markers;
+  std::array<std::chrono::system_clock::time_point, agent_ids.size()> started_at{};
+  std::array<std::chrono::system_clock::time_point, agent_ids.size()> completed_at{};
+  std::array<std::chrono::steady_clock::time_point, agent_ids.size()> overlap_started_at{};
+  std::array<std::chrono::steady_clock::time_point, agent_ids.size()> overlap_completed_at{};
+  for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+    const auto id = std::string("codex-") + agent_ids[index];
+    const auto workdir = root.path / id;
+    std::filesystem::create_directories(workdir);
+    auto worker = codex_config(root.path, "write-workspace-then-quiet", id);
+    worker.request_timeout_ms = 8000;
+    worker.environment["LASO_CODEX_FIXTURE_SLEEP_MS"] = "1200";
+    worker.environment["LASO_CODEX_FIXTURE_SESSION_ID"] = id + "-provider-thread";
+    worker.environment["LASO_CODEX_FIXTURE_OUTPUT"] = markers[index];
+    started_markers[index] = root.path / (id + ".started");
+    completed_markers[index] = root.path / (id + ".completed");
+    worker.environment["LASO_CODEX_FIXTURE_MARKER"] = started_markers[index].string();
+    worker.environment["LASO_CODEX_FIXTURE_DONE_MARKER"] = completed_markers[index].string();
+    transports[index] = std::make_shared<ProcessWorkerTransport>(id, std::move(worker));
+    ASSERT_NO_THROW(transports[index]->start());
+    registry.add(id, transports[index]);
+  }
+
+  WorkerManager manager(*storage, registry, 8, 1);
+  std::array<WorkerRequest, agent_ids.size()> requests;
+  std::array<std::string, agent_ids.size()> job_ids;
+  for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+    const auto id = std::string("codex-") + agent_ids[index];
+    requests[index] = request(root.path / id, "three-agent-" + id, markers[index], {}, id);
+    requests[index].run_id = "three-agent-acceptance";
+    requests[index].node_id = agent_ids[index];
+    (void)manager.submit_async(requests[index]);
+    job_ids[index] = manager.job_id_for(requests[index].idempotency_key);
+  }
+
+  const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+  bool all_started_before_any_completed = false;
+  do {
+    const auto observed_at = std::chrono::system_clock::now();
+    const auto monotonic_at = std::chrono::steady_clock::now();
+    for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+      if (started_at[index].time_since_epoch().count() == 0 &&
+          std::filesystem::exists(started_markers[index])) {
+        started_at[index] = observed_at;
+        overlap_started_at[index] = monotonic_at;
+      }
+      if (completed_at[index].time_since_epoch().count() == 0 &&
+          std::filesystem::exists(completed_markers[index])) {
+        completed_at[index] = observed_at;
+        overlap_completed_at[index] = monotonic_at;
+      }
+    }
+    const bool all_started = std::all_of(started_markers.begin(), started_markers.end(),
+                                         [](const auto &path) {
+                                           return std::filesystem::exists(path);
+                                         });
+    const bool any_completed = std::any_of(completed_markers.begin(), completed_markers.end(),
+                                           [](const auto &path) {
+                                             return std::filesystem::exists(path);
+                                           });
+    if (all_started && !any_completed) {
+      all_started_before_any_completed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  } while (std::chrono::steady_clock::now() < start_deadline);
+  EXPECT_TRUE(all_started_before_any_completed)
+      << "three Codex workers did not overlap before the first provider turn completed";
+
+  const auto completion_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool all_completed = false;
+  do {
+    const auto observed_at = std::chrono::system_clock::now();
+    const auto monotonic_at = std::chrono::steady_clock::now();
+    for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+      if (completed_at[index].time_since_epoch().count() == 0 &&
+          std::filesystem::exists(completed_markers[index])) {
+        completed_at[index] = observed_at;
+        overlap_completed_at[index] = monotonic_at;
+      }
+    }
+    all_completed = std::all_of(job_ids.begin(), job_ids.end(), [&](const auto &id) {
+      return manager.job(id).state == WorkerJobState::Completed;
+    });
+    if (all_completed)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  } while (std::chrono::steady_clock::now() < completion_deadline);
+  ASSERT_TRUE(all_completed) << "one or more independent Codex worker jobs failed to complete";
+
+  std::set<std::string> provider_sessions;
+  auto latest_start = std::chrono::steady_clock::time_point::min();
+  auto earliest_completion = std::chrono::steady_clock::time_point::max();
+  for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+    const auto completed = manager.job(job_ids[index]);
+    EXPECT_EQ(completed.worker_id, std::string("codex-") + agent_ids[index]);
+    EXPECT_EQ(completed.result.value("summary", ""), markers[index]);
+    const auto provider_session = completed.result.value("session_id", "");
+    ASSERT_FALSE(provider_session.empty());
+    provider_sessions.insert(provider_session);
+    const auto started_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                started_at[index].time_since_epoch())
+                                .count();
+    const auto completed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  completed_at[index].time_since_epoch())
+                                  .count();
+    ASSERT_GT(started_ms, 0);
+    ASSERT_NE(completed_at[index].time_since_epoch().count(), 0);
+    ASSERT_NE(overlap_started_at[index].time_since_epoch().count(), 0);
+    ASSERT_NE(overlap_completed_at[index].time_since_epoch().count(), 0);
+    ASSERT_LT(overlap_started_at[index], overlap_completed_at[index]);
+    latest_start = std::max(latest_start, overlap_started_at[index]);
+    earliest_completion = std::min(earliest_completion, overlap_completed_at[index]);
+    std::clog << "codex-isolation agent=" << agent_ids[index] << " worker=" << completed.worker_id
+              << " job=" << completed.id << " provider_session=" << provider_session
+              << " started_unix_ms=" << started_ms << " completed_unix_ms=" << completed_ms << '\n';
+  }
+  EXPECT_EQ(provider_sessions.size(), agent_ids.size());
+  EXPECT_LT(latest_start, earliest_completion) << "provider execution intervals did not overlap";
+  manager.stop();
+  for (const auto &transport : transports)
+    transport->stop();
 }
 
 TEST(CodexWorker, DurableSessionContinuationSurvivesAdapterRestartAndContextGeneration) {

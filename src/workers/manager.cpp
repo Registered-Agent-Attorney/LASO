@@ -638,16 +638,12 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     std::size_t active = 0, worker_active = 0;
     for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
       const auto stored = record.get<WorkerJob>();
-      if (worker_job_terminal(stored.state))
+      // Unknown outcomes stay durable and non-retriable without reserving a
+      // live slot, so an unresolved worker cannot block unrelated capacity.
+      if (worker_job_terminal(stored.state) || stored.state == WorkerJobState::Unknown)
         continue;
       ++active;
-      // Keep unknown outcomes durable and non-retriable, but do not reserve a
-      // live slot after a non-recoverable worker has confirmed the job is no
-      // longer in its active status table.
-      const bool absent_from_active_worker =
-          stored.state == WorkerJobState::Unknown && metadata.supports_status &&
-          !metadata.supports_recovery;
-      if (stored.worker_id == worker_id && !absent_from_active_worker)
+      if (stored.worker_id == worker_id)
         ++worker_active;
     }
     if (active >= max_active_)
@@ -852,7 +848,9 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       std::size_t active = 0, worker_active = 0;
       for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
         const auto stored = record.get<WorkerJob>();
-        if (worker_job_terminal(stored.state))
+        // Unknown outcomes stay durable and non-retriable without reserving a
+        // live slot, so an unresolved worker cannot block unrelated capacity.
+        if (worker_job_terminal(stored.state) || stored.state == WorkerJobState::Unknown)
           continue;
         ++active;
         if (stored.worker_id == worker_id)

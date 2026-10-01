@@ -115,8 +115,13 @@ int main(int argc, char **argv) {
         if (!(stored << thread_sequence << '\n'))
           return 74;
       }
-      active_thread = thread_sequence == 1 ? "fixture-session"
-                                           : "fixture-session-" + std::to_string(thread_sequence);
+      if (const auto *configured = std::getenv("LASO_CODEX_FIXTURE_SESSION_ID");
+          configured && *configured != '\0') {
+        active_thread = configured;
+      } else {
+        active_thread = thread_sequence == 1 ? "fixture-session"
+                                             : "fixture-session-" + std::to_string(thread_sequence);
+      }
       send({{"jsonrpc", "2.0"},
             {"id", id},
             {"result", Json{{"thread", thread(active_thread, cwd)},
@@ -225,10 +230,16 @@ int main(int argc, char **argv) {
       }
       const auto turn = Json{{"id", "fixture-turn"}, {"status", "inProgress"}};
       send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
-      const auto text = prompt.find("M6 context marker") != std::string::npos
-                            ? "FIXTURE-CONTEXT-SEEN"
-                        : prompt.find("continue") != std::string::npos ? "FIXTURE-CONTINUED"
-                                                                       : "FIXTURE-COMPLETE";
+      const auto *configured_output = std::getenv("LASO_CODEX_FIXTURE_OUTPUT");
+      std::string text;
+      if (configured_output && *configured_output != '\0')
+        text = configured_output;
+      else if (prompt.find("M6 context marker") != std::string::npos)
+        text = "FIXTURE-CONTEXT-SEEN";
+      else if (prompt.find("continue") != std::string::npos)
+        text = "FIXTURE-CONTINUED";
+      else
+        text = "FIXTURE-COMPLETE";
       const auto item = Json{{"type", "agentMessage"}, {"text", text}};
       send(Json{{"method", "item/completed"}, {"params", Json{{"item", item}}}});
       const auto usage = Json{{"inputTokens", 11}, {"outputTokens", 7}, {"totalTokens", 18}};
