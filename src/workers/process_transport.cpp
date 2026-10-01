@@ -123,9 +123,10 @@ struct ProcessWorkerTransport::Impl {
     metadata_.name = id;
     metadata_.plugin = "process";
     metadata_.event_source_id = "worker." + id;
-    metadata_.local = true;
-    metadata_.remote = false;
+    metadata_.local = !config.remote;
+    metadata_.remote = config.remote;
     metadata_.enabled = true;
+    metadata_.supports_status = true;
     metadata_.supports_recovery = true;
     metadata_.status = "stopped";
     publish_metadata_locked();
@@ -179,10 +180,9 @@ struct ProcessWorkerTransport::Impl {
       metadata_.id = id;
       metadata_.plugin = "process";
       metadata_.event_source_id = "worker." + id;
-      metadata_.local = true;
-      metadata_.remote = false;
+      metadata_.local = !config.remote;
+      metadata_.remote = config.remote;
       metadata_.enabled = true;
-      metadata_.supports_recovery = true;
       metadata_.healthy = true;
       metadata_.status = "healthy";
       publish_metadata_locked();

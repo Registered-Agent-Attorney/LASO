@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <future>
+#include <map>
+#include <mutex>
 #include <laso/api/api.hpp>
 #include <laso/workers/manager.hpp>
 #include <laso/workers/process_transport.hpp>
@@ -98,6 +100,103 @@ bool cancel_when_submit_is_active(ProcessWorkerTransport &transport, const std::
   return false;
 }
 
+class NonRecoverableAsyncWorker final : public WorkerTransport {
+public:
+  explicit NonRecoverableAsyncWorker(std::promise<void> &started,
+                                     std::shared_future<void> release)
+      : started_(started), release_(std::move(release)) {}
+
+  WorkerMetadata metadata() const override {
+    WorkerMetadata result;
+    result.id = "non-recoverable";
+    result.name = result.id;
+    result.enabled = true;
+    result.healthy = true;
+    result.status = "healthy";
+    result.supports_status = true;
+    result.supports_recovery = false;
+    return result;
+  }
+  WorkerSubmission submit(const WorkerRequest &) override {
+    ++submit_count;
+    started_.set_value();
+    (void)release_.wait_for(std::chrono::seconds(2));
+    WorkerSubmission result;
+    result.external_job_id = "accepted-once";
+    result.state = WorkerJobState::Queued;
+    return result;
+  }
+  WorkerStatus status(const std::string &) override {
+    WorkerStatus result;
+    result.state = WorkerJobState::Completed;
+    result.result = Json{{"ok", true}};
+    return result;
+  }
+  WorkerStatus result(const std::string &) override { return {}; }
+  bool cancel(const std::string &) override { return false; }
+  void start() override {}
+  void stop() noexcept override {}
+
+  std::atomic<unsigned> submit_count{0};
+
+private:
+  std::promise<void> &started_;
+  std::shared_future<void> release_;
+};
+
+class InMemoryWorkerStorage final : public Storage {
+public:
+  void commit(const std::vector<Record> &records) override {
+    std::lock_guard lock(mutex_);
+    for (const auto &record : records)
+      records_[{record.kind, record.id}] = record;
+  }
+  void commit_owned(const std::vector<Record> &records, const std::string &, const std::string &,
+                    std::uint64_t) override {
+    commit(records);
+  }
+  void request_cancellation(const std::string &) override {}
+  bool claim(const Record &record, const std::vector<Record> &associated = {}) override {
+    std::lock_guard lock(mutex_);
+    const auto key = std::make_pair(record.kind, record.id);
+    if (records_.contains(key))
+      return false;
+    records_[key] = record;
+    for (const auto &item : associated)
+      records_[{item.kind, item.id}] = item;
+    return true;
+  }
+  Json get(RecordKind kind, const std::string &id) const override {
+    std::lock_guard lock(mutex_);
+    const auto found = records_.find({kind, id});
+    if (found == records_.end())
+      throw Error(ErrorCode::NotFound, "Test record was not found");
+    return found->second.value;
+  }
+  std::vector<Json> list(RecordKind kind, const std::string &run_id = "", std::size_t limit = 1000,
+                         std::size_t offset = 0) const override {
+    std::lock_guard lock(mutex_);
+    std::vector<Json> result;
+    for (const auto &[key, record] : records_) {
+      (void)key;
+      if (record.kind != kind || (!run_id.empty() && record.run_id != run_id))
+        continue;
+      if (offset > 0) {
+        --offset;
+        continue;
+      }
+      if (result.size() >= limit)
+        break;
+      result.push_back(record.value);
+    }
+    return result;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::map<std::pair<RecordKind, std::string>, Record> records_;
+};
+
 boost::beast::http::response<boost::beast::http::string_body>
 http_request(unsigned short port, boost::beast::http::verb method, const std::string &target,
              const Json &body = Json::object()) {
@@ -140,6 +239,13 @@ TEST(ProcessWorker, HandshakeAndSubmitStatusResultLifecycle) {
   EXPECT_EQ(transport.result(submission.external_job_id).result.at("worker"), "process-reference");
 }
 
+TEST(ProcessWorker, PreservesWorkerRecoveryCapabilityFromHandshake) {
+  ProcessWorkerTransport transport("process", worker_config("no-recovery"));
+  ASSERT_NO_THROW(transport.start());
+  EXPECT_TRUE(transport.metadata().supports_status);
+  EXPECT_FALSE(transport.metadata().supports_recovery);
+}
+
 TEST(ProcessWorker, SubmitCarriesBoundedTimeoutInPayload) {
   ProcessWorkerTransport transport("process", worker_config("timeout-echo", 500));
   ASSERT_NO_THROW(transport.start());
@@ -179,6 +285,39 @@ TEST(ProcessWorker, LostChildJobRemainsUnknownAndIsNotResubmitted) {
   const auto retried = manager.submit(worker_request);
   EXPECT_EQ(retried.state, WorkerJobState::Unknown);
   EXPECT_EQ(retried.external_job_id, submitted.external_job_id);
+}
+
+TEST(ProcessWorker, AsyncNonRecoverableAdapterPollsActiveJobWithoutResubmission) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  std::promise<void> release;
+  auto adapter = std::make_shared<NonRecoverableAsyncWorker>(started, release.get_future().share());
+  registry.add("non-recoverable", adapter);
+  WorkerManager manager(storage, registry);
+
+  auto worker_request = request("non-recoverable");
+  worker_request.idempotency_key = "non-recoverable-async-initial";
+  const auto submitted = manager.submit_async(worker_request);
+  ASSERT_EQ(submitted.state, WorkerJobState::Submitting);
+  EXPECT_EQ(started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_EQ(manager.refresh(submitted.id).state, WorkerJobState::Submitting);
+
+  release.set_value();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  WorkerJob completed;
+  do {
+    completed = manager.refresh(submitted.id);
+    if (completed.state == WorkerJobState::Completed)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  } while (std::chrono::steady_clock::now() < deadline);
+
+  ASSERT_EQ(completed.state, WorkerJobState::Completed);
+  EXPECT_EQ(completed.external_job_id, "accepted-once");
+  EXPECT_TRUE(completed.result.at("ok"));
+  EXPECT_EQ(adapter->submit_count.load(), 1U);
 }
 
 TEST(ProcessWorker, VersionMismatchIsTransportFailure) {
@@ -350,17 +489,32 @@ TEST(ProcessWorker, WorkerInteractionIsCorrelatedAndAnsweredByLASO) {
 TEST(ProcessWorker, ConfigurationUsesExplicitExecutableAndEnvironmentBoundary) {
   TemporaryDirectory dir;
   const auto path = dir.path / "process.yaml";
-  std::ofstream(path) << "process_workers:\n  example:\n    executable: "
-                      << LASO_PROCESS_WORKER_HOST
-                      << "\n    args: [--mode, success]\n    environment_allowlist: [PATH]\n"
-                         "    environment: {LASO_REFERENCE: enabled}\n    startup_timeout_ms: 700\n"
-                         "    request_timeout_ms: 800\n";
+  std::ofstream(path)
+      << "postgres_dsn: host=127.0.0.1 dbname=laso_test user=laso_test\n"
+      << "process_workers:\n  example:\n    executable: " << LASO_PROCESS_WORKER_HOST
+      << "\n    args: [--mode, success]\n    remote: true\n    environment_allowlist: [PATH]\n"
+         "    environment: {LASO_REFERENCE: enabled}\n    startup_timeout_ms: 700\n"
+         "    request_timeout_ms: 800\n"
+         "allow_remote_workers: [example]\n";
   const auto loaded = load_config(path);
   ASSERT_EQ(loaded.process_workers.size(), 1U);
   EXPECT_EQ(loaded.process_workers.at("example").executable, LASO_PROCESS_WORKER_HOST);
   EXPECT_EQ(loaded.process_workers.at("example").args.size(), 2U);
   EXPECT_EQ(loaded.process_workers.at("example").environment.at("LASO_REFERENCE"), "enabled");
   EXPECT_EQ(loaded.process_workers.at("example").startup_timeout_ms, 700U);
+  EXPECT_TRUE(loaded.process_workers.at("example").remote);
+  ASSERT_EQ(loaded.allow_remote_workers.size(), 1U);
+  EXPECT_EQ(loaded.allow_remote_workers.front(), "example");
+}
+
+TEST(ProcessWorker, MetadataTracksRemoteProcessConfiguration) {
+  auto config = worker_config("success");
+  config.remote = true;
+  ProcessWorkerTransport transport("remote-computer", config);
+  transport.start();
+  const auto metadata = transport.metadata();
+  EXPECT_TRUE(metadata.remote);
+  EXPECT_FALSE(metadata.local);
 }
 
 TEST(ProcessWorker, ShutdownDoesNotLeaveReferenceChildRunning) {

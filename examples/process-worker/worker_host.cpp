@@ -128,12 +128,14 @@ int main(int argc, char **argv) {
         response(request, {{"ok", true}, {"metadata", Json::object()}}, 999);
         continue;
       }
+      const bool supports_recovery = mode != "no-recovery";
       response(request, {{"ok", true},
                          {"metadata", Json{{"name", "process-reference"},
                                            {"version", "1"},
                                            {"description", "deterministic reference worker"},
                                            {"capabilities", Json::array({"deterministic"})},
-                                           {"supports_recovery", true},
+                                           {"supports_status", true},
+                                           {"supports_recovery", supports_recovery},
                                            {"supports_cancellation", true}}}});
       continue;
     }

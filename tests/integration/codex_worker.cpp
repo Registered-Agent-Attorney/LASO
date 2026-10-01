@@ -8,11 +8,12 @@ using namespace laso::test;
 
 namespace {
 ProcessWorkerConfig codex_config(const std::filesystem::path &root,
-                                 const std::string &fixture_mode = "success") {
+                                 const std::string &fixture_mode = "success",
+                                 const std::string &worker_id = "codex") {
   ProcessWorkerConfig result;
   result.executable = LASO_CODEX_WORKER;
-  result.args = {"--codex",     LASO_CODEX_FIXTURE, "--allowed-root",
-                 root.string(), "--timeout-ms",     "2000"};
+  result.args = {"--worker-id", worker_id, "--codex", LASO_CODEX_FIXTURE,
+                 "--allowed-root", root.string(), "--timeout-ms", "2000"};
   if (fixture_mode != "success")
     result.environment["LASO_CODEX_FIXTURE_MODE"] = fixture_mode;
   result.startup_timeout_ms = 2000;
@@ -21,10 +22,11 @@ ProcessWorkerConfig codex_config(const std::filesystem::path &root,
 }
 
 WorkerRequest request(const std::filesystem::path &root, const std::string &key,
-                      const std::string &instructions, const std::string &session = {}) {
+                      const std::string &instructions, const std::string &session = {},
+                      const std::string &worker_id = "codex") {
   WorkerRequest result;
   result.job_id = key;
-  result.worker_id = "codex";
+  result.worker_id = worker_id;
   result.task_type = "coding";
   result.instructions = instructions;
   result.idempotency_key = key;
@@ -108,6 +110,21 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
       request(root.path, "codex-second", "continue the existing session", "fixture-session"));
   EXPECT_EQ(second.state, WorkerJobState::Completed);
   EXPECT_EQ(second.result.value("summary", ""), "FIXTURE-CONTINUED");
+  transport.stop();
+}
+
+TEST(CodexWorker, NonDurableSubmissionsStartIndependentCodexThreads) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport("codex", codex_config(root.path));
+  ASSERT_NO_THROW(transport.start());
+  const auto first = transport.submit(request(root.path, "codex-independent-first", "first task"));
+  const auto second =
+      transport.submit(request(root.path, "codex-independent-second", "second task"));
+  ASSERT_EQ(first.state, WorkerJobState::Completed) << first.error;
+  ASSERT_EQ(second.state, WorkerJobState::Completed) << second.error;
+  EXPECT_EQ(first.result.value("session_id", ""), "fixture-session");
+  EXPECT_EQ(second.result.value("session_id", ""), "fixture-session-2");
+  EXPECT_NE(first.result.value("session_id", ""), second.result.value("session_id", ""));
   transport.stop();
 }
 
@@ -438,18 +455,20 @@ TEST(CodexWorker, ProjectRootIsEnforced) {
 
 TEST(CodexWorker, PermissionRequestUsesGenericWorkerChannel) {
   TemporaryDirectory root;
-  ProcessWorkerTransport transport("codex", codex_config(root.path));
+  const std::string worker_id = "codex-agent-test";
+  ProcessWorkerTransport transport(worker_id, codex_config(root.path, "success", worker_id));
+  ASSERT_NO_THROW(transport.start());
+  EXPECT_EQ(transport.metadata().id, worker_id);
   unsigned requests = 0;
   transport.set_interaction_handler([&](const WorkerInteractionRequest &interaction) {
     ++requests;
     EXPECT_EQ(interaction.type, WorkerInteractionType::Permission);
-    EXPECT_EQ(interaction.worker_id, "codex");
+    EXPECT_EQ(interaction.worker_id, worker_id);
     return WorkerInteractionResponse{interaction.request_id, WorkerInteractionState::Approved,
                                      Json{{"scope", "once"}}, "approved by test"};
   });
-  ASSERT_NO_THROW(transport.start());
   const auto result =
-      transport.submit(request(root.path, "codex-permission", "request-permission"));
+      transport.submit(request(root.path, "codex-permission", "request-permission", {}, worker_id));
   EXPECT_EQ(result.state, WorkerJobState::Completed);
   EXPECT_EQ(requests, 1U);
 }

@@ -82,6 +82,20 @@ duration, and normalized token usage. Missing Codex metrics remain absent; LASO
 does not invent pricing or billing data. Existing wall-time, token, cost-unit,
 and job-count budgets apply through `WorkerManager`.
 
+### Isolated parallel agents
+
+Each adapter process owns one active Codex app-server thread and serializes its
+worker protocol. Non-durable submissions start a fresh thread unless the
+request explicitly supplies `metadata.codex_session_id` to resume one. Durable
+LASO sessions continue only through their fenced continuation state.
+
+For parallel independent agents, configure one process-backed Codex worker per
+concurrently active agent, each with a unique `--worker-id`; see
+[`examples/codex-isolation-smoke`](../examples/codex-isolation-smoke/README.md).
+Set the global job cap to the intended number of agents and each worker's cap
+to one. Several parallel nodes aimed at one Codex worker process will be
+serialized and must not be treated as independent concurrent sessions.
+
 ### Durable LASO sessions
 
 The adapter advertises the generic `session-continuation` and `session-context`

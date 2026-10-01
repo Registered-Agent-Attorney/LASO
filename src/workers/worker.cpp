@@ -106,6 +106,7 @@ void to_json(Json &j, const WorkerMetadata &m) {
        {"remote", m.remote},
        {"healthy", m.healthy},
        {"enabled", m.enabled},
+       {"supports_status", m.supports_status},
        {"supports_recovery", m.supports_recovery},
        {"supports_cancellation", m.supports_cancellation}};
 }
@@ -125,6 +126,7 @@ void from_json(const Json &j, WorkerMetadata &m) {
   m.healthy = j.value("healthy", false);
   m.enabled = j.value("enabled", false);
   m.supports_recovery = j.value("supports_recovery", false);
+  m.supports_status = j.value("supports_status", m.supports_recovery);
   m.supports_cancellation = j.value("supports_cancellation", false);
 }
 

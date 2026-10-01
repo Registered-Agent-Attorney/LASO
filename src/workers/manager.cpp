@@ -155,6 +155,7 @@ Json WorkerManager::distributed_capabilities() const {
       continue;
     result["workloads"].push_back({{"worker_id", metadata.id},
                                    {"capabilities", metadata.capabilities},
+                                   {"supports_status", metadata.supports_status},
                                    {"supports_recovery", metadata.supports_recovery},
                                    {"supports_cancellation", metadata.supports_cancellation},
                                    {"workspace_transport", true}});
@@ -354,7 +355,8 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
   if (worker_job_terminal(value.state) || value.external_job_id.empty())
     return value;
   auto adapter = registry_.get(value.worker_id);
-  if (!adapter->metadata().supports_recovery)
+  const auto metadata = adapter->metadata();
+  if (!metadata.supports_status && !metadata.supports_recovery)
     return value;
   try {
     const auto status = adapter->status(value.external_job_id);
@@ -423,7 +425,8 @@ WorkerJob WorkerManager::submit(const WorkerRequest &request) {
   return submit_impl(request, false);
 }
 
-WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchronous_dispatch) {
+WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchronous_dispatch,
+                                     const std::string &initial_submission_id) {
   std::lock_guard submit_lock(submit_mutex_);
   if (stopped_)
     throw Error(ErrorCode::Conflict, "Worker manager is stopped");
@@ -468,7 +471,12 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     }
   };
   auto existing = existing_job();
-  if (existing.has_value()) {
+  const bool initial_dispatch = !initial_submission_id.empty();
+  if (initial_dispatch &&
+      (!existing.has_value() || existing->id != initial_submission_id ||
+       existing->state != WorkerJobState::Submitting || !existing->external_job_id.empty()))
+    throw Error(ErrorCode::Conflict, "Initial worker dispatch no longer owns its durable job");
+  if (existing.has_value() && !initial_dispatch) {
     if (!worker_id.empty() && existing->worker_id != worker_id)
       throw Error(ErrorCode::Conflict, "Worker idempotency key belongs to another worker");
     if (worker_job_terminal(existing->state) || existing->state == WorkerJobState::Unknown)
@@ -513,7 +521,7 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
       (!metadata.healthy && !recoverable))
     throw Error(ErrorCode::Capacity, "Worker is unavailable");
 
-  if (existing.has_value()) {
+  if (existing.has_value() && !initial_dispatch) {
     if (!existing->external_job_id.empty())
       return reconcile(std::move(*existing), false);
     if (!metadata.supports_recovery) {
@@ -599,7 +607,9 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
   }
 
   WorkerJob created;
-  {
+  if (initial_dispatch) {
+    created = *existing;
+  } else {
     std::lock_guard state_lock(state_mutex_);
     retire_superseded_distributed_jobs_locked();
     std::size_t active = 0, worker_active = 0;
@@ -851,7 +861,7 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       return created;
     async_threads_.emplace_back([this, request, id = created.id](std::stop_token) {
       try {
-        (void)submit_impl(request, true);
+        (void)submit_impl(request, true, id);
       } catch (const Error &error) {
         if (error.code == ErrorCode::Storage) {
           log_diagnostic("worker.submission_deferred_after_storage_error",

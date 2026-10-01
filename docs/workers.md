@@ -108,11 +108,40 @@ environment is empty by default; `environment_allowlist` and literal
 on name collisions. Configuration validates NUL characters, duplicate
 allowlist names, per-value limits, and a 64 KiB aggregate child-environment
 limit. Startup and request timeouts are bounded.
+Set `remote: true` when the supervised process is a transport bridge to an
+endpoint on another machine. This changes worker locality metadata only; it does
+not add authentication or encryption. The bridge must establish those controls
+before registering it as a remote process worker. The handshake distinguishes
+active-job polling from restart recovery. A worker that supports `status` and
+`result` while its current process is alive should advertise
+`supports_status: true`. Set `supports_recovery: true` only when it can also
+reconcile jobs after the worker or LASO process restarts. A worker with only
+in-memory job state can therefore report `supports_status: true` and
+`supports_recovery: false`; Core polls the active job without claiming it can
+recover that job after a restart.
 LASO owns the child, attempts cooperative `shutdown`, and then terminates its
 process group with bounded escalation. A broken child is not silently
 restarted or resubmitted because the external outcome may be ambiguous. This
 is process isolation and lifecycle supervision, not an OS or container
 sandbox.
+
+For a Windows Computer endpoint, use a fixed SSH reverse-forward to a
+loopback-only listener and a fixed `nc` bridge in the `windows_computer`
+process-worker entry. The SSH identity and server-side forwarding restriction
+are the transport trust boundary; `remote: true` is only locality metadata and
+does not authenticate or encrypt a connection. By default Core denies network
+and remote worker nodes. To authorize one configured remote process worker
+without setting the global `allow_network` option, name that exact worker in
+`allow_remote_workers: [windows_computer]`. This exception applies only to a
+worker node with that ID; it does not permit remote model calls. Keep
+`max_worker_jobs_per_worker` at one for the single interactive desktop and
+retain the endpoint's default-deny policy. The
+`examples/remote-computer-status` pipelines exercise a title-free browser
+status check and confirm that `window.list` remains denied. LASO persists the
+run and job IDs, deadlines, cancellation outcome, and failure state. The
+Computer worker keeps job state in memory and reports that it cannot recover an
+ambiguous in-flight action after disconnect; review an uncertain result before
+retrying it.
 
 ### Worker-originated interaction
 

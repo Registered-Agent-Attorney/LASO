@@ -18,6 +18,8 @@ struct WorkerConfig {
 struct ProcessWorkerConfig {
   std::string executable;
   std::vector<std::string> args;
+  // Mark a supervised process adapter as executing on a remote endpoint.
+  bool remote = false;
   // The child starts with no inherited environment by default. Only these
   // explicitly named parent variables and literal overrides are passed.
   std::vector<std::string> environment_allowlist;
@@ -67,6 +69,7 @@ struct Config {
   std::map<std::string, EventSourceConfig> event_sources;
   std::map<std::string, WorkerConfig> worker_plugins;
   std::map<std::string, ProcessWorkerConfig> process_workers;
+  std::vector<std::string> allow_remote_workers;
   std::map<std::string, ModelBinding> models{{"research", {"mock", "mock-v1"}},
                                              {"reviewer", {"mock", "mock-v1"}}};
   std::vector<PolicyRule> rules;

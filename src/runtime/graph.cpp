@@ -23,6 +23,7 @@ PolicyResult Runtime::permission(const NodeDefinition &n, const Run &r) const {
   } else if (n.type == "worker") {
     if (!deps_.workers)
       throw Error(ErrorCode::Execution, "Worker manager is unavailable");
+    c.worker_node = true;
     const auto worker_id = deps_.workers->resolve_worker(n.binding, n.capability);
     const auto worker = deps_.workers->worker(worker_id);
     c.resource = worker_id;

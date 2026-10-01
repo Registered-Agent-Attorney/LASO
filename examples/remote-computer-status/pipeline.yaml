@@ -1,0 +1,13 @@
+laso: '1'
+name: remote-computer-status
+version: 1
+nodes:
+  status:
+    type: worker
+    worker: windows_computer
+    task_type: browser.status
+    capability: browser.status
+    instructions: Report only whether a browser is visible and the browser window count.
+edges:
+  - {from: input, to: status}
+  - {from: status, to: output}

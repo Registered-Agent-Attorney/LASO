@@ -62,7 +62,7 @@ struct WorkerMetadata {
       status = "disabled";
   std::vector<std::string> capabilities;
   bool local = true, remote = false, healthy = false, enabled = false;
-  bool supports_recovery = false, supports_cancellation = false;
+  bool supports_status = false, supports_recovery = false, supports_cancellation = false;
 };
 void to_json(Json &, const WorkerMetadata &);
 void from_json(const Json &, WorkerMetadata &);

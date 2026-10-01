@@ -104,6 +104,14 @@ std::vector<std::string> options(int argc, char **argv, const std::string &name)
   return result;
 }
 
+bool valid_worker_id(const std::string &value) {
+  return !value.empty() && value.size() <= 128 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char c) {
+           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+         });
+}
+
 bool within(const std::filesystem::path &path, const std::filesystem::path &root) {
   std::error_code ec;
   const auto relative = std::filesystem::relative(path, root, ec);
@@ -305,9 +313,12 @@ private:
 
 class CodexAdapter {
 public:
-  CodexAdapter(std::string executable, std::vector<std::filesystem::path> roots,
-               std::uint64_t timeout_ms)
-      : executable_(std::move(executable)), timeout_ms_(timeout_ms), process_(executable_, timeout_ms_) {
+  CodexAdapter(std::string worker_id, std::string executable,
+               std::vector<std::filesystem::path> roots, std::uint64_t timeout_ms)
+      : executable_(std::move(executable)), timeout_ms_(timeout_ms),
+        process_(executable_, timeout_ms_), worker_id_(std::move(worker_id)) {
+    if (!valid_worker_id(worker_id_))
+      throw WorkerTransportError("Codex worker id is invalid");
     for (const auto &root : roots) {
       std::error_code ec;
       const auto canonical = std::filesystem::canonical(root, ec);
@@ -333,8 +344,9 @@ public:
 
   WorkerMetadata metadata() const {
     WorkerMetadata result;
-    result.id = "codex";
-    result.name = "Codex coding worker";
+    result.id = worker_id_;
+    result.name = worker_id_ == "codex" ? "Codex coding worker"
+                                        : "Codex coding worker (" + worker_id_ + ")";
     result.version = "app-server";
     result.description = "Optional supervised Codex coding worker";
     result.plugin = "process";
@@ -391,7 +403,9 @@ public:
         start_thread(directory, metadata);
       }
     } else {
-      if (!requested_session.empty() && requested_session != session_id_)
+      if (requested_session.empty() && !session_id_.empty())
+        reset_thread();
+      else if (!requested_session.empty() && requested_session != session_id_)
         resume_thread(requested_session, directory);
       if (session_id_.empty())
         start_thread(directory, metadata);
@@ -522,8 +536,8 @@ private:
   CodexProcess process_;
   bool healthy_ = false;
   std::uint64_t rpc_id_ = 0, interaction_id_ = 0;
-  std::string session_id_, durable_session_id_, project_dir_, active_turn_id_, active_job_id_,
-      model_, provider_, summary_;
+  std::string worker_id_, session_id_, durable_session_id_, project_dir_, active_turn_id_,
+      active_job_id_, model_, provider_, summary_;
   WorkerUsage usage_;
   Json actions_ = Json::array();
 
@@ -613,7 +627,7 @@ private:
                         {"message_type", "worker_request"},
                         {"request_id", request_id},
                         {"worker_job_id", job_id},
-                        {"worker_id", "codex"},
+                        {"worker_id", worker_id_},
                         {"external_job_id", durable_session_id_.empty()
                                                 ? "codex:" + session_id_
                                                 : job_id},
@@ -743,10 +757,11 @@ int main(int argc, char **argv) {
   try {
     if (!arm_parent_death_signal())
       return 125;
+    const auto worker_id = option(argc, argv, "--worker-id", "codex");
     const auto codex = option(argc, argv, "--codex", "codex");
     auto roots = options(argc, argv, "--allowed-root");
     const auto timeout = std::stoull(option(argc, argv, "--timeout-ms", "60000"));
-    CodexAdapter adapter(codex, {roots.begin(), roots.end()}, timeout);
+    CodexAdapter adapter(worker_id, codex, {roots.begin(), roots.end()}, timeout);
     std::string line;
     while (std::getline(std::cin, line)) {
       if (line.size() > process_protocol::max_frame_bytes)

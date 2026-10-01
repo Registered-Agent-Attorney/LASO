@@ -1,0 +1,53 @@
+laso: "1"
+name: codex-isolation-smoke
+version: 2
+max_steps: 32
+timeout_ms: 120000
+nodes:
+  fork:
+    type: parallel
+    join: join
+  agent_one:
+    type: worker
+    worker: codex_agent_one
+    task_type: coding
+    capability: coding-agent
+    timeout_ms: 60000
+    max_attempts: 1
+    instructions: >-
+      This is a synthetic LASO isolation check. Do not access files, browsers,
+      networks, Microsoft data, or invoke tools. Return exactly
+      LASO_AGENT_ISOLATION_ONE.
+  agent_two:
+    type: worker
+    worker: codex_agent_two
+    task_type: coding
+    capability: coding-agent
+    timeout_ms: 60000
+    max_attempts: 1
+    instructions: >-
+      This is a synthetic LASO isolation check. Do not access files, browsers,
+      networks, Microsoft data, or invoke tools. Return exactly
+      LASO_AGENT_ISOLATION_TWO.
+  agent_three:
+    type: worker
+    worker: codex_agent_three
+    task_type: coding
+    capability: coding-agent
+    timeout_ms: 60000
+    max_attempts: 1
+    instructions: >-
+      This is a synthetic LASO isolation check. Do not access files, browsers,
+      networks, Microsoft data, or invoke tools. Return exactly
+      LASO_AGENT_ISOLATION_THREE.
+  join:
+    type: join
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: agent_one}
+  - {from: fork, to: agent_two}
+  - {from: fork, to: agent_three}
+  - {from: agent_one, to: join}
+  - {from: agent_two, to: join}
+  - {from: agent_three, to: join}
+  - {from: join, to: output}

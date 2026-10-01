@@ -156,7 +156,8 @@ Service::Service(asio::io_context &io, Config config)
            config_.postgres_pool_max_connections, config_.postgres_pool_acquisition_timeout_ms,
            config_.execution_mode == "multi_instance"})),
       coordination_(make_coordination(config_, instance_id_)),
-      policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
+      policy_(config_.rules, config_.allow_network, config_.allow_remote_workers),
+      schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
                config_.max_pending_scheduler_launches, 32),
       worker_manager_(std::make_shared<WorkerManager>(
