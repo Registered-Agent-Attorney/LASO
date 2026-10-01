@@ -655,9 +655,15 @@ TEST(Workers, DifferentWorkerSubmissionsCanRunConcurrently) {
       barrier_.changed.wait(lock, [&] { return barrier_.release; });
       return {"external-" + id_, WorkerJobState::Queued, Json::object()};
     }
-    WorkerStatus status(const std::string &) override { return {}; }
-    WorkerStatus result(const std::string &) override { return {}; }
-    bool cancel(const std::string &) override { return true; }
+    WorkerStatus status(const std::string &) override {
+      return {};
+    }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &) override {
+      return true;
+    }
     void start() override {}
     void stop() noexcept override {}
 

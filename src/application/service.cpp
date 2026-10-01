@@ -229,8 +229,7 @@ Service::Service(asio::io_context &io, Config config)
       // not a control-plane startup failure. Keep it registered so operators
       // can see the failure and later submissions can retry its supervised
       // transport without restarting Core.
-      log_diagnostic("worker.initial_start_failed",
-                     {{"worker_id", id}, {"error", error.what()}});
+      log_diagnostic("worker.initial_start_failed", {{"worker_id", id}, {"error", error.what()}});
     }
   }
   plugins_.discover(config_.plugin_dirs, config_.event_sources, config_.worker_plugins);

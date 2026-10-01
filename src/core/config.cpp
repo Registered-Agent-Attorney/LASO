@@ -203,9 +203,8 @@ void Config::validate() {
   std::set<std::string> allowed_remote_worker_ids;
   for (const auto &id : allow_remote_workers) {
     const auto worker = process_workers.find(id);
-    if (!std::regex_match(id, source_id_pattern) ||
-        !allowed_remote_worker_ids.insert(id).second || worker == process_workers.end() ||
-        !worker->second.remote)
+    if (!std::regex_match(id, source_id_pattern) || !allowed_remote_worker_ids.insert(id).second ||
+        worker == process_workers.end() || !worker->second.remote)
       throw Error(ErrorCode::Configuration,
                   "allow_remote_workers must name unique configured remote process workers");
   }

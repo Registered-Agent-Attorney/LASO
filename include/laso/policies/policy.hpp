@@ -1,6 +1,6 @@
 #pragma once
-#include <laso/core/types.hpp>
 #include <algorithm>
+#include <laso/core/types.hpp>
 #include <memory>
 
 namespace laso {

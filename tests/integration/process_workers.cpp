@@ -4,11 +4,11 @@
 #include <cstdlib>
 #include <fstream>
 #include <future>
-#include <map>
-#include <mutex>
 #include <laso/api/api.hpp>
 #include <laso/workers/manager.hpp>
 #include <laso/workers/process_transport.hpp>
+#include <map>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -102,8 +102,7 @@ bool cancel_when_submit_is_active(ProcessWorkerTransport &transport, const std::
 
 class NonRecoverableAsyncWorker final : public WorkerTransport {
 public:
-  explicit NonRecoverableAsyncWorker(std::promise<void> &started,
-                                     std::shared_future<void> release,
+  explicit NonRecoverableAsyncWorker(std::promise<void> &started, std::shared_future<void> release,
                                      WorkerJobState status_state = WorkerJobState::Completed)
       : started_(started), release_(std::move(release)), status_state_(status_state) {}
 
@@ -134,8 +133,12 @@ public:
       result.result = Json{{"ok", true}};
     return result;
   }
-  WorkerStatus result(const std::string &) override { return {}; }
-  bool cancel(const std::string &) override { return false; }
+  WorkerStatus result(const std::string &) override {
+    return {};
+  }
+  bool cancel(const std::string &) override {
+    return false;
+  }
   void start() override {}
   void stop() noexcept override {}
 
@@ -328,8 +331,8 @@ TEST(ProcessWorker, ReconcilesStaleStatusCapableJobsBeforeEnforcingCapacity) {
   WorkerRegistry registry;
   std::promise<void> started;
   std::promise<void> release;
-  auto adapter = std::make_shared<NonRecoverableAsyncWorker>(
-      started, release.get_future().share(), WorkerJobState::Unknown);
+  auto adapter = std::make_shared<NonRecoverableAsyncWorker>(started, release.get_future().share(),
+                                                             WorkerJobState::Unknown);
   release.set_value();
   registry.add("non-recoverable", adapter);
 

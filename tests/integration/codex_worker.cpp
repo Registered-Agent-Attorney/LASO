@@ -22,7 +22,7 @@ ProcessWorkerConfig codex_config(const std::filesystem::path &root,
                                  const std::string &worker_id = "codex") {
   ProcessWorkerConfig result;
   result.executable = LASO_CODEX_WORKER;
-  result.args = {"--worker-id", worker_id, "--codex", LASO_CODEX_FIXTURE,
+  result.args = {"--worker-id",    worker_id,     "--codex",      LASO_CODEX_FIXTURE,
                  "--allowed-root", root.string(), "--timeout-ms", "2000"};
   if (fixture_mode != "success")
     result.environment["LASO_CODEX_FIXTURE_MODE"] = fixture_mode;
@@ -198,14 +198,12 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
         overlap_completed_at[index] = monotonic_at;
       }
     }
-    const bool all_started = std::all_of(started_markers.begin(), started_markers.end(),
-                                         [](const auto &path) {
-                                           return std::filesystem::exists(path);
-                                         });
-    const bool any_completed = std::any_of(completed_markers.begin(), completed_markers.end(),
-                                           [](const auto &path) {
-                                             return std::filesystem::exists(path);
-                                           });
+    const bool all_started =
+        std::all_of(started_markers.begin(), started_markers.end(),
+                    [](const auto &path) { return std::filesystem::exists(path); });
+    const bool any_completed =
+        std::any_of(completed_markers.begin(), completed_markers.end(),
+                    [](const auto &path) { return std::filesystem::exists(path); });
     if (all_started && !any_completed) {
       all_started_before_any_completed = true;
       break;
@@ -246,9 +244,9 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
     const auto provider_session = completed.result.value("session_id", "");
     ASSERT_FALSE(provider_session.empty());
     provider_sessions.insert(provider_session);
-    const auto started_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                started_at[index].time_since_epoch())
-                                .count();
+    const auto started_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(started_at[index].time_since_epoch())
+            .count();
     const auto completed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                   completed_at[index].time_since_epoch())
                                   .count();
