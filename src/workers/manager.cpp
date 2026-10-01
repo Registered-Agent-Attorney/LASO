@@ -421,13 +421,20 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
   return value;
 }
 
+std::shared_ptr<std::mutex> WorkerManager::submit_mutex_for(const std::string &worker_id) {
+  std::lock_guard lock(submit_mutexes_mutex_);
+  auto &mutex = submit_mutexes_[worker_id];
+  if (!mutex)
+    mutex = std::make_shared<std::mutex>();
+  return mutex;
+}
+
 WorkerJob WorkerManager::submit(const WorkerRequest &request) {
   return submit_impl(request, false);
 }
 
 WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchronous_dispatch,
                                      const std::string &initial_submission_id) {
-  std::lock_guard submit_lock(submit_mutex_);
   if (stopped_)
     throw Error(ErrorCode::Conflict, "Worker manager is stopped");
   if (request.idempotency_key.empty() || request.idempotency_key.size() > 512 ||
@@ -453,6 +460,8 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
       throw Error(ErrorCode::Validation, "Invalid worker artifact reference");
 
   auto worker_id = resolve_worker(request.worker_id, request.capability);
+  const auto worker_submit_mutex = submit_mutex_for(worker_id);
+  std::lock_guard submit_lock(*worker_submit_mutex);
   auto adapter = registry_.get(worker_id);
   const auto durable_id = durable_job_id(request.idempotency_key);
   auto existing_job = [&]() -> std::optional<WorkerJob> {
@@ -791,8 +800,9 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
     if (!bounded_identifier(artifact, 128))
       throw Error(ErrorCode::Validation, "Invalid worker artifact reference");
 
-  std::lock_guard submit_lock(submit_mutex_);
   const auto worker_id = resolve_worker(request.worker_id, request.capability);
+  const auto worker_submit_mutex = submit_mutex_for(worker_id);
+  std::lock_guard submit_lock(*worker_submit_mutex);
   const auto adapter = registry_.get(worker_id);
   auto metadata = adapter->metadata();
   if (metadata.supports_recovery && !metadata.healthy && metadata.status != "disabled" &&

@@ -5,9 +5,12 @@
 #include <laso/policies/policy.hpp>
 #include <laso/storage/storage.hpp>
 #include <laso/workers/worker.hpp>
+#include <memory>
 #include <mutex>
 #include <set>
+#include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace laso {
 class WorkerManager final : public EventSubscriber {
@@ -56,7 +59,8 @@ private:
   double max_cost_units_per_run_;
   Policy *policy_ = nullptr;
   std::atomic<bool> stopped_{false};
-  mutable std::mutex submit_mutex_;
+  mutable std::mutex submit_mutexes_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<std::mutex>> submit_mutexes_;
   mutable std::mutex async_mutex_;
   std::set<std::string> async_submissions_;
   std::vector<std::jthread> async_threads_;
@@ -66,6 +70,7 @@ private:
   std::condition_variable interaction_changed_;
   void apply_event(const Event &);
   WorkerJob reconcile(WorkerJob, bool fail_transport);
+  std::shared_ptr<std::mutex> submit_mutex_for(const std::string &worker_id);
   WorkerJob submit_impl(const WorkerRequest &, bool asynchronous_dispatch,
                         const std::string &initial_submission_id = {});
   void retire_superseded_distributed_jobs_locked();

@@ -627,6 +627,86 @@ TEST(Workers, AsyncSubmissionReturnsBeforeProviderHandleAndSupportsCancellation)
   EXPECT_TRUE(cancelled.cancellation_acknowledged);
 }
 
+TEST(Workers, DifferentWorkerSubmissionsCanRunConcurrently) {
+  struct SubmissionBarrier {
+    std::mutex mutex;
+    std::condition_variable changed;
+    unsigned started = 0;
+    bool release = false;
+  } barrier;
+
+  class BarrierWorker final : public WorkerAdapter {
+  public:
+    BarrierWorker(SubmissionBarrier &barrier, std::string id)
+        : barrier_(barrier), id_(std::move(id)) {}
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = id_;
+      result.name = id_;
+      result.status = "healthy";
+      result.healthy = true;
+      result.enabled = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &) override {
+      std::unique_lock lock(barrier_.mutex);
+      ++barrier_.started;
+      barrier_.changed.notify_all();
+      barrier_.changed.wait(lock, [&] { return barrier_.release; });
+      return {"external-" + id_, WorkerJobState::Queued, Json::object()};
+    }
+    WorkerStatus status(const std::string &) override { return {}; }
+    WorkerStatus result(const std::string &) override { return {}; }
+    bool cancel(const std::string &) override { return true; }
+    void start() override {}
+    void stop() noexcept override {}
+
+  private:
+    SubmissionBarrier &barrier_;
+    std::string id_;
+  };
+
+  TemporaryDirectory dir;
+  auto storage = make_storage(dir.path / "state.db");
+  WorkerRegistry registry;
+  registry.add("parallel-one", std::make_shared<BarrierWorker>(barrier, "parallel-one"));
+  registry.add("parallel-two", std::make_shared<BarrierWorker>(barrier, "parallel-two"));
+  WorkerManager manager(*storage, registry, 4, 1);
+
+  WorkerRequest first;
+  first.worker_id = "parallel-one";
+  first.run_id = "parallel-submit";
+  first.node_id = "agent-one";
+  first.idempotency_key = "parallel-submit:agent-one:1";
+  WorkerRequest second = first;
+  second.worker_id = "parallel-two";
+  second.node_id = "agent-two";
+  second.idempotency_key = "parallel-submit:agent-two:1";
+
+  (void)manager.submit_async(first);
+  (void)manager.submit_async(second);
+  bool concurrent = false;
+  {
+    std::unique_lock lock(barrier.mutex);
+    concurrent = barrier.changed.wait_for(lock, std::chrono::seconds(2),
+                                          [&] { return barrier.started == 2; });
+    barrier.release = true;
+    barrier.changed.notify_all();
+  }
+  EXPECT_TRUE(concurrent);
+  const auto first_job_id = manager.job_id_for(first.idempotency_key);
+  const auto second_job_id = manager.job_id_for(second.idempotency_key);
+  for (unsigned attempt = 0; attempt < 200; ++attempt) {
+    if (manager.job(first_job_id).state == WorkerJobState::Queued &&
+        manager.job(second_job_id).state == WorkerJobState::Queued)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_EQ(manager.job(first_job_id).state, WorkerJobState::Queued);
+  EXPECT_EQ(manager.job(second_job_id).state, WorkerJobState::Queued);
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+}
+
 TEST(Workers, ProviderCompletionWinsIfItBeatsCancellationAcknowledgement) {
   class CompletingWorker final : public WorkerAdapter {
   public:
