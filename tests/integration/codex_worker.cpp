@@ -190,8 +190,7 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
         overlap_started_at[index] = monotonic_at;
       }
       const auto state = manager.job(job_ids[index]).state;
-      if (completed_at[index].time_since_epoch().count() == 0 && state != WorkerJobState::Queued &&
-          state != WorkerJobState::Running) {
+      if (completed_at[index].time_since_epoch().count() == 0 && worker_job_terminal(state)) {
         completed_at[index] = observed_at;
         overlap_completed_at[index] = monotonic_at;
       }
@@ -218,8 +217,7 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
     const auto monotonic_at = std::chrono::steady_clock::now();
     for (std::size_t index = 0; index < agent_ids.size(); ++index) {
       const auto state = manager.job(job_ids[index]).state;
-      if (completed_at[index].time_since_epoch().count() == 0 && state != WorkerJobState::Queued &&
-          state != WorkerJobState::Running) {
+      if (completed_at[index].time_since_epoch().count() == 0 && worker_job_terminal(state)) {
         completed_at[index] = observed_at;
         overlap_completed_at[index] = monotonic_at;
       }
