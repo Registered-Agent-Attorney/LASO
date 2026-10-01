@@ -215,16 +215,15 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
   do {
     const auto observed_at = std::chrono::system_clock::now();
     const auto monotonic_at = std::chrono::steady_clock::now();
+    all_completed = true;
     for (std::size_t index = 0; index < agent_ids.size(); ++index) {
-      const auto state = manager.job(job_ids[index]).state;
-      if (completed_at[index].time_since_epoch().count() == 0 && worker_job_terminal(state)) {
+      const auto job = manager.job(job_ids[index]);
+      if (completed_at[index].time_since_epoch().count() == 0 && worker_job_terminal(job.state)) {
         completed_at[index] = observed_at;
         overlap_completed_at[index] = monotonic_at;
       }
+      all_completed = all_completed && job.state == WorkerJobState::Completed;
     }
-    all_completed = std::all_of(job_ids.begin(), job_ids.end(), [&](const auto &id) {
-      return manager.job(id).state == WorkerJobState::Completed;
-    });
     if (all_completed)
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
