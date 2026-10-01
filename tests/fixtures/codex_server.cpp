@@ -224,6 +224,8 @@ int main(int argc, char **argv) {
       }
       const auto turn = Json{{"id", "fixture-turn"}, {"status", "inProgress"}};
       send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
+      send(Json{{"method", "turn/started"},
+                {"params", Json{{"threadId", active_thread}, {"turn", turn}}}});
       const auto *configured_output = std::getenv("LASO_CODEX_FIXTURE_OUTPUT");
       std::string text;
       if (configured_output && *configured_output != '\0')

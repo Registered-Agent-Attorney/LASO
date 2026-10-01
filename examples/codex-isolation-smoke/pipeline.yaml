@@ -15,9 +15,9 @@ nodes:
     timeout_ms: 60000
     max_attempts: 1
     instructions: >-
-      This is a synthetic LASO isolation check. Do not access files, browsers,
-      networks, Microsoft data, or invoke tools. Return exactly
-      LASO_AGENT_ISOLATION_ONE.
+      This is a harmless reasoning-only LASO isolation check. Do not access
+      files, browsers, networks, Microsoft data, or invoke tools. Calculate
+      19 + 23 mentally and return exactly LASO_AGENT_ISOLATION_ONE: 42.
   agent_two:
     type: worker
     worker: codex_agent_two
@@ -26,9 +26,9 @@ nodes:
     timeout_ms: 60000
     max_attempts: 1
     instructions: >-
-      This is a synthetic LASO isolation check. Do not access files, browsers,
-      networks, Microsoft data, or invoke tools. Return exactly
-      LASO_AGENT_ISOLATION_TWO.
+      This is a harmless reasoning-only LASO isolation check. Do not access
+      files, browsers, networks, Microsoft data, or invoke tools. Count the
+      vowels in LASO and return exactly LASO_AGENT_ISOLATION_TWO: 2.
   agent_three:
     type: worker
     worker: codex_agent_three
@@ -37,9 +37,9 @@ nodes:
     timeout_ms: 60000
     max_attempts: 1
     instructions: >-
-      This is a synthetic LASO isolation check. Do not access files, browsers,
-      networks, Microsoft data, or invoke tools. Return exactly
-      LASO_AGENT_ISOLATION_THREE.
+      This is a harmless reasoning-only LASO isolation check. Do not access
+      files, browsers, networks, Microsoft data, or invoke tools. Sort the
+      letters in LASO alphabetically and return exactly LASO_AGENT_ISOLATION_THREE: ALOS.
   join:
     type: join
 edges:

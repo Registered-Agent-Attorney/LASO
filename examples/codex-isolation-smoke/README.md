@@ -42,6 +42,9 @@ process_workers:
 ```
 
 Keep the existing approved Codex model guard and default-deny Computer policy.
-The smoke pipeline asks each worker to return a fixed marker without accessing
-files, the network, browser state, or Microsoft data. Its results include each
-provider session ID so the caller can verify that the sessions differ.
+The smoke pipeline gives each worker a different harmless reasoning task and a
+distinct expected marker without accessing files, the network, browser state,
+or Microsoft data. Its results include each provider session ID so the caller
+can verify that the sessions differ. Core also records when the matching
+Codex app-server `turn/started` and `turn/completed` notifications reach the
+worker; these UTC timestamps describe the observed Codex turn lifecycle.

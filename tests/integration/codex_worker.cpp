@@ -116,6 +116,9 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
   ASSERT_EQ(first.usage.input_tokens, std::optional<std::uint64_t>(11));
   ASSERT_EQ(first.usage.output_tokens, std::optional<std::uint64_t>(7));
   ASSERT_EQ(first.usage.executor, "codex");
+  EXPECT_EQ(first.metadata.value("codex_turn_id", ""), "fixture-turn");
+  EXPECT_FALSE(first.metadata.value("codex_turn_started_at", "").empty());
+  EXPECT_FALSE(first.metadata.value("codex_turn_completed_at", "").empty());
   const auto second = transport.submit(
       request(root.path, "codex-second", "continue the existing session", "fixture-session"));
   EXPECT_EQ(second.state, WorkerJobState::Completed);
@@ -237,6 +240,9 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
     const auto completed = manager.job(job_ids[index]);
     EXPECT_EQ(completed.worker_id, std::string("codex-") + agent_ids[index]);
     EXPECT_EQ(completed.result.value("summary", ""), markers[index]);
+    EXPECT_EQ(completed.result_metadata.value("codex_turn_id", ""), "fixture-turn");
+    EXPECT_FALSE(completed.result_metadata.value("codex_turn_started_at", "").empty());
+    EXPECT_FALSE(completed.result_metadata.value("codex_turn_completed_at", "").empty());
     const auto provider_session = completed.result.value("session_id", "");
     ASSERT_FALSE(provider_session.empty());
     provider_sessions.insert(provider_session);

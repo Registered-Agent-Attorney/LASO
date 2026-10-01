@@ -124,6 +124,11 @@ public:
   explicit CodexFailure(const std::string &message) : std::runtime_error(message) {}
 };
 
+struct TurnStartObservation {
+  std::string turn_id;
+  std::string observed_at;
+};
+
 class CodexProcess {
 public:
   CodexProcess(std::string executable, std::uint64_t timeout_ms)
@@ -441,19 +446,32 @@ public:
     if (input.at("text").get<std::string>().size() > max_text)
       throw WorkerTransportError("Codex session input exceeds the limit");
     active_job_id_ = request.value("job_id", std::string{});
+    TurnStartObservation start_observation;
     const auto turn_response = call("turn/start", Json{{"threadId", session_id_},
                                                          {"input", Json::array({input})},
                                                          {"cwd", project_dir_}},
-                                    request.value("job_id", std::string{}));
+                                    request.value("job_id", std::string{}), &start_observation);
     const auto turn_id = turn_response.value("turn", Json::object()).value("id", std::string{});
     if (turn_id.empty())
       throw WorkerTransportError("Codex turn/start response has no turn id");
     active_turn_id_ = turn_id;
+    std::string turn_started_at;
+    if (start_observation.turn_id == turn_id)
+      turn_started_at = start_observation.observed_at;
+    std::string turn_completed_at;
     Json completed;
     while (true) {
       const auto message = process_.receive(deadline());
       if (handle_server_request(message, request.value("job_id", std::string{})))
         continue;
+      if (message.value("method", std::string{}) == "turn/started") {
+        const auto params = message.value("params", Json::object());
+        const auto started_turn = params.value("turn", Json::object());
+        if (params.value("threadId", std::string{}) == session_id_ &&
+            started_turn.value("id", std::string{}) == turn_id && turn_started_at.empty())
+          turn_started_at = timestamp();
+        continue;
+      }
       if (message.value("method", std::string{}) == "thread/tokenUsage/updated") {
         record_usage(message.value("params", Json::object()));
         continue;
@@ -463,8 +481,15 @@ public:
         continue;
       }
       if (message.value("method", std::string{}) == "turn/completed") {
-        completed = message.value("params", Json::object());
-        break;
+        const auto params = message.value("params", Json::object());
+        const auto completed_turn = params.value("turn", Json::object());
+        if (params.value("threadId", std::string{}) == session_id_ &&
+            completed_turn.value("id", std::string{}) == turn_id) {
+          completed = params;
+          turn_completed_at = timestamp();
+          break;
+        }
+        continue;
       }
       if (message.contains("id") && message.value("id", 0) == 0)
         throw WorkerTransportError("Codex emitted an unrelated response");
@@ -481,6 +506,11 @@ public:
     result.state = WorkerJobState::Completed;
     result.usage = usage_;
     result.metadata = {{"model", model_}, {"provider", provider_}};
+    result.metadata["codex_turn_id"] = turn_id;
+    if (!turn_started_at.empty())
+      result.metadata["codex_turn_started_at"] = turn_started_at;
+    if (!turn_completed_at.empty())
+      result.metadata["codex_turn_completed_at"] = turn_completed_at;
     result.result = {{"summary", summary_}};
     if (!durable_session) {
       result.metadata["codex_session_id"] = session_id_;
@@ -576,7 +606,8 @@ private:
     throw CodexFailure("Codex project directory is outside an allowed root");
   }
 
-  Json call(const std::string &method, const Json &params, const std::string &job_id) {
+  Json call(const std::string &method, const Json &params, const std::string &job_id,
+            TurnStartObservation *turn_start = nullptr) {
     const auto id = ++rpc_id_;
     process_.send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}},
                   deadline());
@@ -595,6 +626,16 @@ private:
       }
       if (message.value("method", std::string{}) == "item/completed") {
         record_item(message.value("params", Json::object()));
+        continue;
+      }
+      if (message.value("method", std::string{}) == "turn/started") {
+        const auto notification = message.value("params", Json::object());
+        const auto turn = notification.value("turn", Json::object());
+        if (turn_start && notification.value("threadId", std::string{}) == session_id_ &&
+            !turn.value("id", std::string{}).empty()) {
+          turn_start->turn_id = turn.value("id", std::string{});
+          turn_start->observed_at = timestamp();
+        }
         continue;
       }
       if (!message.contains("id") && message.contains("method"))
