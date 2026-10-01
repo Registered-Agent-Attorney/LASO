@@ -146,7 +146,6 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
   constexpr std::array<const char *, 3> markers = {"MARKER-ONE", "MARKER-TWO", "MARKER-THREE"};
   std::array<std::shared_ptr<ProcessWorkerTransport>, agent_ids.size()> transports;
   std::array<std::filesystem::path, agent_ids.size()> started_markers;
-  std::array<std::filesystem::path, agent_ids.size()> completed_markers;
   std::array<std::chrono::system_clock::time_point, agent_ids.size()> started_at{};
   std::array<std::chrono::system_clock::time_point, agent_ids.size()> completed_at{};
   std::array<std::chrono::steady_clock::time_point, agent_ids.size()> overlap_started_at{};
@@ -161,9 +160,7 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
     worker.environment["LASO_CODEX_FIXTURE_SESSION_ID"] = id + "-provider-thread";
     worker.environment["LASO_CODEX_FIXTURE_OUTPUT"] = markers[index];
     started_markers[index] = root.path / (id + ".started");
-    completed_markers[index] = root.path / (id + ".completed");
     worker.environment["LASO_CODEX_FIXTURE_MARKER"] = started_markers[index].string();
-    worker.environment["LASO_CODEX_FIXTURE_DONE_MARKER"] = completed_markers[index].string();
     transports[index] = std::make_shared<ProcessWorkerTransport>(id, std::move(worker));
     ASSERT_NO_THROW(transports[index]->start());
     registry.add(id, transports[index]);
@@ -192,18 +189,19 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
         started_at[index] = observed_at;
         overlap_started_at[index] = monotonic_at;
       }
-      if (completed_at[index].time_since_epoch().count() == 0 &&
-          std::filesystem::exists(completed_markers[index])) {
+      const auto state = manager.job(job_ids[index]).state;
+      if (completed_at[index].time_since_epoch().count() == 0 && state != WorkerJobState::Queued &&
+          state != WorkerJobState::Running) {
         completed_at[index] = observed_at;
         overlap_completed_at[index] = monotonic_at;
       }
     }
     const bool all_started =
-        std::all_of(started_markers.begin(), started_markers.end(),
-                    [](const auto &path) { return std::filesystem::exists(path); });
+        std::all_of(started_at.begin(), started_at.end(),
+                    [](const auto &time) { return time.time_since_epoch().count() != 0; });
     const bool any_completed =
-        std::any_of(completed_markers.begin(), completed_markers.end(),
-                    [](const auto &path) { return std::filesystem::exists(path); });
+        std::any_of(completed_at.begin(), completed_at.end(),
+                    [](const auto &time) { return time.time_since_epoch().count() != 0; });
     if (all_started && !any_completed) {
       all_started_before_any_completed = true;
       break;
@@ -219,8 +217,9 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
     const auto observed_at = std::chrono::system_clock::now();
     const auto monotonic_at = std::chrono::steady_clock::now();
     for (std::size_t index = 0; index < agent_ids.size(); ++index) {
-      if (completed_at[index].time_since_epoch().count() == 0 &&
-          std::filesystem::exists(completed_markers[index])) {
+      const auto state = manager.job(job_ids[index]).state;
+      if (completed_at[index].time_since_epoch().count() == 0 && state != WorkerJobState::Queued &&
+          state != WorkerJobState::Running) {
         completed_at[index] = observed_at;
         overlap_completed_at[index] = monotonic_at;
       }

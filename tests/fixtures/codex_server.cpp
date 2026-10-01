@@ -186,12 +186,6 @@ int main(int argc, char **argv) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
       }
-      if (const auto *marker = std::getenv("LASO_CODEX_FIXTURE_DONE_MARKER");
-          marker && *marker != '\0') {
-        std::ofstream done(marker, std::ios_base::trunc);
-        if (!(done << "done\n"))
-          return 74;
-      }
       if (prompt.find("request-permission") != std::string::npos) {
         send({{"jsonrpc", "2.0"},
               {"id", 99},
