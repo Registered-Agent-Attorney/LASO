@@ -103,8 +103,9 @@ bool cancel_when_submit_is_active(ProcessWorkerTransport &transport, const std::
 class NonRecoverableAsyncWorker final : public WorkerTransport {
 public:
   explicit NonRecoverableAsyncWorker(std::promise<void> &started,
-                                     std::shared_future<void> release)
-      : started_(started), release_(std::move(release)) {}
+                                     std::shared_future<void> release,
+                                     WorkerJobState status_state = WorkerJobState::Completed)
+      : started_(started), release_(std::move(release)), status_state_(status_state) {}
 
   WorkerMetadata metadata() const override {
     WorkerMetadata result;
@@ -128,8 +129,9 @@ public:
   }
   WorkerStatus status(const std::string &) override {
     WorkerStatus result;
-    result.state = WorkerJobState::Completed;
-    result.result = Json{{"ok", true}};
+    result.state = status_state_;
+    if (status_state_ == WorkerJobState::Completed)
+      result.result = Json{{"ok", true}};
     return result;
   }
   WorkerStatus result(const std::string &) override { return {}; }
@@ -142,6 +144,7 @@ public:
 private:
   std::promise<void> &started_;
   std::shared_future<void> release_;
+  WorkerJobState status_state_;
 };
 
 class InMemoryWorkerStorage final : public Storage {
@@ -317,6 +320,35 @@ TEST(ProcessWorker, AsyncNonRecoverableAdapterPollsActiveJobWithoutResubmission)
   ASSERT_EQ(completed.state, WorkerJobState::Completed);
   EXPECT_EQ(completed.external_job_id, "accepted-once");
   EXPECT_TRUE(completed.result.at("ok"));
+  EXPECT_EQ(adapter->submit_count.load(), 1U);
+}
+
+TEST(ProcessWorker, ReconcilesStaleStatusCapableJobsBeforeEnforcingCapacity) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  std::promise<void> started;
+  std::promise<void> release;
+  auto adapter = std::make_shared<NonRecoverableAsyncWorker>(
+      started, release.get_future().share(), WorkerJobState::Unknown);
+  release.set_value();
+  registry.add("non-recoverable", adapter);
+
+  WorkerJob stale;
+  stale.id = "stale-computer-job";
+  stale.worker_id = "non-recoverable";
+  stale.run_id = "stale-computer-run";
+  stale.idempotency_key = "stale-computer-idempotency-key";
+  stale.external_job_id = "lost-after-worker-restart";
+  stale.state = WorkerJobState::Running;
+  storage.commit({{RecordKind::WorkerJob, stale.id, stale.run_id, Json(stale)}});
+
+  WorkerManager manager(storage, registry, 8, 1);
+  auto request_value = request("non-recoverable");
+  request_value.idempotency_key = "new-computer-job";
+  const auto submitted = manager.submit(request_value);
+
+  EXPECT_EQ(manager.job(stale.id).state, WorkerJobState::Unknown);
+  EXPECT_EQ(submitted.external_job_id, "accepted-once");
   EXPECT_EQ(adapter->submit_count.load(), 1U);
 }
 

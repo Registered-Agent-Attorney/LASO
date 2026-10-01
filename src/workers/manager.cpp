@@ -610,6 +610,20 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
   if (initial_dispatch) {
     created = *existing;
   } else {
+    if (metadata.supports_status) {
+      std::vector<WorkerJob> active_worker_jobs;
+      {
+        std::lock_guard state_lock(state_mutex_);
+        for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
+          auto active = record.get<WorkerJob>();
+          if (active.worker_id == worker_id && !worker_job_terminal(active.state))
+            active_worker_jobs.push_back(std::move(active));
+        }
+      }
+      if (active_worker_jobs.size() >= max_per_worker_)
+        for (auto &active : active_worker_jobs)
+          (void)reconcile(std::move(active), false);
+    }
     std::lock_guard state_lock(state_mutex_);
     retire_superseded_distributed_jobs_locked();
     std::size_t active = 0, worker_active = 0;
@@ -618,7 +632,13 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
       if (worker_job_terminal(stored.state))
         continue;
       ++active;
-      if (stored.worker_id == worker_id)
+      // Keep unknown outcomes durable and non-retriable, but do not reserve a
+      // live slot after a non-recoverable worker has confirmed the job is no
+      // longer in its active status table.
+      const bool absent_from_active_worker =
+          stored.state == WorkerJobState::Unknown && metadata.supports_status &&
+          !metadata.supports_recovery;
+      if (stored.worker_id == worker_id && !absent_from_active_worker)
         ++worker_active;
     }
     if (active >= max_active_)
