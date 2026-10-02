@@ -724,6 +724,9 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
       if (action == "messages")
         for (auto &message : records)
           message = redact_worker_result_message(std::move(message));
+      if (action == "attempts")
+        for (auto &attempt : records)
+          redact_codex_external_handles(attempt);
       return {200, records};
     }
     if (method == "POST" && action == "cancel") {

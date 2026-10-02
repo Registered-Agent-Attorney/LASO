@@ -165,6 +165,7 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   const auto public_jobs = api.handle("GET", "/api/v1/worker-jobs?limit=100", "");
   ASSERT_EQ(public_jobs.status, 200U);
   EXPECT_EQ(public_jobs.body.dump().find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_jobs.body.dump().find("fixture-turn"), std::string::npos);
   EXPECT_EQ(public_jobs.body.dump().find(root.path.string()), std::string::npos);
 
   const auto public_messages = api.handle("GET", "/api/v1/runs/" + run_id + "/messages", "");
@@ -180,6 +181,14 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   EXPECT_EQ(public_messages_json.find("fixture-turn"), std::string::npos);
   EXPECT_EQ(public_messages_json.find("codex:fixture-session"), std::string::npos);
   EXPECT_EQ(public_messages_json.find(root.path.string()), std::string::npos);
+
+  const auto stored_attempts = service.list(RecordKind::Attempt, run_id, 100, 0);
+  ASSERT_TRUE(std::any_of(stored_attempts.begin(), stored_attempts.end(), [](const Json &attempt) {
+    return attempt.dump().find("codex:fixture-session") != std::string::npos;
+  }));
+  const auto public_attempts = api.handle("GET", "/api/v1/runs/" + run_id + "/attempts", "");
+  ASSERT_EQ(public_attempts.status, 200U);
+  EXPECT_EQ(public_attempts.body.dump().find("codex:fixture-session"), std::string::npos);
 
   const auto public_run = api.handle("GET", "/api/v1/runs/" + run_id, "");
   ASSERT_EQ(public_run.status, 200U);
