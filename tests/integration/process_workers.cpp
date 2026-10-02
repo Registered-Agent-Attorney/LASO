@@ -87,6 +87,27 @@ bool wait_for_reference_host(const std::string &owner_token, bool expected_runni
   return reference_host_running(owner_token) == expected_running;
 }
 
+bool wait_for_submit_marker(const std::filesystem::path &marker, const std::string &job_id,
+                            std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  do {
+    std::ifstream stream(marker);
+    std::string line;
+    while (std::getline(stream, line))
+      if (line == job_id)
+        return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+
+bool submit_marker_contains_only(const std::filesystem::path &marker,
+                                 const std::string &expected_job_id) {
+  std::ifstream stream(marker);
+  std::string line;
+  return std::getline(stream, line) && line == expected_job_id && !std::getline(stream, line);
+}
+
 bool cancel_when_submit_is_active(ProcessWorkerTransport &transport, const std::string &job_id,
                                   std::chrono::milliseconds timeout) {
   // start() creates an idle child before submit begins, so process existence is
@@ -540,6 +561,61 @@ TEST(ProcessWorker, PendingCancellationTerminatesAndRestartsOwnedProcessGroup) {
   EXPECT_TRUE(wait_for_reference_host(owner_token, true));
   transport.stop();
   EXPECT_TRUE(wait_for_reference_host(owner_token, false));
+}
+
+TEST(ProcessWorker, ManagerCancellationOfQueuedJobDoesNotDispatchIt) {
+  TemporaryDirectory dir;
+  const auto marker = dir.path / "submitted-jobs";
+  const auto owner_token = worker_owner_token();
+  auto config = worker_config("delay-ms", 5000, owner_token);
+  config.args = {"--mode",
+                 "delay-ms",
+                 "--delay-ms",
+                 "500",
+                 "--submit-marker",
+                 marker.string(),
+                 "--laso-test-owner-token",
+                 owner_token};
+  auto transport = std::make_shared<ProcessWorkerTransport>("process", std::move(config));
+  transport->start();
+  WorkerRegistry registry;
+  registry.add("process-a", transport);
+  registry.add("process-b", transport);
+  InMemoryWorkerStorage storage;
+  WorkerManager manager(storage, registry);
+
+  auto first_request = request("process-a");
+  first_request.run_id = "queued-manager-cancel";
+  first_request.idempotency_key = "queued-manager-cancel:first";
+  const auto first = manager.submit_async(first_request);
+  ASSERT_TRUE(wait_for_submit_marker(marker, first.id));
+
+  auto second_request = request("process-b");
+  second_request.run_id = "queued-manager-cancel";
+  second_request.idempotency_key = "queued-manager-cancel:second";
+  const auto second = manager.submit_async(second_request);
+  ASSERT_EQ(second.state, WorkerJobState::Submitting);
+  manager.cancel(second.id, WorkerJobState::Cancelled, "cancel queued worker request");
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  WorkerJob first_result;
+  WorkerJob second_result;
+  do {
+    first_result = manager.job(first.id);
+    second_result = manager.job(second.id);
+    if (first_result.state == WorkerJobState::Completed &&
+        second_result.state == WorkerJobState::Cancelled)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  } while (std::chrono::steady_clock::now() < deadline);
+
+  EXPECT_EQ(first_result.state, WorkerJobState::Completed);
+  EXPECT_EQ(second_result.state, WorkerJobState::Cancelled);
+  EXPECT_TRUE(second_result.external_job_id.empty());
+  EXPECT_TRUE(second_result.cancellation_acknowledged);
+  EXPECT_TRUE(submit_marker_contains_only(marker, first.id));
+  manager.stop();
+  transport->stop();
 }
 
 TEST(ProcessWorker, PendingCancellationDuringToolCallbackDoesNotRaiseSigpipe) {

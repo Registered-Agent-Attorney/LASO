@@ -130,8 +130,7 @@ int main(int argc, char **argv) {
       }
       const auto exit_marker = option(argc, argv, "--exit-marker", "");
       const auto exit_release_marker = option(argc, argv, "--exit-release-marker", "");
-      const bool exit_after_hello = mode == "exit-after-hello-once" &&
-                                    !exit_marker.empty() &&
+      const bool exit_after_hello = mode == "exit-after-hello-once" && !exit_marker.empty() &&
                                     !std::filesystem::exists(exit_marker);
       if (exit_after_hello) {
         std::ofstream marker(exit_marker);
@@ -184,19 +183,27 @@ int main(int argc, char **argv) {
     if (operation == "submit") {
       const auto job_id = request.value("job_id", std::string{});
       const auto external = "process-" + job_id;
+      const auto submit_marker = option(argc, argv, "--submit-marker", "");
+      if (!submit_marker.empty()) {
+        std::ofstream marker(submit_marker, std::ios::app);
+        if (!marker)
+          return 68;
+        marker << job_id << '\n' << std::flush;
+        if (!marker)
+          return 68;
+      }
       jobs[external] = {job_id, 0, false};
       if (mode == "tool-call-mismatch-job" || mode == "tool-call-mismatch-worker" ||
           mode == "tool-call-wait") {
-        Json tool_call{{"protocol_version", process_protocol::version},
+        Json tool_call{
+            {"protocol_version", process_protocol::version},
                        {"message_type", "worker_tool_call"},
                        {"request_id", "forged-tool-call"},
-                       {"worker_job_id", mode == "tool-call-mismatch-job"
-                                             ? job_id + "-other"
-                                             : job_id},
-                       {"worker_id", mode == "tool-call-mismatch-worker"
+            {"worker_job_id", mode == "tool-call-mismatch-job" ? job_id + "-other" : job_id},
+            {"worker_id",
+             mode == "tool-call-mismatch-worker"
                                          ? "different-worker"
-                                         : request.value("payload", Json::object())
-                                               .value("worker_id", std::string{})},
+                 : request.value("payload", Json::object()).value("worker_id", std::string{})},
                        {"external_job_id", external},
                        {"session_id", "fixture-session"},
                        {"turn_id", "fixture-turn"},

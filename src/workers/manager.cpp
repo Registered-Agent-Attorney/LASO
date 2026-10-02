@@ -108,7 +108,12 @@ std::string WorkerManager::job_id_for(const std::string &idempotency_key) const 
 }
 
 WorkerJob WorkerManager::refresh(const std::string &id) {
-  auto value = job(id);
+  WorkerJob value;
+  {
+    std::lock_guard state_lock(state_mutex_);
+    value = job(id);
+    fence_stale_submission_locked(value);
+  }
   if ((worker_job_terminal(value.state) && !browser_tool_child_needs_result(value)) ||
       value.external_job_id.empty())
     return value;
@@ -355,6 +360,107 @@ void WorkerManager::retire_superseded_distributed_jobs_locked() {
   }
 }
 
+void WorkerManager::fence_stale_submission_locked(WorkerJob &value) {
+  if (value.state != WorkerJobState::Submitting || !value.external_job_id.empty())
+    return;
+  {
+    std::lock_guard async_lock(async_mutex_);
+    if (async_submissions_.contains(value.id) || active_submissions_.contains(value.id))
+      return;
+  }
+  value.state = WorkerJobState::Unknown;
+  value.error = "Worker submission was interrupted before its external job ID was recorded; "
+                "the outcome is unknown and it will not be resubmitted";
+  persist(value);
+  submission_cancellation_signals_.erase(value.id);
+  state_changed_.notify_all();
+}
+
+void WorkerManager::fence_stale_submissions_locked() {
+  for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
+    auto value = record.get<WorkerJob>();
+    fence_stale_submission_locked(value);
+  }
+}
+
+WorkerJob WorkerManager::finalize_pending_cancellation(const std::string &id) {
+  std::lock_guard state_lock(state_mutex_);
+  auto value = job(id);
+  if (worker_job_terminal(value.state) || !value.cancellation_requested ||
+      !value.external_job_id.empty())
+    return value;
+  value.state = value.cancellation_target_state;
+  value.cancellation_acknowledged = true;
+  value.cancellation_error.clear();
+  value.completed_at = timestamp();
+  persist(value);
+  submission_cancellation_signals_.erase(value.id);
+  state_changed_.notify_all();
+  return value;
+}
+
+WorkerJob WorkerManager::record_submission(const std::string &id,
+                                           const WorkerSubmission &submission,
+                                           const std::shared_ptr<WorkerTransport> &adapter) {
+  if (submission.external_job_id.empty() ||
+      submission.external_job_id.size() > max_external_id_bytes)
+    throw WorkerTransportError("Worker returned an invalid external job id");
+
+  bool cancel_external_job = false;
+  {
+    std::lock_guard state_lock(state_mutex_);
+    const auto value = job(id);
+    if (worker_job_terminal(value.state))
+      return value;
+    cancel_external_job = value.cancellation_requested && !worker_job_terminal(submission.state);
+  }
+
+  bool cancellation_acknowledged = false;
+  if (cancel_external_job) {
+    try {
+      cancellation_acknowledged = adapter->cancel(submission.external_job_id);
+    } catch (...) {
+    }
+  }
+
+  std::lock_guard state_lock(state_mutex_);
+  auto value = job(id);
+  if (worker_job_terminal(value.state))
+    return value;
+  value.external_job_id = submission.external_job_id;
+  value.state = submission.state;
+  value.result_metadata = submission.metadata;
+  apply_continuation(value, submission.continuation);
+  if (!submission.result.is_null())
+    value.result = submission.result;
+  if (!submission.artifacts.empty())
+    value.artifacts = submission.artifacts;
+  if (!submission.error.empty())
+    value.error = bounded_error(submission.error);
+  merge_usage(value.usage, submission.usage);
+  if (cancel_external_job && cancellation_acknowledged) {
+    value.state = value.cancellation_target_state;
+    value.cancellation_acknowledged = true;
+    value.cancellation_error.clear();
+  } else if (cancel_external_job && value.cancellation_error.empty()) {
+    value.cancellation_error = "Worker did not acknowledge cancellation";
+  }
+  if (worker_job_terminal(value.state))
+    value.completed_at = timestamp();
+  if (const auto violation = budget_violation(value); !violation.empty()) {
+    value.state = WorkerJobState::Failed;
+    value.failure_kind = WorkerFailureKind::Budget;
+    value.error = violation;
+    value.completed_at = timestamp();
+  } else if (value.state == WorkerJobState::Failed) {
+    value.failure_kind = WorkerFailureKind::Job;
+  }
+  persist(value);
+  submission_cancellation_signals_.erase(value.id);
+  state_changed_.notify_all();
+  return value;
+}
+
 WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
   // An asynchronous submission remains in Submitting until the provider
   // handle is available.  Do not call adapter->status() with an empty handle:
@@ -524,8 +630,21 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
   auto worker_id = resolve_worker(request.worker_id, request.capability);
   const auto worker_submit_mutex = submit_mutex_for(worker_id);
   std::lock_guard submit_lock(*worker_submit_mutex);
-  auto adapter = registry_.get(worker_id);
   const auto durable_id = durable_job_id(request.idempotency_key);
+  {
+    std::lock_guard async_lock(async_mutex_);
+    active_submissions_.insert(durable_id);
+  }
+  struct ActiveSubmissionGuard {
+    std::mutex &mutex;
+    std::set<std::string> &active_submissions;
+    const std::string &job_id;
+    ~ActiveSubmissionGuard() {
+      std::lock_guard active_lock(mutex);
+      active_submissions.erase(job_id);
+    }
+  } active_submission_guard{async_mutex_, active_submissions_, durable_id};
+  auto adapter = registry_.get(worker_id);
   auto existing_job = [&]() -> std::optional<WorkerJob> {
     std::lock_guard state_lock(state_mutex_);
     try {
@@ -574,6 +693,9 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     }
   }
 
+  if (existing.has_value() && existing->cancellation_requested && existing->external_job_id.empty())
+    return finalize_pending_cancellation(existing->id);
+
   auto metadata = adapter->metadata();
   if (metadata.supports_recovery && !metadata.healthy && metadata.status != "disabled" &&
       metadata.status != "unavailable") {
@@ -605,38 +727,17 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     }
     auto retry_request = request;
     retry_request.job_id = existing->id;
+    {
+      std::lock_guard state_lock(state_mutex_);
+      if (const auto signal = submission_cancellation_signals_.find(existing->id);
+          signal != submission_cancellation_signals_.end())
+        retry_request.cancellation_signal = signal->second;
+      }
     try {
       const auto submission = adapter->submit(retry_request);
-      std::lock_guard state_lock(state_mutex_);
-      existing = job(durable_id);
-      if (worker_job_terminal(existing->state))
-        return *existing;
-      existing->external_job_id = submission.external_job_id;
-      existing->state = submission.state;
-      existing->result_metadata = submission.metadata;
-      apply_continuation(*existing, submission.continuation);
-      if (!submission.result.is_null())
-        existing->result = submission.result;
-      if (!submission.artifacts.empty())
-        existing->artifacts = submission.artifacts;
-      if (!submission.error.empty())
-        existing->error = bounded_error(submission.error);
-      merge_usage(existing->usage, submission.usage);
-      if (existing->external_job_id.empty() ||
-          existing->external_job_id.size() > max_external_id_bytes)
-        throw WorkerTransportError("Worker returned an invalid external job id");
-      if (worker_job_terminal(existing->state))
-        existing->completed_at = timestamp();
-      if (const auto violation = budget_violation(*existing); !violation.empty()) {
-        existing->state = WorkerJobState::Failed;
-        existing->failure_kind = WorkerFailureKind::Budget;
-        existing->error = violation;
-        existing->completed_at = timestamp();
-      } else if (existing->state == WorkerJobState::Failed) {
-        existing->failure_kind = WorkerFailureKind::Job;
-      }
-      persist(*existing);
-      return *existing;
+      return record_submission(durable_id, submission, adapter);
+    } catch (const WorkerSubmissionCancelled &) {
+      return finalize_pending_cancellation(durable_id);
     } catch (const WorkerTransportError &error) {
       {
         std::lock_guard state_lock(state_mutex_);
@@ -697,6 +798,7 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     }
     std::lock_guard state_lock(state_mutex_);
     retire_superseded_distributed_jobs_locked();
+    fence_stale_submissions_locked();
     std::size_t active = 0, worker_active = 0;
     for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
       const auto stored = record.get<WorkerJob>();
@@ -740,43 +842,26 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
       return job(durable_id);
     created.state = WorkerJobState::Submitting;
     persist(created);
+    submission_cancellation_signals_[created.id] = std::make_shared<std::atomic<bool>>(false);
   }
+
+  auto pending_cancellation = finalize_pending_cancellation(created.id);
+  if (worker_job_terminal(pending_cancellation.state))
+    return pending_cancellation;
 
   try {
     auto outbound = request;
     outbound.job_id = created.id;
-    const auto submission = adapter->submit(outbound);
-    if (submission.external_job_id.empty() ||
-        submission.external_job_id.size() > max_external_id_bytes)
-      throw WorkerTransportError("Worker returned an invalid external job id");
-
+    {
     std::lock_guard state_lock(state_mutex_);
-    const auto observed = job(created.id);
-    if (worker_job_terminal(observed.state))
-      return observed;
-    created = observed;
-    created.external_job_id = submission.external_job_id;
-    created.state = submission.state;
-    created.result_metadata = submission.metadata;
-    apply_continuation(created, submission.continuation);
-    if (!submission.result.is_null())
-      created.result = submission.result;
-    if (!submission.artifacts.empty())
-      created.artifacts = submission.artifacts;
-    if (!submission.error.empty())
-      created.error = bounded_error(submission.error);
-    merge_usage(created.usage, submission.usage);
-    if (worker_job_terminal(created.state))
-      created.completed_at = timestamp();
-    if (const auto violation = budget_violation(created); !violation.empty()) {
-      created.state = WorkerJobState::Failed;
-      created.failure_kind = WorkerFailureKind::Budget;
-      created.error = violation;
-      created.completed_at = timestamp();
-    } else if (created.state == WorkerJobState::Failed) {
-      created.failure_kind = WorkerFailureKind::Job;
+      if (const auto signal = submission_cancellation_signals_.find(created.id);
+          signal != submission_cancellation_signals_.end())
+        outbound.cancellation_signal = signal->second;
     }
-    persist(created);
+    const auto submission = adapter->submit(outbound);
+    created = record_submission(created.id, submission, adapter);
+  } catch (const WorkerSubmissionCancelled &) {
+    created = finalize_pending_cancellation(created.id);
   } catch (const WorkerTransportError &error) {
     {
       std::lock_guard state_lock(state_mutex_);
@@ -888,11 +973,34 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       (!metadata.healthy && !recoverable))
     throw Error(ErrorCode::Capacity, "Worker is unavailable");
 
+  // Remote workers that advertise status but cannot recover submissions may
+  // have durable handles left behind after their endpoint disconnects. Probe
+  // those handles before applying this worker's capacity limit so a terminal
+  // or unknown remote job cannot reserve a slot forever. Keep these calls out
+  // of state_mutex_: status may cross a network boundary. No old job is ever
+  // resubmitted here.
+  if (metadata.remote && metadata.supports_status && !metadata.supports_recovery) {
+    std::vector<WorkerJob> active_remote_jobs;
+    {
+      std::lock_guard state_lock(state_mutex_);
+      for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
+        auto active = record.get<WorkerJob>();
+        if (active.worker_id == worker_id && !worker_job_terminal(active.state) &&
+            active.state != WorkerJobState::Unknown && !active.external_job_id.empty())
+          active_remote_jobs.push_back(std::move(active));
+      }
+    }
+    for (auto &active : active_remote_jobs)
+      (void)reconcile(std::move(active), true);
+  }
+
   const auto durable_id = durable_job_id(request.idempotency_key);
   WorkerJob created;
+  bool dispatch_reserved = false;
   {
     std::lock_guard state_lock(state_mutex_);
     retire_superseded_distributed_jobs_locked();
+    fence_stale_submissions_locked();
     try {
       created = job(durable_id);
       if (created.idempotency_key != request.idempotency_key)
@@ -962,12 +1070,17 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
         return job(durable_id);
       created.state = WorkerJobState::Submitting;
       persist(created);
+      submission_cancellation_signals_[created.id] = std::make_shared<std::atomic<bool>>(false);
+      {
+        std::lock_guard async_lock(async_mutex_);
+        dispatch_reserved = async_submissions_.insert(created.id).second;
+      }
     }
   }
 
   {
     std::lock_guard async_lock(async_mutex_);
-    if (!async_submissions_.insert(created.id).second)
+    if (!dispatch_reserved && !async_submissions_.insert(created.id).second)
       return created;
     async_threads_.emplace_back([this, request, id = created.id](std::stop_token) {
       try {
@@ -1004,8 +1117,14 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
         } catch (...) {
         }
       }
+      {
       std::lock_guard async_lock(async_mutex_);
       async_submissions_.erase(id);
+      }
+      {
+        std::lock_guard state_lock(state_mutex_);
+        submission_cancellation_signals_.erase(id);
+      }
     });
   }
   return created;
@@ -1022,7 +1141,11 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
     if (worker_job_terminal(value.state))
       return;
     value.cancellation_requested = true;
+    value.cancellation_target_state = requested_state;
     value.cancellation_error = bounded_error(reason);
+    if (const auto signal = submission_cancellation_signals_.find(id);
+        signal != submission_cancellation_signals_.end())
+      signal->second->store(true, std::memory_order_release);
     if (value.external_job_id.empty()) {
       pending_submission = true;
       worker_id = value.worker_id;
@@ -1087,6 +1210,7 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
       if (acknowledged) {
         value.cancellation_acknowledged = true;
         value.state = WorkerJobState::TimedOut;
+        value.cancellation_error.clear();
         value.completed_at = timestamp();
       } else {
         value.cancellation_error = cancellation_error.empty()
@@ -1096,6 +1220,7 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
     } else if (acknowledged) {
       value.cancellation_acknowledged = true;
       value.state = WorkerJobState::Cancelled;
+      value.cancellation_error.clear();
       value.completed_at = timestamp();
     } else {
       value.cancellation_error = cancellation_error.empty()

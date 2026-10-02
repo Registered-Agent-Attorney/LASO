@@ -256,13 +256,23 @@ struct ProcessWorkerTransport::Impl {
     std::unique_lock lock(mutex);
     wait_for_tool_call(lock);
     ensure_started_locked(lock);
-    active_submit.store(true, std::memory_order_release);
+    {
+      std::lock_guard active_lock(active_submit_mutex);
+      if (request.cancellation_signal &&
+          request.cancellation_signal->load(std::memory_order_acquire))
+        throw WorkerSubmissionCancelled();
+      active_submit_job_id = request.job_id;
+    }
     struct ActiveSubmitGuard {
-      std::atomic<bool> &active;
+      std::mutex &mutex;
+      std::string &active_job_id;
+      const std::string &job_id;
       ~ActiveSubmitGuard() {
-        active.store(false, std::memory_order_release);
+        std::lock_guard active_lock(mutex);
+        if (active_job_id == job_id)
+          active_job_id.clear();
       }
-    } active_guard{active_submit};
+    } active_guard{active_submit_mutex, active_submit_job_id, request.job_id};
     const auto timeout_ms = request.timeout_ms == 0
                                 ? config.request_timeout_ms
                                 : std::min(request.timeout_ms, config.request_timeout_ms);
@@ -313,8 +323,11 @@ struct ProcessWorkerTransport::Impl {
     return response.value("payload", Json::object()).value("acknowledged", false);
   }
 
-  bool cancel_pending(const std::string &) noexcept {
-    if (!active_submit.load(std::memory_order_acquire))
+  bool cancel_pending(const std::string &job_id) noexcept {
+    if (job_id.empty())
+      return false;
+    std::lock_guard active_lock(active_submit_mutex);
+    if (active_submit_job_id != job_id)
       return false;
     const auto process_group = owned_process_group.load(std::memory_order_acquire);
     if (process_group <= 0)
@@ -351,9 +364,10 @@ private:
   ProcessWorkerConfig config;
   mutable std::mutex mutex;
   mutable std::mutex metadata_mutex;
+  std::mutex active_submit_mutex;
+  std::string active_submit_job_id;
   pid_t pid = -1;
   std::atomic<pid_t> owned_process_group{-1};
-  std::atomic<bool> active_submit{false};
   int input_fd = -1, output_fd = -1, error_fd = -1;
   std::uint64_t request_number = 0;
   std::string stderr_capture;

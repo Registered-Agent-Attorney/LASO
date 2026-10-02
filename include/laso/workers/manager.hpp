@@ -64,17 +64,25 @@ private:
   std::unordered_map<std::string, std::shared_ptr<std::mutex>> submit_mutexes_;
   mutable std::mutex async_mutex_;
   std::set<std::string> async_submissions_;
+  std::set<std::string> active_submissions_;
   std::vector<std::jthread> async_threads_;
   mutable std::mutex state_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>>
+      submission_cancellation_signals_;
   std::condition_variable state_changed_;
   mutable std::mutex interaction_mutex_;
   std::condition_variable interaction_changed_;
   void apply_event(const Event &);
   WorkerJob reconcile(WorkerJob, bool fail_transport);
+  WorkerJob finalize_pending_cancellation(const std::string &);
+  WorkerJob record_submission(const std::string &, const WorkerSubmission &,
+                              const std::shared_ptr<WorkerTransport> &);
   std::shared_ptr<std::mutex> submit_mutex_for(const std::string &worker_id);
   WorkerJob submit_impl(const WorkerRequest &, bool asynchronous_dispatch,
                         const std::string &initial_submission_id = {});
   void retire_superseded_distributed_jobs_locked();
+  void fence_stale_submission_locked(WorkerJob &);
+  void fence_stale_submissions_locked();
   void persist(WorkerJob &);
   std::string budget_violation(const WorkerJob &) const;
   static void merge_usage(WorkerUsage &, const WorkerUsage &);

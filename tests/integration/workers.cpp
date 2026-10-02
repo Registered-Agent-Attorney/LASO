@@ -7,12 +7,66 @@
 #include <future>
 #include <laso/api/api.hpp>
 #include <laso/workers/manager.hpp>
+#include <map>
 #include <thread>
 
 using namespace laso;
 using namespace laso::test;
 
 namespace {
+class InMemoryWorkerStorage final : public Storage {
+public:
+  void commit(const std::vector<Record> &records) override {
+    std::lock_guard lock(mutex_);
+    for (const auto &record : records)
+      records_[{record.kind, record.id}] = record;
+  }
+  void commit_owned(const std::vector<Record> &records, const std::string &, const std::string &,
+                    std::uint64_t) override {
+    commit(records);
+  }
+  void request_cancellation(const std::string &) override {}
+  bool claim(const Record &record, const std::vector<Record> &associated = {}) override {
+    std::lock_guard lock(mutex_);
+    const auto key = std::make_pair(record.kind, record.id);
+    if (records_.contains(key))
+      return false;
+    records_[key] = record;
+    for (const auto &item : associated)
+      records_[{item.kind, item.id}] = item;
+    return true;
+  }
+  Json get(RecordKind kind, const std::string &id) const override {
+    std::lock_guard lock(mutex_);
+    const auto found = records_.find({kind, id});
+    if (found == records_.end())
+      throw Error(ErrorCode::NotFound, "Test record was not found");
+    return found->second.value;
+  }
+  std::vector<Json> list(RecordKind kind, const std::string &run_id = "", std::size_t limit = 1000,
+                         std::size_t offset = 0) const override {
+    std::lock_guard lock(mutex_);
+    std::vector<Json> result;
+    for (const auto &[key, record] : records_) {
+      (void)key;
+      if (record.kind != kind || (!run_id.empty() && record.run_id != run_id))
+        continue;
+      if (offset > 0) {
+        --offset;
+        continue;
+      }
+      if (result.size() >= limit)
+        break;
+      result.push_back(record.value);
+    }
+    return result;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::map<std::pair<RecordKind, std::string>, Record> records_;
+};
+
 std::string worker_pipeline(const std::string &input_schema = "",
                             const std::string &output_schema = "") {
   return std::string{"laso: '1'\nname: worker-contract\nversion: 1\n"} +
@@ -875,6 +929,94 @@ TEST(Workers, AsyncSubmissionReturnsBeforeProviderHandleAndSupportsCancellation)
   EXPECT_TRUE(cancelled.cancellation_acknowledged);
 }
 
+TEST(Workers, CancellationAfterHandleAcceptanceTargetsThatExternalJob) {
+  class AcceptingWorker final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "accepting";
+      result.name = result.id;
+      result.enabled = true;
+      result.healthy = true;
+      result.status = "healthy";
+      result.supports_cancellation = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &request) override {
+      std::unique_lock lock(mutex);
+      started = true;
+      changed.notify_all();
+      changed.wait(lock, [&] { return release; });
+      return {"external-" + request.job_id, WorkerJobState::Queued, Json::object()};
+    }
+    WorkerStatus status(const std::string &) override {
+      return {};
+    }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &external_job_id) override {
+      std::lock_guard lock(mutex);
+      cancelled_external_job_id = external_job_id;
+      changed.notify_all();
+      return true;
+    }
+    bool cancel_pending(const std::string &) override {
+      return false;
+    }
+    void start() override {}
+    void stop() noexcept override {}
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool started = false;
+    bool release = false;
+    std::string cancelled_external_job_id;
+  };
+
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<AcceptingWorker>();
+  registry.add("accepting", adapter);
+  WorkerManager manager(storage, registry);
+  WorkerRequest request;
+  request.worker_id = "accepting";
+  request.run_id = "cancel-after-acceptance";
+  request.node_id = "work";
+  request.idempotency_key = "cancel-after-acceptance:work:1";
+
+  const auto submitted = manager.submit_async(request);
+  {
+    std::unique_lock lock(adapter->mutex);
+    ASSERT_TRUE(
+        adapter->changed.wait_for(lock, std::chrono::seconds(2), [&] { return adapter->started; }));
+  }
+  manager.cancel(submitted.id, WorkerJobState::Cancelled, "cancel after handle acceptance");
+  EXPECT_EQ(manager.job(submitted.id).state, WorkerJobState::Submitting);
+  {
+    std::lock_guard lock(adapter->mutex);
+    adapter->release = true;
+  }
+  adapter->changed.notify_all();
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  WorkerJob cancelled;
+  do {
+    cancelled = manager.job(submitted.id);
+    if (cancelled.state == WorkerJobState::Cancelled)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  } while (std::chrono::steady_clock::now() < deadline);
+  EXPECT_EQ(cancelled.state, WorkerJobState::Cancelled);
+  EXPECT_EQ(cancelled.external_job_id, "external-" + submitted.id);
+  EXPECT_TRUE(cancelled.cancellation_requested);
+  EXPECT_TRUE(cancelled.cancellation_acknowledged);
+  {
+    std::lock_guard lock(adapter->mutex);
+    EXPECT_EQ(adapter->cancelled_external_job_id, "external-" + submitted.id);
+  }
+}
+
 TEST(Workers, DifferentWorkerSubmissionsCanRunConcurrently) {
   struct SubmissionBarrier {
     std::mutex mutex;
@@ -1200,6 +1342,129 @@ TEST(Workers, RestartedSubmissionWithoutExternalIdIsUnknownAndNotResubmitted) {
   EXPECT_EQ(adapter->submissions.load(), 0U);
   EXPECT_EQ(storage->get(RecordKind::WorkerJob, interrupted.id).get<WorkerJob>().state,
             WorkerJobState::Unknown);
+}
+
+TEST(Workers, RefreshFencesRestartedSubmissionWithoutHandleAndReleasesCapacity) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<UsageWorker>();
+  registry.add("usage", adapter);
+  WorkerRequest stale_request;
+  stale_request.worker_id = "usage";
+  stale_request.run_id = "lost-submit-run";
+  stale_request.node_id = "agent";
+  stale_request.idempotency_key = "lost-submit:no-handle";
+
+  std::string stale_id;
+  {
+    WorkerManager previous(storage, registry, 1, 1);
+    stale_id = previous.job_id_for(stale_request.idempotency_key);
+  }
+  WorkerJob interrupted;
+  interrupted.id = stale_id;
+  interrupted.worker_id = stale_request.worker_id;
+  interrupted.run_id = stale_request.run_id;
+  interrupted.node_id = stale_request.node_id;
+  interrupted.idempotency_key = stale_request.idempotency_key;
+  interrupted.state = WorkerJobState::Submitting;
+  ASSERT_TRUE(storage.claim(
+      {RecordKind::WorkerJob, interrupted.id, interrupted.run_id, Json(interrupted)}));
+
+  WorkerManager recovered(storage, registry, 1, 1);
+  const auto stale = recovered.refresh(stale_id);
+  EXPECT_EQ(stale.state, WorkerJobState::Unknown);
+  EXPECT_TRUE(stale.external_job_id.empty());
+  EXPECT_NE(stale.error.find("will not be resubmitted"), std::string::npos);
+
+  WorkerRequest fresh_request = stale_request;
+  fresh_request.run_id = "fresh-submit-run";
+  fresh_request.node_id = "agent-fresh";
+  fresh_request.idempotency_key = "fresh-submit:after-stale";
+  const auto fresh = recovered.submit(fresh_request);
+  EXPECT_EQ(fresh.state, WorkerJobState::Queued);
+}
+
+TEST(Workers, AsyncRemoteUnknownHandleReleasesPerWorkerCapacityWithoutResubmit) {
+  class RemoteComputerWorker final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "windows_computer";
+      result.name = result.id;
+      result.capabilities = {"browser.status"};
+      result.remote = true;
+      result.enabled = true;
+      result.healthy = true;
+      result.status = "healthy";
+      result.supports_status = true;
+      result.supports_cancellation = true;
+      result.supports_recovery = false;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &request) override {
+      ++submissions;
+      return {"external-" + request.job_id, WorkerJobState::Queued, Json::object()};
+    }
+    WorkerStatus status(const std::string &) override {
+      ++status_calls;
+      WorkerStatus result;
+      result.state = WorkerJobState::Unknown;
+      return result;
+    }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &) override {
+      return true;
+    }
+    void start() override {}
+    void stop() noexcept override {}
+
+    std::atomic<unsigned> submissions{0};
+    std::atomic<unsigned> status_calls{0};
+  };
+
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<RemoteComputerWorker>();
+  registry.add("windows_computer", adapter);
+  WorkerManager manager(storage, registry, 4, 1);
+
+  WorkerRequest first_request;
+  first_request.worker_id = "windows_computer";
+  first_request.capability = "browser.status";
+  first_request.task_type = "browser.status";
+  first_request.run_id = "computer-reconnect";
+  first_request.node_id = "status-before-disconnect";
+  first_request.idempotency_key = "computer-reconnect:first";
+  const auto first = manager.submit_async(first_request);
+
+  auto wait_for_handle = [&](const std::string &id) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    WorkerJob current;
+    do {
+      current = manager.job(id);
+      if (!current.external_job_id.empty())
+        return current;
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    } while (std::chrono::steady_clock::now() < deadline);
+    return current;
+  };
+  const auto first_with_handle = wait_for_handle(first.id);
+  ASSERT_EQ(first_with_handle.state, WorkerJobState::Queued);
+  ASSERT_EQ(first_with_handle.external_job_id, "external-" + first.id);
+
+  WorkerRequest next_request = first_request;
+  next_request.node_id = "status-after-reconnect";
+  next_request.idempotency_key = "computer-reconnect:next";
+  const auto next = manager.submit_async(next_request);
+  const auto next_with_handle = wait_for_handle(next.id);
+
+  EXPECT_EQ(manager.job(first.id).state, WorkerJobState::Unknown);
+  EXPECT_EQ(next_with_handle.state, WorkerJobState::Queued);
+  EXPECT_EQ(next_with_handle.external_job_id, "external-" + next.id);
+  EXPECT_EQ(adapter->status_calls.load(), 1U);
+  EXPECT_EQ(adapter->submissions.load(), 2U);
 }
 
 TEST(Workers, UsageMetadataIsOptionalPartialAndFullyNormalized) {

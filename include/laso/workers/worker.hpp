@@ -1,8 +1,10 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <laso/core/async.hpp>
 #include <laso/core/registry.hpp>
+#include <memory>
 #include <optional>
 
 namespace laso {
@@ -57,6 +59,12 @@ public:
   bool timed_out = false;
 };
 
+class WorkerSubmissionCancelled final : public WorkerTransportError {
+public:
+  WorkerSubmissionCancelled()
+      : WorkerTransportError("Worker submission was cancelled before dispatch") {}
+};
+
 struct WorkerMetadata {
   std::string id, name, version, description, plugin, event_schema, event_source_id,
       status = "disabled";
@@ -76,6 +84,9 @@ struct WorkerRequest {
   Json input = Json::object(), output_schema = Json::object(), metadata = Json::object();
   std::vector<std::string> artifact_ids;
   bool durable_session = false;
+  // In-process only: supervised transports check this before crossing the
+  // external dispatch boundary. It is deliberately not serialized.
+  std::shared_ptr<std::atomic<bool>> cancellation_signal;
   std::optional<OpaqueProviderContinuation> continuation;
   std::optional<SessionContext> session_context;
 };
@@ -105,6 +116,7 @@ struct WorkerJob {
               submitted_at = timestamp(), started_at, completed_at, error, cancellation_error;
   unsigned attempt = 1;
   WorkerJobState state = WorkerJobState::Created;
+  WorkerJobState cancellation_target_state = WorkerJobState::Cancelled;
   WorkerFailureKind failure_kind = WorkerFailureKind::None;
   bool cancellation_requested = false, cancellation_acknowledged = false;
   Json request_metadata = Json::object(), result = Json::object(), result_metadata = Json::object();
