@@ -391,16 +391,17 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
       return value;
     }
     auto status = adapter->status(value.external_job_id);
-    bool final_tool_result_received = false;
+    bool final_result_received = false;
     // Several supervised workers acknowledge terminal state separately from
     // their final payload. Read the result only after status says Completed;
     // the terminal result is then committed with this durable WorkerJob.
+    const bool is_codex_tool_child = value.request_metadata.contains("parent_worker_job_id");
     if (status.state == WorkerJobState::Completed &&
-        value.request_metadata.contains("parent_worker_job_id")) {
+        (status.result.is_null() || is_codex_tool_child)) {
       const auto final_result = adapter->result(value.external_job_id);
       if (final_result.state == WorkerJobState::Completed && !final_result.result.is_null()) {
         status.result = final_result.result;
-        final_tool_result_received = true;
+        final_result_received = true;
       }
       if (final_result.metadata.is_object() && !final_result.metadata.empty()) {
         if (!status.metadata.is_object())
@@ -452,7 +453,7 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
     }
     if (worker_job_terminal(value.state) && value.completed_at.empty())
       value.completed_at = timestamp();
-    if (status.state == WorkerJobState::Completed && final_tool_result_received &&
+    if (status.state == WorkerJobState::Completed && final_result_received &&
         value.request_metadata.contains("parent_worker_job_id"))
       value.request_metadata["codex_tool_result_retrieved"] = true;
     persist(value);

@@ -337,7 +337,11 @@ private:
     int status = 0;
     if (::waitpid(pid, &status, WNOHANG) == pid) {
       mark_dead_locked();
-      throw WorkerTransportError("Worker process exited unexpectedly");
+      // The dead child was detected before this request was written, so no
+      // external submission could have been accepted. Restart the supervised
+      // process and let this first request proceed; failures after dispatch
+      // remain ambiguous and are still handled by request_response_locked().
+      start_locked(lock);
     }
   }
 
@@ -816,7 +820,10 @@ private:
       validate_response_metadata(response);
       WorkerStatus result;
       result.state = response_state(response);
-      result.result = response_payload(response);
+      // Preserve an omitted payload as null so WorkerManager can distinguish
+      // it from an explicitly empty object and fetch the final result after a
+      // worker reports terminal completion.
+      result.result = response.contains("payload") ? response_payload(response) : Json(nullptr);
       result.metadata = response.value("metadata", Json::object());
       result.continuation = response_continuation(response);
       result.artifacts = response.value("artifacts", std::vector<Json>{});

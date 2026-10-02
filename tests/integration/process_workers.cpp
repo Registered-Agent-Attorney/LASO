@@ -245,6 +245,25 @@ TEST(ProcessWorker, HandshakeAndSubmitStatusResultLifecycle) {
   EXPECT_EQ(transport.result(submission.external_job_id).result.at("worker"), "process-reference");
 }
 
+TEST(ProcessWorker, FetchesDurableResultWhenCompletedStatusOmitsPayload) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto transport = std::make_shared<ProcessWorkerTransport>("process", worker_config("split-result"));
+  registry.add("process", transport);
+  WorkerManager manager(storage, registry);
+
+  auto worker_request = request();
+  const auto submitted = manager.submit(worker_request);
+  ASSERT_EQ(submitted.state, WorkerJobState::Queued);
+  ASSERT_FALSE(submitted.external_job_id.empty());
+
+  const auto completed = manager.refresh(submitted.id);
+  EXPECT_EQ(completed.state, WorkerJobState::Completed);
+  EXPECT_TRUE(completed.result.at("ok"));
+  EXPECT_EQ(completed.result.at("worker"), "process-reference");
+  EXPECT_EQ(manager.job(submitted.id).result, completed.result);
+}
+
 TEST(ProcessWorker, PreservesWorkerRecoveryCapabilityFromHandshake) {
   ProcessWorkerTransport transport("process", worker_config("no-recovery"));
   ASSERT_NO_THROW(transport.start());
@@ -427,6 +446,31 @@ TEST(ProcessWorker, MalformedOversizedExitAndHangAreBoundedFailures) {
     EXPECT_THROW(transport.submit(request()), WorkerTransportError) << mode;
     EXPECT_FALSE(transport.metadata().healthy);
   }
+}
+
+TEST(ProcessWorker, RestartsExitedHealthyChildBeforeDispatchingNewRequest) {
+  TemporaryDirectory dir;
+  const auto marker = dir.path / "first-worker-exit-after-hello";
+  auto config = worker_config("exit-after-hello-once", 1000);
+  config.args = {"--mode", "exit-after-hello-once", "--exit-marker", marker.string()};
+  auto transport = std::make_shared<ProcessWorkerTransport>("process", std::move(config));
+  WorkerRegistry registry;
+  registry.add("process", transport);
+  InMemoryWorkerStorage storage;
+  WorkerManager manager(storage, registry);
+
+  ASSERT_NO_THROW(transport->start());
+  ASSERT_TRUE(std::filesystem::exists(marker));
+  ASSERT_TRUE(transport->metadata().healthy);
+
+  // The first child acknowledged hello and exited before the submit call. The
+  // adapter still has a healthy snapshot, but waitpid can prove the request
+  // has not been sent to that dead process.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const auto completed = manager.submit(request());
+  EXPECT_EQ(completed.state, WorkerJobState::Completed);
+  EXPECT_TRUE(completed.result.at("ok"));
+  EXPECT_TRUE(transport->metadata().healthy);
 }
 
 TEST(ProcessWorker, RequestTimeoutTerminatesOwnedProcessGroup) {

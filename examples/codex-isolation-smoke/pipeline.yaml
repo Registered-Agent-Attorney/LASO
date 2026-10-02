@@ -1,8 +1,8 @@
 laso: "1"
 name: codex-isolation-smoke
-version: 2
+version: 3
 max_steps: 32
-timeout_ms: 120000
+timeout_ms: 240000
 nodes:
   fork:
     type: parallel
@@ -12,7 +12,7 @@ nodes:
     worker: codex_agent_one
     task_type: coding
     capability: coding-agent
-    timeout_ms: 60000
+    timeout_ms: 180000
     max_attempts: 1
     instructions: >-
       This is a harmless reasoning-only LASO isolation check. Do not access
@@ -23,7 +23,7 @@ nodes:
     worker: codex_agent_two
     task_type: coding
     capability: coding-agent
-    timeout_ms: 60000
+    timeout_ms: 180000
     max_attempts: 1
     instructions: >-
       This is a harmless reasoning-only LASO isolation check. Do not access
@@ -34,7 +34,7 @@ nodes:
     worker: codex_agent_three
     task_type: coding
     capability: coding-agent
-    timeout_ms: 60000
+    timeout_ms: 180000
     max_attempts: 1
     instructions: >-
       This is a harmless reasoning-only LASO isolation check. Do not access

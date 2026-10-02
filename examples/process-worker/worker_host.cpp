@@ -128,6 +128,16 @@ int main(int argc, char **argv) {
         response(request, {{"ok", true}, {"metadata", Json::object()}}, 999);
         continue;
       }
+      const auto exit_marker = option(argc, argv, "--exit-marker", "");
+      const bool exit_after_hello = mode == "exit-after-hello-once" &&
+                                    !exit_marker.empty() &&
+                                    !std::filesystem::exists(exit_marker);
+      if (exit_after_hello) {
+        std::ofstream marker(exit_marker);
+        if (!marker)
+          return 66;
+        marker << "first worker exited after hello\n";
+      }
       const bool supports_recovery = mode != "no-recovery";
       response(request, {{"ok", true},
                          {"metadata", Json{{"name", "process-reference"},
@@ -137,6 +147,8 @@ int main(int argc, char **argv) {
                                            {"supports_status", true},
                                            {"supports_recovery", supports_recovery},
                                            {"supports_cancellation", true}}}});
+      if (exit_after_hello)
+        std::_Exit(73);
       continue;
     }
     if (mode == "malformed") {
@@ -169,7 +181,7 @@ int main(int argc, char **argv) {
                            {"state", "Failed"},
                            {"external_job_id", external},
                            {"error", "reference worker declared failure"}});
-      } else if (mode == "delay" || mode == "cancel") {
+      } else if (mode == "delay" || mode == "cancel" || mode == "split-result") {
         response(request, {{"ok", true}, {"state", "Queued"}, {"external_job_id", external}});
       } else {
         if (mode == "artifact")
@@ -219,9 +231,9 @@ int main(int argc, char **argv) {
     }
     ++found->second.status_checks;
     const bool done = mode != "delay" || found->second.status_checks > 1;
-    Json body{{"ok", true},
-              {"state", done ? "Completed" : "Running"},
-              {"payload", done ? terminal_result(mode) : Json::object()}};
+    Json body{{"ok", true}, {"state", done ? "Completed" : "Running"}};
+    if (done && !(mode == "split-result" && operation == "status"))
+      body["payload"] = terminal_result(mode);
     if (done && mode != "no-usage")
       body["usage"] = usage(mode);
     response(request, body);

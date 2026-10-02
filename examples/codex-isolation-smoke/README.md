@@ -1,9 +1,17 @@
 # Three isolated Codex workers
 
-`pipeline.yaml` runs three Codex tasks at one bounded parallel fork. Each node
-uses its own process-backed worker ID. A single Codex worker process holds one
-app-server thread at a time, so pointing several parallel nodes at the same
-worker can reuse one session and does not provide agent isolation.
+`pipeline.yaml` registers as `codex-isolation-smoke@3` and runs three Codex
+tasks at one bounded parallel fork. Each node uses its own process-backed
+worker ID. A single Codex worker process holds one app-server thread at a time,
+so pointing several parallel nodes at the same worker can reuse one session and
+does not provide agent isolation.
+
+Each worker node has a 180-second deadline, matching the documented worker
+request timeout below. The enclosing pipeline has a 240-second deadline so the
+parallel nodes can finish without the pipeline deadline cutting them off first.
+The `@3` version preserves the already registered `@2` definition; any operator
+allowlist that names approved pipeline IDs must be updated to authorize
+`codex-isolation-smoke@3` before using this longer-timeout acceptance pipeline.
 
 Configure the three workers as separate process entries. Keep the global job
 limit at three and each worker's job limit at one for a three-agent run:
