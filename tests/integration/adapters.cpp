@@ -4538,6 +4538,12 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   job.usage.provider = "fixture-canary-provider-metadata";
   job.usage.model = "fixture-canary-model-metadata";
   job.usage.executor = "fixture-canary-executor-metadata";
+  job.result_metadata = {{"provider", "openai"},
+                         {"model", "gpt-6-luna"},
+                         {"reasoningEffort", "high"},
+                         {"codex_session_id", "fixture-private-session-id"},
+                         {"codex_turn_id", "fixture-private-turn-id"},
+                         {"unsafe", "fixture-canary-provider-metadata"}};
   storage->commit({{RecordKind::WorkerJob, job.id, run.id, Json(job)}});
 
   Artifact artifact;
@@ -4646,6 +4652,12 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_FALSE(jobs.body[0].at("usage").contains("model"));
   EXPECT_FALSE(jobs.body[0].at("usage").contains("executor"));
   EXPECT_TRUE(jobs.body[0].at("result_present"));
+  EXPECT_EQ(jobs.body[0].at("provider"), "openai");
+  EXPECT_EQ(jobs.body[0].at("model"), "gpt-6-luna");
+  EXPECT_EQ(jobs.body[0].at("reasoning_effort"), "high");
+  EXPECT_FALSE(jobs.body[0].contains("codex_session_id"));
+  EXPECT_FALSE(jobs.body[0].contains("codex_turn_id"));
+  EXPECT_FALSE(jobs.body[0].contains("result_metadata"));
 
   const auto providers = api.handle("GET", "/api/v1/operator/providers", "");
   ASSERT_EQ(providers.status, 200U);
@@ -4666,6 +4678,8 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_EQ(all_responses.find("fixture-canary-provider-handle"), std::string::npos);
   EXPECT_EQ(all_responses.find("fixture-canary-worker-result"), std::string::npos);
   EXPECT_EQ(all_responses.find("fixture-canary-provider-metadata"), std::string::npos);
+  EXPECT_EQ(all_responses.find("fixture-private-session-id"), std::string::npos);
+  EXPECT_EQ(all_responses.find("fixture-private-turn-id"), std::string::npos);
   EXPECT_EQ(all_responses.find(cfg.postgres_dsn), std::string::npos);
 }
 TEST(Api, DurableOperatorAuditIsBoundedAuthorizedAndMetadataOnly) {

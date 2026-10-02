@@ -1101,24 +1101,46 @@ Json operator_worker_job_summary(const Json &value) {
     usage["total_tokens"] = *job.usage.total_tokens;
   if (job.usage.cost_units)
     usage["cost_units"] = *job.usage.cost_units;
-  return {{"id", job.id},
-          {"run_id", job.run_id},
-          {"node_id", job.node_id},
-          {"worker_id", job.worker_id},
-          {"attempt", job.attempt},
-          {"state", job.state},
-          {"failure_kind", job.failure_kind},
-          {"submitted_at", job.submitted_at},
-          {"started_at", job.started_at},
-          {"completed_at", job.completed_at},
-          {"external_job_id", job.external_job_id},
-          {"error", job.error},
-          {"cancellation_error", job.cancellation_error},
-          {"cancellation_requested", job.cancellation_requested},
-          {"cancellation_acknowledged", job.cancellation_acknowledged},
-          {"result_present", !job.result.is_null() && !job.result.empty()},
-          {"artifact_count", job.artifacts.size()},
-          {"usage", std::move(usage)}};
+  Json summary = {{"id", job.id},
+                  {"run_id", job.run_id},
+                  {"node_id", job.node_id},
+                  {"worker_id", job.worker_id},
+                  {"attempt", job.attempt},
+                  {"state", job.state},
+                  {"failure_kind", job.failure_kind},
+                  {"submitted_at", job.submitted_at},
+                  {"started_at", job.started_at},
+                  {"completed_at", job.completed_at},
+                  {"external_job_id", job.external_job_id},
+                  {"error", job.error},
+                  {"cancellation_error", job.cancellation_error},
+                  {"cancellation_requested", job.cancellation_requested},
+                  {"cancellation_acknowledged", job.cancellation_acknowledged},
+                  {"result_present", !job.result.is_null() && !job.result.empty()},
+                  {"artifact_count", job.artifacts.size()},
+                  {"usage", std::move(usage)}};
+  const auto add_safe_identifier = [&summary, &job](const char *source, const char *target,
+                                                    std::size_t maximum) {
+    const auto &metadata = job.result_metadata;
+    if (!metadata.is_object() || !metadata.contains(source) || !metadata.at(source).is_string())
+      return;
+    const auto value = metadata.at(source).get<std::string>();
+    if (value.empty() || value.size() > maximum)
+      return;
+    for (const unsigned char character : value) {
+      const bool alphanumeric = (character >= 'a' && character <= 'z') ||
+                                (character >= 'A' && character <= 'Z') ||
+                                (character >= '0' && character <= '9');
+      if (!alphanumeric && character != '-' && character != '_' && character != '.' &&
+          character != ':' && character != '/')
+        return;
+    }
+    summary[target] = value;
+  };
+  add_safe_identifier("provider", "provider", 64);
+  add_safe_identifier("model", "model", 128);
+  add_safe_identifier("reasoningEffort", "reasoning_effort", 32);
+  return summary;
 }
 Json operator_artifact_summary(const Json &value) {
   const auto artifact = value.get<Artifact>();
