@@ -433,7 +433,8 @@ TEST(Workers, CodexBrowserStatusToolFailsClosedWhenPolicyDeniesComputer) {
   registry.add("windows_computer", computer);
   PolicyEngine policy({{"windows_computer", PolicyDecision::Deny}}, false, {"windows_computer"});
   WorkerManager manager(*storage, registry, policy);
-  const auto parent = parent_codex_job();
+  auto parent = parent_codex_job();
+  parent.request_metadata["required_tool"] = "laso.browser_status";
   storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
 
   const auto response = manager.handle_tool_call(browser_status_call());
@@ -455,6 +456,7 @@ TEST(Workers, ParentCancellationCancelsDurableComputerToolChild) {
   WorkerManager manager(*storage, registry, policy);
   auto parent = parent_codex_job("parent-cancel-job");
   parent.external_job_id = "codex:fixture-thread";
+  parent.request_metadata["required_tool"] = "laso.browser_status";
   storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
 
   auto future = std::async(
