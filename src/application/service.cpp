@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
+#include <laso/scheduler/scheduler.hpp>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -1123,13 +1124,45 @@ Json operator_worker_job_summary(const Json &value) {
   // fields needed to correlate real Codex execution. General job/message APIs
   // redact these identifiers and paths.
   if (job.worker_id.starts_with("codex")) {
-    for (const auto *key : {"provider", "model", "codex_session_id", "codex_turn_id",
-                            "codex_turn_started_at", "codex_turn_completed_at"})
-      if (job.result_metadata.contains(key) && job.result_metadata.at(key).is_string())
-        summary[key] = job.result_metadata.at(key);
-    if (job.result_metadata.contains("reasoningEffort") &&
-        job.result_metadata.at("reasoningEffort").is_string())
-      summary["reasoning_effort"] = job.result_metadata.at("reasoningEffort");
+    const auto add_safe_identifier = [&summary, &job](const char *source, const char *target,
+                                                      std::size_t maximum, bool allow_slash) {
+      const auto &metadata = job.result_metadata;
+      if (!metadata.is_object() || !metadata.contains(source) || !metadata.at(source).is_string())
+        return;
+      const auto value = metadata.at(source).get<std::string>();
+      if (value.empty() || value.size() > maximum)
+        return;
+      for (const unsigned char character : value) {
+        const bool alphanumeric = (character >= 'a' && character <= 'z') ||
+                                  (character >= 'A' && character <= 'Z') ||
+                                  (character >= '0' && character <= '9');
+        if (!alphanumeric && character != '-' && character != '_' && character != '.' &&
+            character != ':' && (!allow_slash || character != '/'))
+          return;
+      }
+      summary[target] = value;
+    };
+    const auto add_safe_timestamp = [&summary, &job](const char *source, const char *target) {
+      const auto &metadata = job.result_metadata;
+      if (!metadata.is_object() || !metadata.contains(source) || !metadata.at(source).is_string())
+        return;
+      const auto value = metadata.at(source).get<std::string>();
+      if (value.size() != 24)
+        return;
+      try {
+        (void)parse_utc_timestamp(value);
+      } catch (const Error &) {
+        return;
+      }
+      summary[target] = value;
+    };
+    add_safe_identifier("provider", "provider", 64, true);
+    add_safe_identifier("model", "model", 128, true);
+    add_safe_identifier("reasoningEffort", "reasoning_effort", 32, true);
+    add_safe_identifier("codex_session_id", "codex_session_id", 128, false);
+    add_safe_identifier("codex_turn_id", "codex_turn_id", 128, false);
+    add_safe_timestamp("codex_turn_started_at", "codex_turn_started_at");
+    add_safe_timestamp("codex_turn_completed_at", "codex_turn_completed_at");
   }
   return summary;
 }

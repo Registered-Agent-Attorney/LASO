@@ -4532,12 +4532,20 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   job.id = "operator-worker-job";
   job.run_id = run.id;
   job.node_id = "operator-node";
-  job.worker_id = "operator-worker";
+  job.worker_id = "codex-fixture-worker";
   job.external_job_id = "fixture-canary-provider-handle";
   job.result = {{"text", "fixture-canary-worker-result"}};
   job.usage.provider = "fixture-canary-provider-metadata";
   job.usage.model = "fixture-canary-model-metadata";
   job.usage.executor = "fixture-canary-executor-metadata";
+  job.result_metadata = {{"provider", "openai"},
+                         {"model", std::string(129, 'm')},
+                         {"reasoningEffort", "high\ninvalid"},
+                         {"codex_session_id", std::string(129, 's')},
+                         {"codex_turn_id", "fixture-turn<script>"},
+                         {"codex_turn_started_at", "2026-99-99T99:99:99.999Z"},
+                         {"codex_turn_completed_at", std::string(25, 'x')},
+                         {"private_marker", "fixture-canary-private-provider-metadata"}};
   storage->commit({{RecordKind::WorkerJob, job.id, run.id, Json(job)}});
 
   Artifact artifact;
@@ -4646,6 +4654,10 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_FALSE(jobs.body[0].at("usage").contains("model"));
   EXPECT_FALSE(jobs.body[0].at("usage").contains("executor"));
   EXPECT_TRUE(jobs.body[0].at("result_present"));
+  EXPECT_EQ(jobs.body[0].value("provider", std::string{}), "openai");
+  for (const auto *key : {"model", "reasoning_effort", "codex_session_id", "codex_turn_id",
+                          "codex_turn_started_at", "codex_turn_completed_at", "result_metadata"})
+    EXPECT_FALSE(jobs.body[0].contains(key)) << key;
 
   const auto providers = api.handle("GET", "/api/v1/operator/providers", "");
   ASSERT_EQ(providers.status, 200U);
@@ -4666,6 +4678,8 @@ TEST(Api, OperatorViewsArePagedAndWithholdStoredPayloads) {
   EXPECT_EQ(all_responses.find("fixture-canary-provider-handle"), std::string::npos);
   EXPECT_EQ(all_responses.find("fixture-canary-worker-result"), std::string::npos);
   EXPECT_EQ(all_responses.find("fixture-canary-provider-metadata"), std::string::npos);
+  EXPECT_EQ(all_responses.find("fixture-canary-private-provider-metadata"), std::string::npos);
+  EXPECT_EQ(all_responses.find("fixture-turn<script>"), std::string::npos);
   EXPECT_EQ(all_responses.find(cfg.postgres_dsn), std::string::npos);
 }
 TEST(Api, DurableOperatorAuditIsBoundedAuthorizedAndMetadataOnly) {
