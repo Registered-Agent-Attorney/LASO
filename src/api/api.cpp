@@ -79,10 +79,10 @@ ApiResponse operator_audit_unavailable() {
 }
 void redact_codex_session_fields(Json &value) {
   if (value.is_object()) {
-    for (const auto *key : {"codex_session_id", "codex_turn_id", "codex_turn_started_at",
-                            "codex_turn_completed_at", "parent_codex_session_id",
-                            "parent_codex_turn_id", "session_id", "turn_id", "call_key",
-                            "project_dir"})
+    for (const auto *key :
+         {"codex_session_id", "codex_turn_id", "codex_turn_started_at", "codex_turn_completed_at",
+          "parent_codex_session_id", "parent_codex_turn_id", "session_id", "turn_id", "call_key",
+          "project_dir"})
       value.erase(key);
     for (auto it = value.begin(); it != value.end(); ++it)
       redact_codex_session_fields(it.value());
@@ -123,12 +123,10 @@ Json redact_worker_session_id(Json job) {
   return job;
 }
 Json redact_worker_result_message(Json message) {
-  if (!message.is_object() || !message.contains("metadata") ||
-      !message.at("metadata").is_object())
+  if (!message.is_object() || !message.contains("metadata") || !message.at("metadata").is_object())
     return message;
   auto &metadata = message["metadata"];
-  if (!is_codex_worker(metadata.value("worker_id", Json{})) ||
-      !metadata.contains("worker_job_id"))
+  if (!is_codex_worker(metadata.value("worker_id", Json{})) || !metadata.contains("worker_job_id"))
     return message;
   if (metadata.contains("worker_result_metadata"))
     redact_codex_session_fields(metadata["worker_result_metadata"]);

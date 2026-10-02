@@ -142,9 +142,9 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   asio::io_context io;
   Service service(io, codex_session_config(root.path));
   const auto pipeline = service.register_pipeline(standalone_worker_pipeline());
-  const auto run_id = service.start(
-      pipeline.at("id").get<std::string>(), Json::object(), "local", false, Json::object(),
-      Json{{"session_id", "application-session-marker"}});
+  const auto run_id =
+      service.start(pipeline.at("id").get<std::string>(), Json::object(), "local", false,
+                    Json::object(), Json{{"session_id", "application-session-marker"}});
   io.run();
 
   const auto run = service.get(RecordKind::Run, run_id).get<laso::Run>();
@@ -211,13 +211,11 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   EXPECT_EQ(public_runs.body.dump().find(root.path.string()), std::string::npos);
   EXPECT_NE(public_runs.body.dump().find("application-session-marker"), std::string::npos);
 
-  const auto operator_jobs =
-      api.handle("GET", "/api/v1/operator/worker-jobs?limit=100", "");
+  const auto operator_jobs = api.handle("GET", "/api/v1/operator/worker-jobs?limit=100", "");
   ASSERT_EQ(operator_jobs.status, 200U);
-  const auto operator_job = std::find_if(
-      operator_jobs.body.begin(), operator_jobs.body.end(), [&](const Json &job) {
-        return job.value("id", std::string{}) == job_id;
-      });
+  const auto operator_job =
+      std::find_if(operator_jobs.body.begin(), operator_jobs.body.end(),
+                   [&](const Json &job) { return job.value("id", std::string{}) == job_id; });
   ASSERT_NE(operator_job, operator_jobs.body.end());
   EXPECT_EQ(operator_job->value("provider", std::string{}), "openai");
   EXPECT_EQ(operator_job->value("model", std::string{}), "gpt-6-luna");
