@@ -389,8 +389,8 @@ TEST(Workers, CodexBrowserStatusToolDispatchesFixedComputerJobAndPersistsResult)
 
   auto invalid_child = manager.job(child.id);
   invalid_child.result["window_count"] = nullptr;
-  storage.commit({{RecordKind::WorkerJob, invalid_child.id, invalid_child.run_id,
-                   Json(invalid_child)}});
+  storage.commit(
+      {{RecordKind::WorkerJob, invalid_child.id, invalid_child.run_id, Json(invalid_child)}});
   EXPECT_FALSE(manager.has_completed_browser_status_tool_result(parent.id, parent.run_id));
 }
 

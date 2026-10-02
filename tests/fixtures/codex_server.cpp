@@ -21,9 +21,11 @@ void send(const Json &value) {
 }
 
 Json thread(const std::string &id, const std::string &cwd) {
-  return Json{
-      {"id", id}, {"cwd", cwd}, {"model", "gpt-6-luna"}, {"modelProvider", "openai"},
-      {"reasoningEffort", "high"}};
+  return Json{{"id", id},
+              {"cwd", cwd},
+              {"model", "gpt-6-luna"},
+              {"modelProvider", "openai"},
+              {"reasoningEffort", "high"}};
 }
 
 void repair_synthetic_project(const std::filesystem::path &root) {
@@ -116,20 +118,20 @@ int main(int argc, char **argv) {
           tools.size() == 1 ? tools.front().value("tools", Json::array()) : Json::array();
       const auto function = tool_functions.size() == 1 ? tool_functions.front() : Json::object();
       const auto input_schema = function.value("inputSchema", Json::object());
-      dynamic_tools_advertised = tools.size() == 1 &&
-                                 tools.front().value("type", std::string{}) == "namespace" &&
-                                 tools.front().value("name", std::string{}) == "laso" &&
-                                 tools.front().value("description", std::string{}).find(
-                                     "call exactly once with {}") != std::string::npos &&
-                                 function.value("type", std::string{}) == "function" &&
-                                 function.value("name", std::string{}) == "browser_status" &&
-                                 function.value("description", std::string{}).find(
-                                     "Do not claim it is unavailable") != std::string::npos &&
-                                 function.value("deferLoading", true) == false &&
-                                 input_schema.value("type", std::string{}) == "object" &&
-                                 input_schema.value("properties", Json::object()).empty() &&
-                                 input_schema.value("required", Json::array()).empty() &&
-                                 input_schema.value("additionalProperties", true) == false;
+      dynamic_tools_advertised =
+          tools.size() == 1 && tools.front().value("type", std::string{}) == "namespace" &&
+          tools.front().value("name", std::string{}) == "laso" &&
+          tools.front().value("description", std::string{}).find("call exactly once with {}") !=
+              std::string::npos &&
+          function.value("type", std::string{}) == "function" &&
+          function.value("name", std::string{}) == "browser_status" &&
+          function.value("description", std::string{}).find("Do not claim it is unavailable") !=
+              std::string::npos &&
+          function.value("deferLoading", true) == false &&
+          input_schema.value("type", std::string{}) == "object" &&
+          input_schema.value("properties", Json::object()).empty() &&
+          input_schema.value("required", Json::array()).empty() &&
+          input_schema.value("additionalProperties", true) == false;
       const auto sequence_file = std::filesystem::path(cwd) / ".laso-codex-fixture-sequence";
       {
         std::ifstream stored(sequence_file);

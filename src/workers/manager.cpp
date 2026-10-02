@@ -150,13 +150,12 @@ Json WorkerManager::worker(const std::string &id) const {
 }
 
 bool WorkerManager::has_completed_browser_status_tool_result(const std::string &parent_job_id,
-                                                              const std::string &run_id) const {
+                                                             const std::string &run_id) const {
   try {
     const auto parent = job(parent_job_id);
     if (parent.run_id != run_id || parent.node_id != "agent_three" ||
         parent.worker_id != "codex_agent_three" || parent.state != WorkerJobState::Completed ||
-        parent.request_metadata.value("required_tool", std::string{}) !=
-            "laso.browser_status" ||
+        parent.request_metadata.value("required_tool", std::string{}) != "laso.browser_status" ||
         parent.result_metadata.value("provider", std::string{}) != "openai" ||
         parent.result_metadata.value("model", std::string{}) != "gpt-6-luna" ||
         parent.result_metadata.value("reasoningEffort", std::string{}) != "high")
@@ -173,8 +172,7 @@ bool WorkerManager::has_completed_browser_status_tool_result(const std::string &
         call.value("worker_id", std::string{}) != "windows_computer" ||
         call.value("run_id", std::string{}) != run_id ||
         call.value("session_id", std::string{}) != session_id ||
-        call.value("turn_id", std::string{}) != turn_id ||
-        !call.value("result_retrieved", false))
+        call.value("turn_id", std::string{}) != turn_id || !call.value("result_retrieved", false))
       return false;
     const auto child_id = call.value("child_worker_job_id", std::string{});
     const auto call_key = call.value("call_key", std::string{});
@@ -905,8 +903,8 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     if (!request.parent_provider_session_id.empty())
       created.request_metadata["parent_codex_session_id"] = request.parent_provider_session_id;
     if (request.metadata.is_object()) {
-      for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id",
-                              "required_tool"})
+      for (const auto &key :
+           {"classification", "node_work_id", "node_work_attempt_id", "required_tool"})
         if (request.metadata.contains(key))
           created.request_metadata[key] = request.metadata.at(key);
     }
@@ -1135,8 +1133,8 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       if (!request.parent_provider_session_id.empty())
         created.request_metadata["parent_codex_session_id"] = request.parent_provider_session_id;
       if (request.metadata.is_object()) {
-        for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id",
-                                "required_tool"})
+        for (const auto &key :
+             {"classification", "node_work_id", "node_work_attempt_id", "required_tool"})
           if (request.metadata.contains(key))
             created.request_metadata[key] = request.metadata.at(key);
       }
@@ -1480,8 +1478,7 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   if (parent.worker_id != request.worker_id || worker_job_terminal(parent.state) ||
       parent.cancellation_requested)
     return failure("Parent worker job is no longer active");
-  if (parent.request_metadata.value("required_tool", std::string{}) !=
-      "laso.browser_status")
+  if (parent.request_metadata.value("required_tool", std::string{}) != "laso.browser_status")
     return failure("LASO browser status is not authorized for this worker job");
   WorkerMetadata parent_worker;
   try {

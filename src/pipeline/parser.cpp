@@ -234,9 +234,8 @@ void validate_pipeline(const PipelineDefinition &p, const std::set<std::string> 
       throw Error(ErrorCode::Validation, "Invalid worker binding");
     if (n.type == "worker" && n.capability.size() > 128)
       throw Error(ErrorCode::Validation, "Invalid worker capability");
-    if (!n.required_tool.empty() &&
-        (n.required_tool != "laso.browser_status" || n.type != "worker" ||
-         n.capability != "coding-agent"))
+    if (!n.required_tool.empty() && (n.required_tool != "laso.browser_status" ||
+                                     n.type != "worker" || n.capability != "coding-agent"))
       throw Error(ErrorCode::Validation, "Unsupported required worker tool");
     if (n.type == "subpipeline")
       (void)parse_pipeline_reference(n.binding);

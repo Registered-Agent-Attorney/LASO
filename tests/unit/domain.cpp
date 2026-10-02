@@ -108,8 +108,7 @@ edges:
   const auto version = legacy_v1.find("version: 2\n");
   ASSERT_NE(version, std::string::npos);
   legacy_v1.replace(version, std::string("version: 2\n").size(), "version: 1\n");
-  const auto legacy_required_tool =
-      legacy_v1.find("    required_tool: laso.browser_status\n");
+  const auto legacy_required_tool = legacy_v1.find("    required_tool: laso.browser_status\n");
   ASSERT_NE(legacy_required_tool, std::string::npos);
   legacy_v1.erase(legacy_required_tool,
                   std::string("    required_tool: laso.browser_status\n").size());

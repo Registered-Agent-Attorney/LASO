@@ -132,9 +132,10 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
       if (current.state == WorkerJobState::Completed) {
         if (required_tool_ == "laso.browser_status" &&
             !manager_->has_completed_browser_status_tool_result(current.id, request.run_id))
-          throw Error(ErrorCode::Execution,
-                      "Required LASO browser status tool result was not returned to this Codex turn",
-                      {{"worker_job_id", current.id}, {"worker_id", current.worker_id}});
+          throw Error(
+              ErrorCode::Execution,
+              "Required LASO browser status tool result was not returned to this Codex turn",
+              {{"worker_job_id", current.id}, {"worker_id", current.worker_id}});
         if (durable_session) {
           const auto continuation = manager_->continuation_candidate(current.id);
           if (!continuation || continuation->provider_id != worker_id_ ||
