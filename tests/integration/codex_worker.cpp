@@ -118,6 +118,10 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
   ASSERT_EQ(first.usage.output_tokens, std::optional<std::uint64_t>(7));
   ASSERT_EQ(first.usage.executor, "codex");
   EXPECT_EQ(first.metadata.value("codex_turn_id", ""), "fixture-turn");
+  EXPECT_EQ(first.metadata.value("provider", ""), "openai");
+  EXPECT_EQ(first.metadata.value("model", ""), "gpt-6-luna");
+  EXPECT_EQ(first.metadata.value("reasoningEffort", ""), "high");
+  EXPECT_EQ(first.metadata.value("codex_session_id", ""), "fixture-session");
   EXPECT_FALSE(first.metadata.value("codex_turn_started_at", "").empty());
   EXPECT_FALSE(first.metadata.value("codex_turn_completed_at", "").empty());
   const auto second = transport.submit(
@@ -149,9 +153,15 @@ TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
         {}};
   });
   ASSERT_NO_THROW(transport.start());
-  const auto result = transport.submit(
-      request(root.path, "codex-browser-status-turn", "request-browser-status", {}, "agent-one"));
+  auto tool_request =
+      request(root.path, "codex-browser-status-turn", "request-browser-status", {}, "agent-one");
+  tool_request.metadata["required_tool"] = "laso.browser_status";
+  const auto result = transport.submit(tool_request);
   ASSERT_EQ(result.state, WorkerJobState::Completed) << result.error;
+  EXPECT_EQ(result.metadata.value("provider", ""), "openai");
+  EXPECT_EQ(result.metadata.value("model", ""), "gpt-6-luna");
+  EXPECT_EQ(result.metadata.value("reasoningEffort", ""), "high");
+  EXPECT_EQ(result.metadata.value("codex_session_id", ""), "fixture-session");
   EXPECT_EQ(calls.load(), 1U);
   EXPECT_NE(result.result.value("summary", std::string{}).find("BROWSER_STATUS_RESULT:"),
             std::string::npos);
@@ -291,10 +301,15 @@ TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
     EXPECT_EQ(completed.worker_id, std::string("codex-") + agent_ids[index]);
     EXPECT_EQ(completed.result.value("summary", ""), markers[index]);
     EXPECT_EQ(completed.result_metadata.value("codex_turn_id", ""), "fixture-turn");
+    EXPECT_EQ(completed.result_metadata.value("provider", ""), "openai");
+    EXPECT_EQ(completed.result_metadata.value("model", ""), "gpt-6-luna");
+    EXPECT_EQ(completed.result_metadata.value("reasoningEffort", ""), "high");
     EXPECT_FALSE(completed.result_metadata.value("codex_turn_started_at", "").empty());
     EXPECT_FALSE(completed.result_metadata.value("codex_turn_completed_at", "").empty());
     const auto provider_session = completed.result.value("session_id", "");
     ASSERT_FALSE(provider_session.empty());
+    EXPECT_EQ(completed.result_metadata.value("codex_session_id", ""), provider_session);
+    EXPECT_EQ(Json(completed).at("result_metadata").at("reasoningEffort"), "high");
     provider_sessions.insert(provider_session);
     const auto started_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(started_at[index].time_since_epoch())
@@ -337,7 +352,8 @@ TEST(CodexWorker, DurableSessionContinuationSurvivesAdapterRestartAndContextGene
     provider_session = state.at("thread_id").get<std::string>();
     EXPECT_EQ(first.result.value("summary", ""), "FIXTURE-COMPLETE");
     EXPECT_FALSE(first.result.contains("session_id"));
-    EXPECT_FALSE(first.metadata.contains("codex_session_id"));
+    EXPECT_EQ(first.metadata.value("codex_session_id", ""), provider_session);
+    EXPECT_EQ(first.metadata.value("reasoningEffort", ""), "high");
     continuation = first.continuation;
 
     const auto second = transport.submit(durable_request(

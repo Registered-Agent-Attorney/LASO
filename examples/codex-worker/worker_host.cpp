@@ -372,18 +372,26 @@ public:
       throw WorkerTransportError("Codex worker is unavailable");
     const auto payload = request.value("payload", Json::object());
     const auto metadata = payload.value("metadata", Json::object());
+    const auto required_tool = metadata.value("required_tool", std::string{});
+    if (!required_tool.empty() && required_tool != "laso.browser_status")
+      throw CodexFailure("LASO worker request requires an unsupported dynamic tool");
     const auto directory = canonical_project(metadata.value("project_dir", std::string{}));
     const bool durable_session = payload.value("durable_session", false);
     durable_session_id_ = durable_session ? payload.value("durable_session_id", std::string{})
                                          : std::string{};
     if (durable_session && durable_session_id_.empty())
       throw CodexFailure("Durable Codex request has no LASO session identity");
+    if (durable_session && required_tool == "laso.browser_status")
+      throw CodexFailure("Required LASO browser status calls need a fresh non-durable Codex turn");
     const auto session_context = payload.value("session_context", Json::object());
     const auto context_generation =
         session_context.is_object() ? session_context.value("generation_id", std::string{})
                                     : std::string{};
     const auto requested_session = metadata.value("codex_session_id", std::string{});
-    if (durable_session) {
+    if (required_tool == "laso.browser_status") {
+      reset_thread();
+      start_thread(directory, metadata);
+    } else if (durable_session) {
       std::string previous_session;
       std::string previous_generation;
       if (payload.contains("continuation") && !payload.at("continuation").is_null()) {
@@ -509,15 +517,16 @@ public:
                                              : "codex:" + session_id_;
     result.state = WorkerJobState::Completed;
     result.usage = usage_;
-    result.metadata = {{"model", model_}, {"provider", provider_}};
+    result.metadata = {{"model", model_}, {"provider", provider_},
+                       {"reasoningEffort", reasoning_effort_}};
     result.metadata["codex_turn_id"] = turn_id;
+    result.metadata["codex_session_id"] = session_id_;
     if (!turn_started_at.empty())
       result.metadata["codex_turn_started_at"] = turn_started_at;
     if (!turn_completed_at.empty())
       result.metadata["codex_turn_completed_at"] = turn_completed_at;
     result.result = {{"summary", summary_}};
     if (!durable_session) {
-      result.metadata["codex_session_id"] = session_id_;
       result.metadata["project_dir"] = project_dir_;
       result.result["session_id"] = session_id_;
       result.result["project_dir"] = project_dir_;
@@ -571,7 +580,7 @@ private:
   bool healthy_ = false;
   std::uint64_t rpc_id_ = 0, interaction_id_ = 0;
   std::string worker_id_, session_id_, durable_session_id_, project_dir_, active_turn_id_,
-      active_job_id_, active_deadline_, model_, provider_, summary_;
+      active_job_id_, active_deadline_, model_, provider_, reasoning_effort_, summary_;
   WorkerUsage usage_;
   Json actions_ = Json::array();
 
@@ -593,6 +602,7 @@ private:
     active_job_id_.clear();
     model_.clear();
     provider_.clear();
+    reasoning_effort_.clear();
   }
 
   std::filesystem::path canonical_project(const std::string &value) const {
@@ -790,8 +800,9 @@ private:
 
   void start_thread(const std::filesystem::path &directory, const Json &metadata) {
     Json params{{"cwd", directory.string()}, {"approvalPolicy", "on-request"},
-                {"sandbox", "workspace-write"}, {"ephemeral", false},
-                {"dynamicTools", Json::array({browser_status_tool_spec()})}};
+                {"sandbox", "workspace-write"}, {"ephemeral", false}};
+    if (metadata.value("required_tool", std::string{}) == "laso.browser_status")
+      params["dynamicTools"] = Json::array({browser_status_tool_spec()});
     if (metadata.contains("model") && metadata.at("model").is_string())
       params["model"] = metadata.at("model");
     const auto response = call("thread/start", params, {});
@@ -802,15 +813,27 @@ private:
     project_dir_ = directory.string();
     model_ = response.value("model", thread.value("model", std::string{}));
     provider_ = response.value("modelProvider", thread.value("modelProvider", std::string{}));
+    reasoning_effort_ =
+        response.value("reasoningEffort", thread.value("reasoningEffort", std::string{}));
+    if (provider_ != "openai" || model_ != "gpt-6-luna" || reasoning_effort_ != "high")
+      throw CodexFailure("LASO requires openai/gpt-6-luna with high reasoning");
   }
 
   static Json browser_status_tool_spec() {
     return Json{{"type", "namespace"},
                 {"name", "laso"},
-                {"description", "Read-only LASO Computer status"},
+                {"description",
+                 "Required acceptance tool: call exactly once with {} and use the returned "
+                 "status verbatim. Read-only LASO Computer status."},
                 {"tools", Json::array({Json{{"type", "function"},
                                            {"name", "browser_status"},
-                                           {"description", "Read browser visibility status on the configured Windows Computer."},
+                                           {"description",
+                                            "You must call this exactly once with empty JSON "
+                                            "arguments {} for the LASO full-system acceptance. "
+                                            "Do not claim it is unavailable; wait for and use "
+                                            "its returned result verbatim. Read-only status "
+                                            "from the configured Windows Computer."},
+                                           {"deferLoading", false},
                                            {"inputSchema", Json{{"type", "object"},
                                                                  {"properties", Json::object()},
                                                                  {"required", Json::array()},
@@ -836,6 +859,10 @@ private:
       throw CodexFailure("Resumed Codex session is outside an allowed root");
     model_ = response.value("model", thread.value("model", std::string{}));
     provider_ = response.value("modelProvider", thread.value("modelProvider", std::string{}));
+    reasoning_effort_ =
+        response.value("reasoningEffort", thread.value("reasoningEffort", std::string{}));
+    if (provider_ != "openai" || model_ != "gpt-6-luna" || reasoning_effort_ != "high")
+      throw CodexFailure("LASO requires openai/gpt-6-luna with high reasoning");
   }
 
   void record_usage(const Json &params) {

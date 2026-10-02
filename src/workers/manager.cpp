@@ -33,6 +33,16 @@ bool browser_tool_child_needs_result(const WorkerJob &job) {
          !job.request_metadata.value("codex_tool_result_retrieved", false);
 }
 
+bool valid_browser_status_result(const Json &result) {
+  if (!result.is_object() || !result.contains("window_count") ||
+      !result.contains("browser_status") || !result.at("browser_status").is_object() ||
+      result.at("browser_status").empty())
+    return false;
+  const auto &count = result.at("window_count");
+  return count.is_number_unsigned() ||
+         (count.is_number_integer() && count.get<std::int64_t>() >= 0);
+}
+
 std::string bounded_error(const std::string &value) {
   if (value.size() <= 512)
     return value;
@@ -137,6 +147,54 @@ Json WorkerManager::workers() const {
 
 Json WorkerManager::worker(const std::string &id) const {
   return registry_.get(id)->metadata();
+}
+
+bool WorkerManager::has_completed_browser_status_tool_result(const std::string &parent_job_id,
+                                                              const std::string &run_id) const {
+  try {
+    const auto parent = job(parent_job_id);
+    if (parent.run_id != run_id || parent.node_id != "agent_three" ||
+        parent.worker_id != "codex_agent_three" || parent.state != WorkerJobState::Completed ||
+        parent.request_metadata.value("required_tool", std::string{}) !=
+            "laso.browser_status" ||
+        parent.result_metadata.value("provider", std::string{}) != "openai" ||
+        parent.result_metadata.value("model", std::string{}) != "gpt-6-luna" ||
+        parent.result_metadata.value("reasoningEffort", std::string{}) != "high")
+      return false;
+    const auto session_id = parent.result_metadata.value("codex_session_id", std::string{});
+    const auto turn_id = parent.result_metadata.value("codex_turn_id", std::string{});
+    if (session_id.empty() || turn_id.empty())
+      return false;
+    const auto calls = parent.request_metadata.value("codex_browser_status_calls", Json::array());
+    if (!calls.is_array() || calls.size() != 1)
+      return false;
+    const auto &call = calls.front();
+    if (call.value("tool", std::string{}) != "laso.browser_status" ||
+        call.value("worker_id", std::string{}) != "windows_computer" ||
+        call.value("run_id", std::string{}) != run_id ||
+        call.value("session_id", std::string{}) != session_id ||
+        call.value("turn_id", std::string{}) != turn_id ||
+        !call.value("result_retrieved", false))
+      return false;
+    const auto child_id = call.value("child_worker_job_id", std::string{});
+    const auto call_key = call.value("call_key", std::string{});
+    if (child_id.empty() || call_key.empty())
+      return false;
+    const auto child = job(child_id);
+    return child.run_id == run_id && child.worker_id == "windows_computer" &&
+           child.node_id == "agent_three.browser_status" &&
+           child.state == WorkerJobState::Completed &&
+           child.request_metadata.value("task_type", std::string{}) == "browser.status" &&
+           child.request_metadata.value("capability", std::string{}) == "browser.status" &&
+           child.request_metadata.value("parent_worker_job_id", std::string{}) == parent.id &&
+           child.request_metadata.value("parent_tool_call_id", std::string{}) == call_key &&
+           child.request_metadata.value("parent_codex_session_id", std::string{}) == session_id &&
+           child.request_metadata.value("parent_codex_turn_id", std::string{}) == turn_id &&
+           child.request_metadata.value("codex_tool_result_retrieved", false) &&
+           valid_browser_status_result(child.result);
+  } catch (...) {
+    return false;
+  }
 }
 
 bool WorkerManager::can_execute(const std::string &worker_id, const std::string &capability) const {
@@ -847,7 +905,8 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     if (!request.parent_provider_session_id.empty())
       created.request_metadata["parent_codex_session_id"] = request.parent_provider_session_id;
     if (request.metadata.is_object()) {
-      for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id"})
+      for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id",
+                              "required_tool"})
         if (request.metadata.contains(key))
           created.request_metadata[key] = request.metadata.at(key);
     }
@@ -1076,7 +1135,8 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
       if (!request.parent_provider_session_id.empty())
         created.request_metadata["parent_codex_session_id"] = request.parent_provider_session_id;
       if (request.metadata.is_object()) {
-        for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id"})
+        for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id",
+                                "required_tool"})
           if (request.metadata.contains(key))
             created.request_metadata[key] = request.metadata.at(key);
       }
@@ -1420,6 +1480,9 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   if (parent.worker_id != request.worker_id || worker_job_terminal(parent.state) ||
       parent.cancellation_requested)
     return failure("Parent worker job is no longer active");
+  if (parent.request_metadata.value("required_tool", std::string{}) !=
+      "laso.browser_status")
+    return failure("LASO browser status is not authorized for this worker job");
   WorkerMetadata parent_worker;
   try {
     parent_worker = registry_.get(parent.worker_id)->metadata();
@@ -1460,6 +1523,16 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
     return failure("Parent worker job deadline has expired");
 
   const auto call_key = request.turn_id + ":" + request.request_id;
+  if (parent.request_metadata.contains("codex_browser_status_calls")) {
+    const auto &calls = parent.request_metadata.at("codex_browser_status_calls");
+    if (!calls.is_array())
+      return failure("Stored browser status call evidence is invalid");
+    const auto duplicate = std::any_of(calls.begin(), calls.end(), [&](const Json &entry) {
+      return entry.is_object() && entry.value("call_key", std::string{}) == call_key;
+    });
+    if (!duplicate && !calls.empty())
+      return failure("This Codex turn already used its browser status tool call");
+  }
   const auto idempotency_key = "codex-browser-status:" + parent.id + ":" + call_key;
   if (idempotency_key.size() > 512)
     return failure("LASO browser status call identity exceeds its limit");
@@ -1521,9 +1594,46 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
       return failure("Unable to refresh Windows Computer browser status");
     }
     if (worker_job_terminal(child.state)) {
-      if (child.state == WorkerJobState::Completed && child.result.is_object() &&
-          !child.result.empty())
+      if (child.state == WorkerJobState::Completed && valid_browser_status_result(child.result)) {
+        try {
+          std::lock_guard state_lock(state_mutex_);
+          parent = job(request.worker_job_id);
+          child = job(child.id);
+          if (parent.worker_id != request.worker_id || parent.run_id != child.run_id ||
+              parent.cancellation_requested || worker_job_terminal(parent.state) ||
+              child.worker_id != "windows_computer" || child.state != WorkerJobState::Completed ||
+              !child.request_metadata.value("codex_tool_result_retrieved", false) ||
+              !valid_browser_status_result(child.result))
+            return failure("Browser status result lost its parent or child correlation");
+          Json attestation{{"child_worker_job_id", child.id},
+                           {"tool", "laso.browser_status"},
+                           {"worker_id", child.worker_id},
+                           {"run_id", parent.run_id},
+                           {"call_key", call_key},
+                           {"session_id", request.session_id},
+                           {"turn_id", request.turn_id},
+                           {"result_retrieved", true}};
+          if (!parent.request_metadata.contains("codex_browser_status_calls") ||
+              parent.request_metadata["codex_browser_status_calls"].is_null())
+            parent.request_metadata["codex_browser_status_calls"] = Json::array();
+          auto &calls = parent.request_metadata["codex_browser_status_calls"];
+          if (!calls.is_array() || calls.size() >= 16)
+            return failure("Browser status call evidence exceeded its limit");
+          const auto existing = std::find_if(calls.begin(), calls.end(), [&](const Json &entry) {
+            return entry.is_object() && entry.value("call_key", std::string{}) == call_key;
+          });
+          if (existing != calls.end()) {
+            if (*existing != attestation)
+              return failure("Browser status call evidence conflicts with an earlier result");
+          } else {
+            calls.push_back(std::move(attestation));
+          }
+          persist(parent);
+        } catch (...) {
+          return failure("Unable to persist browser status result correlation");
+        }
         return {request.request_id, true, child.result, {}};
+      }
       return failure(child.error.empty() ? "Windows Computer browser status failed" : child.error);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -155,7 +155,7 @@ PipelineDefinition parse_pipeline(const std::string &text,
                "prompt",       "field",         "value",          "condition",  "reason",
                "join",         "max_attempts",  "retry_delay_ms", "timeout_ms", "max_iterations",
                "input_schema", "output_schema", "schema",         "worker",     "task_type",
-               "capability",   "instructions"});
+               "capability",   "instructions",  "required_tool"});
       NodeDefinition d;
       d.id = item.first.as<std::string>();
       d.type = str(n, "type");
@@ -184,6 +184,7 @@ PipelineDefinition parse_pipeline(const std::string &text,
       d.task_type = str(n, "task_type");
       d.capability = str(n, "capability");
       d.instructions = str(n, "instructions", d.prompt);
+      d.required_tool = str(n, "required_tool");
       d.value = detail::yaml_value(n["value"]);
       d.retry.max_attempts = number(n, "max_attempts", 1, 1, 10);
       d.retry.delay = Milliseconds(number(n, "retry_delay_ms", 0, 0, 60000));
@@ -233,6 +234,10 @@ void validate_pipeline(const PipelineDefinition &p, const std::set<std::string> 
       throw Error(ErrorCode::Validation, "Invalid worker binding");
     if (n.type == "worker" && n.capability.size() > 128)
       throw Error(ErrorCode::Validation, "Invalid worker capability");
+    if (!n.required_tool.empty() &&
+        (n.required_tool != "laso.browser_status" || n.type != "worker" ||
+         n.capability != "coding-agent"))
+      throw Error(ErrorCode::Validation, "Unsupported required worker tool");
     if (n.type == "subpipeline")
       (void)parse_pipeline_reference(n.binding);
     if (n.type == "loop" && n.max_iterations == 0)
@@ -242,6 +247,14 @@ void validate_pipeline(const PipelineDefinition &p, const std::set<std::string> 
     if ((n.type == "router" || n.type == "validator") && n.field.empty() &&
         (n.type != "validator" || n.schema.empty()))
       throw Error(ErrorCode::Validation, "Router/validator requires a top-level field");
+  }
+  if (p.name == "codex-full-system" && p.version >= 2) {
+    const auto agent = p.nodes.find("agent_three");
+    if (agent == p.nodes.end() || agent->second.type != "worker" ||
+        agent->second.binding != "codex_agent_three" ||
+        agent->second.required_tool != "laso.browser_status")
+      throw Error(ErrorCode::Validation,
+                  "Full-system acceptance requires agent_three browser status evidence");
   }
   std::map<std::string, std::vector<const EdgeDefinition *>> outgoing;
   std::set<std::pair<std::string, std::string>> paths;
