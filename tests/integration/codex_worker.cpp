@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -68,6 +69,78 @@ private:
     return Json{
         {"window_count", 1},
         {"browser_status", Json{{"browser_visible", true}, {"active_browser_visible", true}}}};
+  }
+};
+
+class BlockingMetadataWorker final : public WorkerTransport {
+public:
+  WorkerMetadata metadata() const override {
+    std::unique_lock lock(mutex_);
+    metadata_entered_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [&] { return release_metadata_; });
+    WorkerMetadata result;
+    result.id = "deadline-worker";
+    result.name = result.id;
+    result.capabilities = {"coding-agent"};
+    result.enabled = true;
+    result.healthy = true;
+    result.status = "healthy";
+    result.supports_status = true;
+    result.supports_recovery = true;
+    result.supports_cancellation = true;
+    return result;
+  }
+  WorkerSubmission submit(const WorkerRequest &) override {
+    ++submissions_;
+    WorkerSubmission result;
+    result.external_job_id = "deadline-worker-job";
+    result.state = WorkerJobState::Completed;
+    result.result = Json{{"ok", true}};
+    return result;
+  }
+  WorkerStatus status(const std::string &) override {
+    WorkerStatus result;
+    result.state = WorkerJobState::Completed;
+    result.result = Json{{"ok", true}};
+    return result;
+  }
+  WorkerStatus result(const std::string &) override {
+    return status(std::string{});
+  }
+  bool cancel(const std::string &) override {
+    return true;
+  }
+  void start() override {}
+  void stop() noexcept override {}
+  bool wait_for_metadata(std::chrono::milliseconds timeout) const {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, timeout, [&] { return metadata_entered_; });
+  }
+  void release_metadata() {
+    {
+      std::lock_guard lock(mutex_);
+      release_metadata_ = true;
+    }
+    changed_.notify_all();
+  }
+  unsigned submissions() const {
+    return submissions_.load();
+  }
+
+private:
+  mutable std::mutex mutex_;
+  mutable std::condition_variable changed_;
+  mutable bool metadata_entered_ = false;
+  bool release_metadata_ = false;
+  std::atomic<unsigned> submissions_{0};
+};
+
+struct ProcessTransportStopGuard {
+  std::shared_ptr<ProcessWorkerTransport> transport;
+  ~ProcessTransportStopGuard() {
+    if (transport)
+      transport->stop();
   }
 };
 
@@ -330,9 +403,10 @@ TEST(CodexWorker, WorkerNodePropagatesFutureDeadlineAndDispatchesBrowserStatus) 
   PolicyEngine policy({}, false, {"windows_computer"});
   auto manager = std::make_shared<WorkerManager>(*storage, registry, policy);
 
-  ASSERT_NO_THROW(agent->start());
   std::mutex evidence_mutex;
   std::string emitted_deadline;
+  ProcessTransportStopGuard stop_agent{agent};
+  ASSERT_NO_THROW(agent->start());
   agent->set_tool_call_handler([&](const WorkerToolCallRequest &request) {
     {
       std::lock_guard lock(evidence_mutex);
@@ -379,7 +453,43 @@ TEST(CodexWorker, WorkerNodePropagatesFutureDeadlineAndDispatchesBrowserStatus) 
   EXPECT_EQ(child.worker_id, "windows_computer");
   EXPECT_EQ(child.state, WorkerJobState::Completed);
   EXPECT_TRUE(child.request_metadata.value("codex_tool_result_retrieved", false));
-  agent->stop();
+}
+
+TEST(CodexWorker, WorkerNodeRejectsDeadlineExpiredDuringMetadataBeforeSubmission) {
+  TemporaryDirectory root;
+  auto storage = make_storage(root.path / "state.db");
+  WorkerRegistry registry;
+  auto worker = std::make_shared<BlockingMetadataWorker>();
+  registry.add("deadline-worker", worker);
+  PolicyEngine policy;
+  auto manager = std::make_shared<WorkerManager>(*storage, registry, policy);
+  WorkerNode node(manager, "deadline-worker", "coding", "deadline regression", "coding-agent", "",
+                  "");
+  ExecutionContext context;
+  context.run_id = "codex-expired-worker-deadline-run";
+  context.pipeline_id = "codex-expired-worker-deadline";
+  context.node_id = "agent";
+  context.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  Message input;
+
+  asio::io_context io;
+  auto pending = asio::co_spawn(io, node.execute(context, input), asio::use_future);
+  std::jthread runner([&] { io.run(); });
+  const auto metadata_entered = worker->wait_for_metadata(std::chrono::seconds(5));
+  if (metadata_entered)
+    context.deadline = std::chrono::steady_clock::time_point{};
+  worker->release_metadata();
+  runner.join();
+
+  ASSERT_TRUE(metadata_entered);
+  try {
+    (void)pending.get();
+    FAIL() << "Expired worker deadline was submitted";
+  } catch (const Error &error) {
+    EXPECT_EQ(error.code, ErrorCode::Timeout);
+  }
+  EXPECT_EQ(worker->submissions(), 0U);
+  EXPECT_TRUE(manager->jobs(context.run_id).empty());
 }
 
 TEST(CodexWorker, RejectsDynamicToolCallForDifferentActiveTurn) {

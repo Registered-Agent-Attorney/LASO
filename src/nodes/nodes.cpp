@@ -78,6 +78,11 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
       std::find(metadata.capabilities.begin(), metadata.capabilities.end(), "session-context") ==
           metadata.capabilities.end())
     throw Error(ErrorCode::Provider, "Worker does not support session context generations");
+  const auto remaining_duration = c.deadline - std::chrono::steady_clock::now();
+  if (remaining_duration <= std::chrono::steady_clock::duration::zero())
+    throw Error(ErrorCode::Timeout, "Worker job exceeded its deadline");
+  const auto remaining = std::chrono::duration_cast<Milliseconds>(remaining_duration);
+  const auto timeout_ms = std::max<std::int64_t>(remaining.count(), 1);
   WorkerRequest request;
   request.worker_id = worker_id_;
   request.capability = capability_;
@@ -89,9 +94,6 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
   request.run_id = c.run_id;
   request.node_id = c.node_id;
   request.attempt = c.attempt;
-  const auto remaining =
-      std::chrono::duration_cast<Milliseconds>(c.deadline - std::chrono::steady_clock::now());
-  const auto timeout_ms = std::max<std::int64_t>(remaining.count(), 1);
   request.timeout_ms = static_cast<std::uint64_t>(timeout_ms);
   request.deadline =
       format_utc_timestamp(std::chrono::system_clock::now() + Milliseconds{timeout_ms});
@@ -127,6 +129,7 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
     // durable id is known before submission, which also lets cancellation
     // interrupt an in-flight local process-group submission.
     current.id = manager_->job_id_for(request.idempotency_key);
+    c.check();
     current = manager_->submit_async(request);
     if (c.worker_job_started)
       c.worker_job_started(current.id);
