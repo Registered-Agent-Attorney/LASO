@@ -221,7 +221,9 @@ public:
   virtual void set_tool_call_handler(WorkerToolCallHandler) {}
   // Whether start() can restore the transport process after it fails. This is
   // independent of supports_recovery, which controls replay of provider jobs.
-  virtual bool supports_transport_restart() const { return false; }
+  virtual bool supports_transport_restart() const {
+    return false;
+  }
   virtual void start() = 0;
   virtual void stop() noexcept = 0;
 };

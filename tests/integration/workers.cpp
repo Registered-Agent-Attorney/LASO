@@ -1549,14 +1549,22 @@ TEST(Workers, RestartableRemoteTransportReconnectsBeforeReconcilingWithoutReplay
       result.state = WorkerJobState::Unknown;
       return result;
     }
-    WorkerStatus result(const std::string &) override { return {}; }
-    bool cancel(const std::string &) override { return true; }
-    bool supports_transport_restart() const override { return true; }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &) override {
+      return true;
+    }
+    bool supports_transport_restart() const override {
+      return true;
+    }
     void start() override {
       ++starts;
       online = true;
     }
-    void stop() noexcept override { online = false; }
+    void stop() noexcept override {
+      online = false;
+    }
 
     std::atomic<bool> online{true};
     std::atomic<unsigned> starts{0};

@@ -148,8 +148,7 @@ bool WorkerManager::can_execute(const std::string &worker_id, const std::string 
     const auto adapter = registry_.get(candidate);
     const auto metadata = adapter->metadata();
     const auto recoverable = metadata.status == "failed" &&
-                            (metadata.supports_recovery ||
-                             adapter->supports_transport_restart());
+                             (metadata.supports_recovery || adapter->supports_transport_restart());
     if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
         (metadata.status != "healthy" && !recoverable))
       continue;
@@ -167,8 +166,7 @@ Json WorkerManager::distributed_capabilities() const {
     const auto adapter = registry_.get(candidate);
     const auto metadata = adapter->metadata();
     const auto recoverable = metadata.status == "failed" &&
-                            (metadata.supports_recovery ||
-                             adapter->supports_transport_restart());
+                             (metadata.supports_recovery || adapter->supports_transport_restart());
     if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
         (metadata.status != "healthy" && !recoverable))
       continue;
@@ -711,9 +709,8 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     return finalize_pending_cancellation(existing->id);
 
   auto metadata = adapter->metadata();
-  if ((metadata.supports_recovery || adapter->supports_transport_restart()) &&
-      !metadata.healthy && metadata.status != "disabled" &&
-      metadata.status != "unavailable") {
+  if ((metadata.supports_recovery || adapter->supports_transport_restart()) && !metadata.healthy &&
+      metadata.status != "disabled" && metadata.status != "unavailable") {
     try {
       // A supervised transport may have torn down its process group while a
       // previous submission was timing out.  Re-establish ownership before
@@ -725,8 +722,7 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     }
   }
   const auto recoverable = metadata.status == "failed" &&
-                           (metadata.supports_recovery ||
-                            adapter->supports_transport_restart());
+                           (metadata.supports_recovery || adapter->supports_transport_restart());
   if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "unavailable" ||
       (!metadata.healthy && !recoverable))
     throw Error(ErrorCode::Capacity, "Worker is unavailable");
@@ -749,7 +745,7 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
       if (const auto signal = submission_cancellation_signals_.find(existing->id);
           signal != submission_cancellation_signals_.end())
         retry_request.cancellation_signal = signal->second;
-      }
+    }
     try {
       const auto submission = adapter->submit(retry_request);
       return record_submission(durable_id, submission, adapter);
@@ -870,7 +866,7 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     auto outbound = request;
     outbound.job_id = created.id;
     {
-    std::lock_guard state_lock(state_mutex_);
+      std::lock_guard state_lock(state_mutex_);
       if (const auto signal = submission_cancellation_signals_.find(created.id);
           signal != submission_cancellation_signals_.end())
         outbound.cancellation_signal = signal->second;
@@ -977,9 +973,8 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
   std::lock_guard submit_lock(*worker_submit_mutex);
   const auto adapter = registry_.get(worker_id);
   auto metadata = adapter->metadata();
-  if ((metadata.supports_recovery || adapter->supports_transport_restart()) &&
-      !metadata.healthy && metadata.status != "disabled" &&
-      metadata.status != "unavailable") {
+  if ((metadata.supports_recovery || adapter->supports_transport_restart()) && !metadata.healthy &&
+      metadata.status != "disabled" && metadata.status != "unavailable") {
     try {
       adapter->start();
       metadata = adapter->metadata();
@@ -987,8 +982,7 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
     }
   }
   const auto recoverable = metadata.status == "failed" &&
-                           (metadata.supports_recovery ||
-                            adapter->supports_transport_restart());
+                           (metadata.supports_recovery || adapter->supports_transport_restart());
   if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "unavailable" ||
       (!metadata.healthy && !recoverable))
     throw Error(ErrorCode::Capacity, "Worker is unavailable");
@@ -1138,8 +1132,8 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
         }
       }
       {
-      std::lock_guard async_lock(async_mutex_);
-      async_submissions_.erase(id);
+        std::lock_guard async_lock(async_mutex_);
+        async_submissions_.erase(id);
       }
       {
         std::lock_guard state_lock(state_mutex_);
