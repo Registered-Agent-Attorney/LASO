@@ -93,8 +93,8 @@ int main(int argc, char **argv) {
     if (!request.contains("id"))
       continue;
     if (method == "initialize") {
-      const auto capabilities = request.value("params", Json::object())
-                                    .value("capabilities", Json::object());
+      const auto capabilities =
+          request.value("params", Json::object()).value("capabilities", Json::object());
       if (capabilities.value("experimentalApi", false) != true)
         return 75;
       send({{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"server", "fixture"}}}});
@@ -110,9 +110,8 @@ int main(int argc, char **argv) {
       const auto params = request.value("params", Json::object());
       const auto cwd = params.value("cwd", std::string{});
       const auto tools = params.value("dynamicTools", Json::array());
-      const auto tool_functions = tools.size() == 1
-                                      ? tools.front().value("tools", Json::array())
-                                      : Json::array();
+      const auto tool_functions =
+          tools.size() == 1 ? tools.front().value("tools", Json::array()) : Json::array();
       const auto function = tool_functions.size() == 1 ? tool_functions.front() : Json::object();
       const auto input_schema = function.value("inputSchema", Json::object());
       dynamic_tools_advertised = tools.size() == 1 &&
@@ -216,13 +215,13 @@ int main(int argc, char **argv) {
         send(Json{{"jsonrpc", "2.0"},
                   {"id", 101},
                   {"method", "item/tool/call"},
-                  {"params", Json{{"threadId", active_thread},
-                                  {"turnId", mode == "mismatched-tool-turn" ? "other-turn"
-                                                                             : "fixture-turn"},
-                                  {"callId", "fixture-browser-status-call"},
-                                  {"namespace", "laso"},
-                                  {"tool", "browser_status"},
-                                  {"arguments", Json::object()}}}});
+                  {"params",
+                   Json{{"threadId", active_thread},
+                        {"turnId", mode == "mismatched-tool-turn" ? "other-turn" : "fixture-turn"},
+                        {"callId", "fixture-browser-status-call"},
+                        {"namespace", "laso"},
+                        {"tool", "browser_status"},
+                        {"arguments", Json::object()}}}});
         std::string tool_response_line;
         if (!std::getline(std::cin, tool_response_line))
           return 77;

@@ -142,10 +142,10 @@ TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
     EXPECT_EQ(request.tool, "browser_status");
     EXPECT_EQ(request.arguments, Json::object());
     return WorkerToolCallResponse{
-        request.request_id, true,
+        request.request_id,
+        true,
         Json{{"window_count", 1},
-             {"browser_status", Json{{"browser_visible", true},
-                                      {"active_browser_visible", true}}}},
+             {"browser_status", Json{{"browser_visible", true}, {"active_browser_visible", true}}}},
         {}};
   });
   ASSERT_NO_THROW(transport.start());
@@ -161,8 +161,8 @@ TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
 
 TEST(CodexWorker, RejectsDynamicToolCallForDifferentActiveTurn) {
   TemporaryDirectory root;
-  ProcessWorkerTransport transport(
-      "agent-one", codex_config(root.path, "mismatched-tool-turn", "agent-one"));
+  ProcessWorkerTransport transport("agent-one",
+                                   codex_config(root.path, "mismatched-tool-turn", "agent-one"));
   std::atomic<unsigned> dispatches{0};
   transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
     ++dispatches;

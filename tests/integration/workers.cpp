@@ -121,9 +121,9 @@ public:
     WorkerStatus result;
     result.state = cancelled_ ? WorkerJobState::Cancelled : WorkerJobState::Completed;
     if (!cancelled_)
-      result.result = Json{{"window_count", 1},
-                           {"browser_status", Json{{"browser_visible", true},
-                                                    {"active_browser_visible", true}}}};
+      result.result = Json{
+          {"window_count", 1},
+          {"browser_status", Json{{"browser_visible", true}, {"active_browser_visible", true}}}};
     return result;
   }
   bool cancel(const std::string &) override {
@@ -140,7 +140,9 @@ public:
     std::lock_guard lock(mutex_);
     return request_;
   }
-  unsigned result_calls() const { return result_calls_; }
+  unsigned result_calls() const {
+    return result_calls_;
+  }
 
 private:
   bool wait_for_cancel_;
@@ -166,10 +168,18 @@ public:
     result.supports_cancellation = true;
     return result;
   }
-  WorkerSubmission submit(const WorkerRequest &) override { return {}; }
-  WorkerStatus status(const std::string &) override { return {}; }
-  WorkerStatus result(const std::string &) override { return {}; }
-  bool cancel(const std::string &) override { return true; }
+  WorkerSubmission submit(const WorkerRequest &) override {
+    return {};
+  }
+  WorkerStatus status(const std::string &) override {
+    return {};
+  }
+  WorkerStatus result(const std::string &) override {
+    return {};
+  }
+  bool cancel(const std::string &) override {
+    return true;
+  }
   void start() override {}
   void stop() noexcept override {}
 };
@@ -275,8 +285,8 @@ TEST(Workers, CodexBrowserStatusToolDispatchesFixedComputerJobAndPersistsResult)
   EXPECT_EQ(response.result.at("window_count"), 1);
   ASSERT_TRUE(computer->wait_for_submission(std::chrono::seconds(1)));
 
-  const auto child_key = "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" +
-                         request.request_id;
+  const auto child_key =
+      "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" + request.request_id;
   const auto child = manager.job(manager.job_id_for(child_key));
   EXPECT_EQ(child.state, WorkerJobState::Completed);
   EXPECT_EQ(child.worker_id, "windows_computer");
@@ -329,8 +339,7 @@ TEST(Workers, CodexBrowserStatusToolFailsClosedWhenPolicyDeniesComputer) {
   registry.add("agent-one", std::make_shared<ParentAgentWorker>());
   auto computer = std::make_shared<BrowserStatusWorker>();
   registry.add("windows_computer", computer);
-  PolicyEngine policy({{"windows_computer", PolicyDecision::Deny}}, false,
-                      {"windows_computer"});
+  PolicyEngine policy({{"windows_computer", PolicyDecision::Deny}}, false, {"windows_computer"});
   WorkerManager manager(*storage, registry, policy);
   const auto parent = parent_codex_job();
   storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
@@ -356,13 +365,12 @@ TEST(Workers, ParentCancellationCancelsDurableComputerToolChild) {
   parent.external_job_id = "codex:fixture-thread";
   storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
 
-  auto future = std::async(std::launch::async, [&] {
-    return manager.handle_tool_call(browser_status_call(parent.id));
-  });
+  auto future = std::async(
+      std::launch::async, [&] { return manager.handle_tool_call(browser_status_call(parent.id)); });
   ASSERT_TRUE(computer->wait_for_submission(std::chrono::seconds(2)));
   const auto request = browser_status_call(parent.id);
-  const auto child_key = "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" +
-                         request.request_id;
+  const auto child_key =
+      "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" + request.request_id;
   const auto child_id = manager.job_id_for(child_key);
   const auto submit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (manager.job(child_id).external_job_id.empty() &&

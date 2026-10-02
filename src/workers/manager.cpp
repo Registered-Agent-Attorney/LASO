@@ -29,8 +29,7 @@ bool bounded_identifier(const std::string &value, std::size_t maximum) {
 
 bool browser_tool_child_needs_result(const WorkerJob &job) {
   return job.state == WorkerJobState::Completed &&
-         job.request_metadata.contains("parent_worker_job_id") &&
-         !job.external_job_id.empty() &&
+         job.request_metadata.contains("parent_worker_job_id") && !job.external_job_id.empty() &&
          !job.request_metadata.value("codex_tool_result_retrieved", false);
 }
 
@@ -362,7 +361,8 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
   // process-backed transports serialize status with submit, so doing so would
   // block the runtime/lease loop behind provider startup or execution.
   const auto terminal_result_missing = browser_tool_child_needs_result(value);
-  if ((worker_job_terminal(value.state) && !terminal_result_missing) || value.external_job_id.empty())
+  if ((worker_job_terminal(value.state) && !terminal_result_missing) ||
+      value.external_job_id.empty())
     return value;
   auto adapter = registry_.get(value.worker_id);
   const auto metadata = adapter->metadata();
@@ -1098,8 +1098,9 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
       value.state = WorkerJobState::Cancelled;
       value.completed_at = timestamp();
     } else {
-      value.cancellation_error =
-          cancellation_error.empty() ? "Worker did not acknowledge cancellation" : cancellation_error;
+      value.cancellation_error = cancellation_error.empty()
+                                     ? "Worker did not acknowledge cancellation"
+                                     : cancellation_error;
     }
     persist(value);
     state_changed_.notify_all();
@@ -1261,8 +1262,10 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   if (!bounded_identifier(request.worker_job_id, max_job_id_bytes) ||
       !bounded_identifier(request.request_id, process_protocol::max_interaction_id_bytes) ||
       !bounded_identifier(request.worker_id, process_protocol::max_interaction_id_bytes) ||
-      request.session_id.empty() || request.session_id.size() > process_protocol::max_interaction_id_bytes ||
-      request.turn_id.empty() || request.turn_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.session_id.empty() ||
+      request.session_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.turn_id.empty() ||
+      request.turn_id.size() > process_protocol::max_interaction_id_bytes ||
       request.deadline.size() > 64 || !request.arguments.is_object() ||
       request.arguments != Json::object())
     return failure("Invalid LASO browser status request");
@@ -1304,9 +1307,10 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
     return failure("Windows Computer browser status is unavailable");
   if (!policy_)
     return failure("LASO policy is unavailable");
-  const auto classification = parent.request_metadata.value("classification", std::string{"public"});
-  const auto decision = policy_->evaluate({
-      "", parent.node_id, computer_id, classification, computer.remote, computer.remote, true});
+  const auto classification =
+      parent.request_metadata.value("classification", std::string{"public"});
+  const auto decision = policy_->evaluate(
+      {"", parent.node_id, computer_id, classification, computer.remote, computer.remote, true});
   if (decision.decision != PolicyDecision::Allow)
     return failure("Windows Computer browser status is not allowed by policy");
 
@@ -1331,8 +1335,8 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   child_request.deadline = deadline;
   child_request.timeout_ms = 10000;
   child_request.run_id = parent.run_id;
-  child_request.node_id = parent.node_id.empty() ? "codex.browser_status"
-                                                  : parent.node_id + ".browser_status";
+  child_request.node_id =
+      parent.node_id.empty() ? "codex.browser_status" : parent.node_id + ".browser_status";
   child_request.parent_worker_job_id = parent.id;
   child_request.parent_tool_call_id = call_key;
   child_request.parent_tool_turn_id = request.turn_id;

@@ -220,9 +220,8 @@ struct ProcessWorkerTransport::Impl {
     publish_metadata_locked();
     try {
       spawn_locked();
-      const auto response =
-          request_locked(lock, "hello", "", "", Json{{"client", "laso"}},
-                         config.startup_timeout_ms);
+      const auto response = request_locked(lock, "hello", "", "", Json{{"client", "laso"}},
+                                           config.startup_timeout_ms);
       if (!response.value("ok", false))
         throw WorkerTransportError("Worker hello was rejected");
       if (!response.contains("metadata") || !response.at("metadata").is_object() ||
@@ -288,9 +287,9 @@ struct ProcessWorkerTransport::Impl {
       payload["continuation"] = continuation_json(*request.continuation);
     if (request.session_context)
       payload["session_context"] = session_context_json(*request.session_context);
-    return parse_submission_locked(request.job_id, request_response_locked(
-                                                       lock, "submit", request.job_id, "", payload,
-                                                       timeout_ms));
+    return parse_submission_locked(
+        request.job_id,
+        request_response_locked(lock, "submit", request.job_id, "", payload, timeout_ms));
   }
 
   WorkerStatus status(const std::string &external_job_id) {
@@ -648,9 +647,8 @@ private:
   }
 
   Json request_locked(std::unique_lock<std::mutex> &lock, const std::string &operation,
-                      const std::string &job_id,
-                      const std::string &external_job_id, const Json &payload,
-                      std::uint64_t timeout_ms) {
+                      const std::string &job_id, const std::string &external_job_id,
+                      const Json &payload, std::uint64_t timeout_ms) {
     const auto request_id = "req-" + std::to_string(++request_number);
     Json request{{"protocol_version", process_protocol::version},
                  {"request_id", request_id},
@@ -773,10 +771,9 @@ private:
     }
   }
 
-  Json request_response_locked(std::unique_lock<std::mutex> &lock,
-                               const std::string &operation, const std::string &job_id,
-                               const std::string &external_job_id, const Json &payload,
-                               std::uint64_t timeout_ms) {
+  Json request_response_locked(std::unique_lock<std::mutex> &lock, const std::string &operation,
+                               const std::string &job_id, const std::string &external_job_id,
+                               const Json &payload, std::uint64_t timeout_ms) {
     try {
       return request_locked(lock, operation, job_id, external_job_id, payload, timeout_ms);
     } catch (...) {
