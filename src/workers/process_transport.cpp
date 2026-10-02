@@ -147,21 +147,31 @@ bool process_group_alive(pid_t process_group) noexcept {
   return errno == EPERM;
 }
 
-void terminate_process_group(pid_t process_group) noexcept {
+bool terminate_process_group(pid_t process_group) noexcept {
   if (process_group <= 0)
-    return;
+    return true;
+  const auto group_gone = [process_group] {
+    // The group leader is our direct child. Reap it while probing so a dead
+    // worker does not look alive solely because it is still a zombie awaiting
+    // the submit thread's normal cleanup path.
+    int status = 0;
+    while (::waitpid(process_group, &status, WNOHANG) < 0 && errno == EINTR) {
+    }
+    return !process_group_alive(process_group);
+  };
   if (::kill(-process_group, SIGTERM) < 0 && errno != ESRCH)
     (void)::kill(process_group, SIGTERM);
   const auto graceful_deadline = Clock::now() + std::chrono::milliseconds(500);
-  while (process_group_alive(process_group) && Clock::now() < graceful_deadline)
+  while (!group_gone() && Clock::now() < graceful_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  if (!process_group_alive(process_group))
-    return;
+  if (group_gone())
+    return true;
   if (::kill(-process_group, SIGKILL) < 0 && errno != ESRCH)
     (void)::kill(process_group, SIGKILL);
   const auto force_deadline = Clock::now() + std::chrono::milliseconds(500);
-  while (process_group_alive(process_group) && Clock::now() < force_deadline)
+  while (!group_gone() && Clock::now() < force_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  return group_gone();
 }
 } // namespace
 
@@ -332,8 +342,7 @@ struct ProcessWorkerTransport::Impl {
     const auto process_group = owned_process_group.load(std::memory_order_acquire);
     if (process_group <= 0)
       return false;
-    terminate_process_group(process_group);
-    return true;
+    return terminate_process_group(process_group);
   }
 
   void stop() noexcept {
