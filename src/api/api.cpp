@@ -93,8 +93,9 @@ void redact_codex_session_fields(Json &value) {
 }
 void redact_codex_external_handles(Json &value) {
   if (value.is_object()) {
-    const auto external_id = value.value("external_job_id", std::string{});
-    if (external_id.starts_with("codex:"))
+    const auto external_id = value.find("external_job_id");
+    if (external_id != value.end() && external_id->is_string() &&
+        external_id->get_ref<const std::string &>().starts_with("codex:"))
       value.erase("external_job_id");
     for (auto it = value.begin(); it != value.end(); ++it)
       redact_codex_external_handles(it.value());
