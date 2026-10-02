@@ -527,6 +527,7 @@ public:
       result.metadata["codex_turn_completed_at"] = turn_completed_at;
     result.result = {{"summary", summary_}};
     if (!durable_session) {
+      result.metadata["codex_session_id"] = session_id_;
       result.metadata["project_dir"] = project_dir_;
       result.result["session_id"] = session_id_;
       result.result["project_dir"] = project_dir_;
