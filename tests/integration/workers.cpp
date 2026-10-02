@@ -424,6 +424,28 @@ TEST(Workers, CodexBrowserStatusToolRejectsOtherToolsAndArguments) {
   EXPECT_EQ(manager.jobs(parent.run_id).size(), 1U);
 }
 
+TEST(Workers, CodexBrowserStatusToolRejectsExpiredParentDeadlineBeforeDispatch) {
+  TemporaryDirectory directory;
+  auto storage = make_storage(directory.path / "state.db");
+  WorkerRegistry registry;
+  registry.add("agent-one", std::make_shared<ParentAgentWorker>());
+  auto computer = std::make_shared<BrowserStatusWorker>();
+  registry.add("windows_computer", computer);
+  PolicyEngine policy({}, false, {"windows_computer"});
+  WorkerManager manager(*storage, registry, policy);
+  auto parent = parent_codex_job();
+  parent.request_metadata["required_tool"] = "laso.browser_status";
+  storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+
+  auto request = browser_status_call();
+  request.deadline = "2000-01-01T00:00:00.000Z";
+  const auto response = manager.handle_tool_call(request);
+  EXPECT_FALSE(response.success);
+  EXPECT_EQ(response.error, "Parent worker job deadline has expired");
+  EXPECT_EQ(manager.jobs(parent.run_id).size(), 1U);
+  EXPECT_FALSE(computer->wait_for_submission(std::chrono::milliseconds(50)));
+}
+
 TEST(Workers, CodexBrowserStatusToolFailsClosedWhenPolicyDeniesComputer) {
   TemporaryDirectory directory;
   auto storage = make_storage(directory.path / "state.db");

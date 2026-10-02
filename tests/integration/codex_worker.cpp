@@ -8,8 +8,13 @@
 #include <fstream>
 #include <iostream>
 #include <laso/api/api.hpp>
+#include <laso/nodes/node.hpp>
+#include <laso/scheduler/scheduler.hpp>
+#include <laso/workers/manager.hpp>
 #include <laso/workers/process_transport.hpp>
+#include <laso/workers/worker.hpp>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -18,6 +23,54 @@ using namespace laso;
 using namespace laso::test;
 
 namespace {
+class BrowserStatusFixtureWorker final : public WorkerTransport {
+public:
+  WorkerMetadata metadata() const override {
+    WorkerMetadata result;
+    result.id = "windows_computer";
+    result.name = result.id;
+    result.capabilities = {"browser.status"};
+    result.remote = true;
+    result.enabled = true;
+    result.healthy = true;
+    result.status = "healthy";
+    result.supports_status = true;
+    result.supports_recovery = true;
+    result.supports_cancellation = true;
+    return result;
+  }
+  WorkerSubmission submit(const WorkerRequest &) override {
+    WorkerSubmission submission;
+    submission.external_job_id = "computer-browser-status-fixture";
+    submission.state = WorkerJobState::Completed;
+    return submission;
+  }
+  WorkerStatus status(const std::string &) override {
+    WorkerStatus result;
+    result.state = WorkerJobState::Completed;
+    result.result = browser_result();
+    return result;
+  }
+  WorkerStatus result(const std::string &) override {
+    WorkerStatus result;
+    result.state = WorkerJobState::Completed;
+    result.result = browser_result();
+    return result;
+  }
+  bool cancel(const std::string &) override {
+    return true;
+  }
+  void start() override {}
+  void stop() noexcept override {}
+
+private:
+  static Json browser_result() {
+    return Json{
+        {"window_count", 1},
+        {"browser_status", Json{{"browser_visible", true}, {"active_browser_visible", true}}}};
+  }
+};
+
 ProcessWorkerConfig codex_config(const std::filesystem::path &root,
                                  const std::string &fixture_mode = "success",
                                  const std::string &worker_id = "codex") {
@@ -263,6 +316,70 @@ TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
             std::string::npos);
   EXPECT_NE(result.result.value("summary", std::string{}).find("window_count"), std::string::npos);
   transport.stop();
+}
+
+TEST(CodexWorker, WorkerNodePropagatesFutureDeadlineAndDispatchesBrowserStatus) {
+  TemporaryDirectory root;
+  auto storage = make_storage(root.path / "state.db");
+  WorkerRegistry registry;
+  auto agent = std::make_shared<ProcessWorkerTransport>(
+      "codex_agent_three", codex_config(root.path, "success", "codex_agent_three"));
+  auto computer = std::make_shared<BrowserStatusFixtureWorker>();
+  registry.add("codex_agent_three", agent);
+  registry.add("windows_computer", computer);
+  PolicyEngine policy({}, false, {"windows_computer"});
+  auto manager = std::make_shared<WorkerManager>(*storage, registry, policy);
+
+  ASSERT_NO_THROW(agent->start());
+  std::mutex evidence_mutex;
+  std::string emitted_deadline;
+  agent->set_tool_call_handler([&](const WorkerToolCallRequest &request) {
+    {
+      std::lock_guard lock(evidence_mutex);
+      emitted_deadline = request.deadline;
+    }
+    return manager->handle_tool_call(request);
+  });
+
+  WorkerNode node(manager, "codex_agent_three", "coding", "request-browser-status", "coding-agent",
+                  "", "laso.browser_status");
+  ExecutionContext context;
+  context.run_id = "codex-browser-status-deadline-run";
+  context.pipeline_id = "codex-browser-status-deadline";
+  context.node_id = "agent_three";
+  context.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  Message input;
+  input.metadata["project_dir"] = root.path.string();
+
+  asio::io_context io;
+  auto pending = asio::co_spawn(io, node.execute(context, input), asio::use_future);
+  io.run();
+  NodeResult completed;
+  ASSERT_NO_THROW(completed = pending.get());
+
+  const auto parent_id = completed.message.metadata.at("worker_job_id").get<std::string>();
+  const auto parent = manager->job(parent_id);
+  ASSERT_EQ(parent.state, WorkerJobState::Completed);
+  EXPECT_EQ(parent.worker_id, "codex_agent_three");
+  EXPECT_TRUE(manager->has_completed_browser_status_tool_result(parent_id, context.run_id));
+  EXPECT_FALSE(completed.message.payload.value("summary", std::string{}).empty());
+
+  {
+    std::lock_guard lock(evidence_mutex);
+    ASSERT_FALSE(emitted_deadline.empty());
+    const auto deadline = parse_utc_timestamp(emitted_deadline);
+    EXPECT_GT(deadline, std::chrono::system_clock::now());
+    EXPECT_EQ(parent.request_metadata.value("deadline", std::string{}), emitted_deadline);
+  }
+
+  const auto calls = parent.request_metadata.at("codex_browser_status_calls");
+  ASSERT_EQ(calls.size(), 1U);
+  const auto child_id = calls.front().at("child_worker_job_id").get<std::string>();
+  const auto child = manager->job(child_id);
+  EXPECT_EQ(child.worker_id, "windows_computer");
+  EXPECT_EQ(child.state, WorkerJobState::Completed);
+  EXPECT_TRUE(child.request_metadata.value("codex_tool_result_retrieved", false));
+  agent->stop();
 }
 
 TEST(CodexWorker, RejectsDynamicToolCallForDifferentActiveTurn) {

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <laso/core/config.hpp>
 #include <laso/nodes/node.hpp>
+#include <laso/scheduler/scheduler.hpp>
 
 namespace laso {
 Task<NodeResult> FunctionNode::execute(ExecutionContext &c, const Message &input) {
@@ -85,13 +86,15 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
   request.idempotency_key = c.run_id + ":" + c.node_id + ":" + std::to_string(c.attempt);
   if (!c.distributed_attempt_id.empty())
     request.idempotency_key += ":" + c.distributed_attempt_id;
-  request.deadline = timestamp();
   request.run_id = c.run_id;
   request.node_id = c.node_id;
   request.attempt = c.attempt;
   const auto remaining =
       std::chrono::duration_cast<Milliseconds>(c.deadline - std::chrono::steady_clock::now());
-  request.timeout_ms = static_cast<std::uint64_t>(std::max<std::int64_t>(remaining.count(), 1));
+  const auto timeout_ms = std::max<std::int64_t>(remaining.count(), 1);
+  request.timeout_ms = static_cast<std::uint64_t>(timeout_ms);
+  request.deadline =
+      format_utc_timestamp(std::chrono::system_clock::now() + Milliseconds{timeout_ms});
   request.durable_session = durable_session;
   if (durable_session) {
     request.durable_session_id = c.session_id;
