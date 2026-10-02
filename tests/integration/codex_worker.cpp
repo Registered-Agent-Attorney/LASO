@@ -103,6 +103,12 @@ std::string session_worker_pipeline() {
          "    task_type: coding\n    instructions: Continue the LASO conversation.\n"
          "edges:\n  - {from: input, to: agent}\n  - {from: agent, to: output}\n";
 }
+std::string standalone_worker_pipeline() {
+  return "laso: '1'\nname: codex-public-projection\nversion: 1\n"
+         "nodes:\n  agent:\n    type: worker\n    worker: codex\n"
+         "    task_type: coding\n    instructions: Complete the harmless fixture task.\n"
+         "edges:\n  - {from: input, to: agent}\n  - {from: agent, to: output}\n";
+}
 } // namespace
 
 TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
@@ -129,6 +135,62 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
   EXPECT_EQ(second.state, WorkerJobState::Completed);
   EXPECT_EQ(second.result.value("summary", ""), "FIXTURE-CONTINUED");
   transport.stop();
+}
+
+TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence) {
+  TemporaryDirectory root;
+  asio::io_context io;
+  Service service(io, codex_session_config(root.path));
+  const auto pipeline = service.register_pipeline(standalone_worker_pipeline());
+  const auto run_id = service.start(pipeline.at("id").get<std::string>(), Json::object());
+  io.run();
+
+  const auto run = service.get(RecordKind::Run, run_id).get<Run>();
+  ASSERT_EQ(run.state, RunState::Completed);
+  const auto jobs = service.worker_jobs(run_id);
+  ASSERT_EQ(jobs.size(), 1U);
+  const auto job_id = jobs.front().at("id").get<std::string>();
+
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto public_job = api.handle("GET", "/api/v1/worker-jobs/" + job_id, "");
+  ASSERT_EQ(public_job.status, 200U);
+  const auto public_job_json = public_job.body.dump();
+  EXPECT_EQ(public_job_json.find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_job_json.find(root.path.string()), std::string::npos);
+  EXPECT_FALSE(public_job.body.contains("external_job_id"));
+  const auto public_jobs = api.handle("GET", "/api/v1/worker-jobs?limit=100", "");
+  ASSERT_EQ(public_jobs.status, 200U);
+  EXPECT_EQ(public_jobs.body.dump().find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_jobs.body.dump().find(root.path.string()), std::string::npos);
+
+  const auto public_messages = api.handle("GET", "/api/v1/runs/" + run_id + "/messages", "");
+  ASSERT_EQ(public_messages.status, 200U);
+  ASSERT_FALSE(public_messages.body.empty());
+  const auto worker_message = std::find_if(
+      public_messages.body.begin(), public_messages.body.end(), [](const Json &message) {
+        return message.value("metadata", Json::object()).contains("worker_job_id");
+      });
+  ASSERT_NE(worker_message, public_messages.body.end());
+  const auto public_messages_json = public_messages.body.dump();
+  EXPECT_EQ(public_messages_json.find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_messages_json.find(root.path.string()), std::string::npos);
+
+  const auto operator_jobs =
+      api.handle("GET", "/api/v1/operator/worker-jobs?limit=100", "");
+  ASSERT_EQ(operator_jobs.status, 200U);
+  const auto operator_job = std::find_if(
+      operator_jobs.body.begin(), operator_jobs.body.end(), [&](const Json &job) {
+        return job.value("id", std::string{}) == job_id;
+      });
+  ASSERT_NE(operator_job, operator_jobs.body.end());
+  EXPECT_EQ(operator_job->value("provider", std::string{}), "openai");
+  EXPECT_EQ(operator_job->value("model", std::string{}), "gpt-6-luna");
+  EXPECT_EQ(operator_job->value("reasoning_effort", std::string{}), "high");
+  EXPECT_EQ(operator_job->value("codex_session_id", std::string{}), "fixture-session");
+  EXPECT_EQ(operator_job->value("codex_turn_id", std::string{}), "fixture-turn");
+  EXPECT_FALSE(operator_job->value("codex_turn_started_at", std::string{}).empty());
+  EXPECT_FALSE(operator_job->value("codex_turn_completed_at", std::string{}).empty());
 }
 
 TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {

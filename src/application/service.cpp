@@ -1101,24 +1101,37 @@ Json operator_worker_job_summary(const Json &value) {
     usage["total_tokens"] = *job.usage.total_tokens;
   if (job.usage.cost_units)
     usage["cost_units"] = *job.usage.cost_units;
-  return {{"id", job.id},
-          {"run_id", job.run_id},
-          {"node_id", job.node_id},
-          {"worker_id", job.worker_id},
-          {"attempt", job.attempt},
-          {"state", job.state},
-          {"failure_kind", job.failure_kind},
-          {"submitted_at", job.submitted_at},
-          {"started_at", job.started_at},
-          {"completed_at", job.completed_at},
-          {"external_job_id", job.external_job_id},
-          {"error", job.error},
-          {"cancellation_error", job.cancellation_error},
-          {"cancellation_requested", job.cancellation_requested},
-          {"cancellation_acknowledged", job.cancellation_acknowledged},
-          {"result_present", !job.result.is_null() && !job.result.empty()},
-          {"artifact_count", job.artifacts.size()},
-          {"usage", std::move(usage)}};
+  Json summary{{"id", job.id},
+               {"run_id", job.run_id},
+               {"node_id", job.node_id},
+               {"worker_id", job.worker_id},
+               {"attempt", job.attempt},
+               {"state", job.state},
+               {"failure_kind", job.failure_kind},
+               {"submitted_at", job.submitted_at},
+               {"started_at", job.started_at},
+               {"completed_at", job.completed_at},
+               {"external_job_id", job.external_job_id},
+               {"error", job.error},
+               {"cancellation_error", job.cancellation_error},
+               {"cancellation_requested", job.cancellation_requested},
+               {"cancellation_acknowledged", job.cancellation_acknowledged},
+               {"result_present", !job.result.is_null() && !job.result.empty()},
+               {"artifact_count", job.artifacts.size()},
+               {"usage", std::move(usage)}};
+  // The operator endpoint is authenticated and exposes only the provider-turn
+  // fields needed to correlate real Codex execution. General job/message APIs
+  // redact these identifiers and paths.
+  if (job.worker_id.starts_with("codex")) {
+    for (const auto *key : {"provider", "model", "codex_session_id", "codex_turn_id",
+                            "codex_turn_started_at", "codex_turn_completed_at"})
+      if (job.result_metadata.contains(key) && job.result_metadata.at(key).is_string())
+        summary[key] = job.result_metadata.at(key);
+    if (job.result_metadata.contains("reasoningEffort") &&
+        job.result_metadata.at("reasoningEffort").is_string())
+      summary["reasoning_effort"] = job.result_metadata.at("reasoningEffort");
+  }
+  return summary;
 }
 Json operator_artifact_summary(const Json &value) {
   const auto artifact = value.get<Artifact>();

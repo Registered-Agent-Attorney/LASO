@@ -77,10 +77,56 @@ std::optional<OperatorAction> operator_action_for(const std::string &method,
 ApiResponse operator_audit_unavailable() {
   return {503, {{"error", "Operator audit is unavailable"}, {"error_code", "AUDIT_UNAVAILABLE"}}};
 }
+void redact_codex_session_fields(Json &value) {
+  if (value.is_object()) {
+    for (const auto *key : {"codex_session_id", "codex_turn_id", "codex_turn_started_at",
+                            "codex_turn_completed_at", "parent_codex_session_id",
+                            "parent_codex_turn_id", "session_id", "turn_id", "call_key",
+                            "project_dir"})
+      value.erase(key);
+    for (auto it = value.begin(); it != value.end(); ++it)
+      redact_codex_session_fields(it.value());
+  } else if (value.is_array()) {
+    for (auto &entry : value)
+      redact_codex_session_fields(entry);
+  }
+}
+bool is_codex_worker(const Json &worker_id) {
+  return worker_id.is_string() && worker_id.get_ref<const std::string &>().starts_with("codex");
+}
 Json redact_worker_session_id(Json job) {
-  if (job.is_object() && job.contains("result_metadata") && job.at("result_metadata").is_object())
-    job["result_metadata"].erase("codex_session_id");
+  if (!job.is_object())
+    return job;
+  const bool codex_worker = is_codex_worker(job.value("worker_id", Json{}));
+  if (codex_worker) {
+    if (job.contains("request_metadata"))
+      redact_codex_session_fields(job["request_metadata"]);
+    if (job.contains("result_metadata"))
+      redact_codex_session_fields(job["result_metadata"]);
+    if (job.contains("result"))
+      redact_codex_session_fields(job["result"]);
+  }
+  const auto external_id = job.value("external_job_id", std::string{});
+  if (external_id.starts_with("codex:"))
+    job.erase("external_job_id");
   return job;
+}
+Json redact_worker_result_message(Json message) {
+  if (!message.is_object() || !message.contains("metadata") ||
+      !message.at("metadata").is_object())
+    return message;
+  auto &metadata = message["metadata"];
+  if (!is_codex_worker(metadata.value("worker_id", Json{})) ||
+      !metadata.contains("worker_job_id"))
+    return message;
+  if (metadata.contains("worker_result_metadata"))
+    redact_codex_session_fields(metadata["worker_result_metadata"]);
+  const auto external_id = metadata.value("external_job_id", std::string{});
+  if (external_id.starts_with("codex:"))
+    metadata.erase("external_job_id");
+  if (message.contains("payload"))
+    redact_codex_session_fields(message["payload"]);
+  return message;
 }
 } // namespace
 
@@ -640,10 +686,14 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
   if (collection == "runs" && !id.empty()) {
     if (method == "GET" && (action == "events" || action == "attempts" || action == "messages")) {
       (void)service_.get(RecordKind::Run, id);
-      return {200, service_.list(action == "events"     ? RecordKind::Event
-                                 : action == "attempts" ? RecordKind::Attempt
-                                                        : RecordKind::Message,
-                                 id, limit, offset)};
+      auto records = service_.list(action == "events"     ? RecordKind::Event
+                                   : action == "attempts" ? RecordKind::Attempt
+                                                          : RecordKind::Message,
+                                   id, limit, offset);
+      if (action == "messages")
+        for (auto &message : records)
+          message = redact_worker_result_message(std::move(message));
+      return {200, records};
     }
     if (method == "POST" && action == "cancel") {
       service_.runtime().cancel(id);
