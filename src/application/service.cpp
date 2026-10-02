@@ -1150,7 +1150,9 @@ Json operator_worker_job_summary(const Json &value) {
       if (value.size() != 24)
         return;
       try {
-        (void)parse_utc_timestamp(value);
+        const auto parsed = parse_utc_timestamp(value);
+        if (format_utc_timestamp(parsed) != value)
+          return;
       } catch (const Error &) {
         return;
       }
