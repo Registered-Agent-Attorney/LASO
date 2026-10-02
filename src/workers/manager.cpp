@@ -145,8 +145,11 @@ bool WorkerManager::can_execute(const std::string &worker_id, const std::string 
   for (const auto &candidate : registry_.names()) {
     if (!worker_id.empty() && candidate != worker_id)
       continue;
-    const auto metadata = registry_.get(candidate)->metadata();
-    const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+    const auto adapter = registry_.get(candidate);
+    const auto metadata = adapter->metadata();
+    const auto recoverable = metadata.status == "failed" &&
+                            (metadata.supports_recovery ||
+                             adapter->supports_transport_restart());
     if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
         (metadata.status != "healthy" && !recoverable))
       continue;
@@ -161,8 +164,11 @@ bool WorkerManager::can_execute(const std::string &worker_id, const std::string 
 Json WorkerManager::distributed_capabilities() const {
   Json result{{"protocol_version", 1}, {"workloads", Json::array()}};
   for (const auto &candidate : registry_.names()) {
-    const auto metadata = registry_.get(candidate)->metadata();
-    const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+    const auto adapter = registry_.get(candidate);
+    const auto metadata = adapter->metadata();
+    const auto recoverable = metadata.status == "failed" &&
+                            (metadata.supports_recovery ||
+                             adapter->supports_transport_restart());
     if (!metadata.enabled || (!metadata.healthy && !recoverable) ||
         (metadata.status != "healthy" && !recoverable))
       continue;
@@ -407,56 +413,64 @@ WorkerJob WorkerManager::record_submission(const std::string &id,
     throw WorkerTransportError("Worker returned an invalid external job id");
 
   bool cancel_external_job = false;
+  WorkerJob value;
   {
     std::lock_guard state_lock(state_mutex_);
-    const auto value = job(id);
+    value = job(id);
     if (worker_job_terminal(value.state))
       return value;
-    cancel_external_job = value.cancellation_requested && !worker_job_terminal(submission.state);
+    // Publish the accepted handle before releasing state_mutex_. A racing
+    // cancel() then either sets cancellation_requested before this check or
+    // observes this handle and cancels the exact external job itself.
+    value.external_job_id = submission.external_job_id;
+    value.state = submission.state;
+    value.result_metadata = submission.metadata;
+    apply_continuation(value, submission.continuation);
+    if (!submission.result.is_null())
+      value.result = submission.result;
+    if (!submission.artifacts.empty())
+      value.artifacts = submission.artifacts;
+    if (!submission.error.empty())
+      value.error = bounded_error(submission.error);
+    merge_usage(value.usage, submission.usage);
+    cancel_external_job = value.cancellation_requested && !worker_job_terminal(value.state);
+    if (worker_job_terminal(value.state))
+      value.completed_at = timestamp();
+    if (const auto violation = budget_violation(value); !violation.empty()) {
+      value.state = WorkerJobState::Failed;
+      value.failure_kind = WorkerFailureKind::Budget;
+      value.error = violation;
+      value.completed_at = timestamp();
+    } else if (value.state == WorkerJobState::Failed) {
+      value.failure_kind = WorkerFailureKind::Job;
+    }
+    persist(value);
+    submission_cancellation_signals_.erase(value.id);
+    state_changed_.notify_all();
   }
 
+  if (!cancel_external_job)
+    return value;
+
   bool cancellation_acknowledged = false;
-  if (cancel_external_job) {
-    try {
-      cancellation_acknowledged = adapter->cancel(submission.external_job_id);
-    } catch (...) {
-    }
+  try {
+    cancellation_acknowledged = adapter->cancel(submission.external_job_id);
+  } catch (...) {
   }
 
   std::lock_guard state_lock(state_mutex_);
-  auto value = job(id);
+  value = job(id);
   if (worker_job_terminal(value.state))
     return value;
-  value.external_job_id = submission.external_job_id;
-  value.state = submission.state;
-  value.result_metadata = submission.metadata;
-  apply_continuation(value, submission.continuation);
-  if (!submission.result.is_null())
-    value.result = submission.result;
-  if (!submission.artifacts.empty())
-    value.artifacts = submission.artifacts;
-  if (!submission.error.empty())
-    value.error = bounded_error(submission.error);
-  merge_usage(value.usage, submission.usage);
-  if (cancel_external_job && cancellation_acknowledged) {
+  if (cancellation_acknowledged) {
     value.state = value.cancellation_target_state;
     value.cancellation_acknowledged = true;
     value.cancellation_error.clear();
-  } else if (cancel_external_job && value.cancellation_error.empty()) {
+    value.completed_at = timestamp();
+  } else if (value.cancellation_error.empty()) {
     value.cancellation_error = "Worker did not acknowledge cancellation";
   }
-  if (worker_job_terminal(value.state))
-    value.completed_at = timestamp();
-  if (const auto violation = budget_violation(value); !violation.empty()) {
-    value.state = WorkerJobState::Failed;
-    value.failure_kind = WorkerFailureKind::Budget;
-    value.error = violation;
-    value.completed_at = timestamp();
-  } else if (value.state == WorkerJobState::Failed) {
-    value.failure_kind = WorkerFailureKind::Job;
-  }
   persist(value);
-  submission_cancellation_signals_.erase(value.id);
   state_changed_.notify_all();
   return value;
 }
@@ -697,7 +711,8 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     return finalize_pending_cancellation(existing->id);
 
   auto metadata = adapter->metadata();
-  if (metadata.supports_recovery && !metadata.healthy && metadata.status != "disabled" &&
+  if ((metadata.supports_recovery || adapter->supports_transport_restart()) &&
+      !metadata.healthy && metadata.status != "disabled" &&
       metadata.status != "unavailable") {
     try {
       // A supervised transport may have torn down its process group while a
@@ -709,7 +724,9 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     } catch (...) {
     }
   }
-  const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+  const auto recoverable = metadata.status == "failed" &&
+                           (metadata.supports_recovery ||
+                            adapter->supports_transport_restart());
   if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "unavailable" ||
       (!metadata.healthy && !recoverable))
     throw Error(ErrorCode::Capacity, "Worker is unavailable");
@@ -960,7 +977,8 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
   std::lock_guard submit_lock(*worker_submit_mutex);
   const auto adapter = registry_.get(worker_id);
   auto metadata = adapter->metadata();
-  if (metadata.supports_recovery && !metadata.healthy && metadata.status != "disabled" &&
+  if ((metadata.supports_recovery || adapter->supports_transport_restart()) &&
+      !metadata.healthy && metadata.status != "disabled" &&
       metadata.status != "unavailable") {
     try {
       adapter->start();
@@ -968,7 +986,9 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
     } catch (...) {
     }
   }
-  const auto recoverable = metadata.supports_recovery && metadata.status == "failed";
+  const auto recoverable = metadata.status == "failed" &&
+                           (metadata.supports_recovery ||
+                            adapter->supports_transport_restart());
   if (!metadata.enabled || metadata.status == "disabled" || metadata.status == "unavailable" ||
       (!metadata.healthy && !recoverable))
     throw Error(ErrorCode::Capacity, "Worker is unavailable");

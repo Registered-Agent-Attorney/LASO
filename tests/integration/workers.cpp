@@ -1017,6 +1017,61 @@ TEST(Workers, CancellationAfterHandleAcceptanceTargetsThatExternalJob) {
   }
 }
 
+TEST(Workers, CancellationAfterHandlePersistenceUsesAcceptedExternalId) {
+  class AcceptedWorker final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "accepted";
+      result.name = result.id;
+      result.enabled = true;
+      result.healthy = true;
+      result.status = "healthy";
+      result.supports_cancellation = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &request) override {
+      return {"external-" + request.job_id, WorkerJobState::Queued, Json::object()};
+    }
+    WorkerStatus status(const std::string &) override {
+      return {};
+    }
+    WorkerStatus result(const std::string &) override {
+      return {};
+    }
+    bool cancel(const std::string &external_job_id) override {
+      cancelled_external_job_id = external_job_id;
+      return true;
+    }
+    void start() override {}
+    void stop() noexcept override {}
+
+    std::string cancelled_external_job_id;
+  };
+
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<AcceptedWorker>();
+  registry.add("accepted", adapter);
+  WorkerManager manager(storage, registry);
+  WorkerRequest request;
+  request.worker_id = "accepted";
+  request.run_id = "cancel-after-handle-persisted";
+  request.node_id = "work";
+  request.idempotency_key = "cancel-after-handle-persisted:work:1";
+
+  const auto submitted = manager.submit(request);
+  ASSERT_EQ(submitted.state, WorkerJobState::Queued);
+  ASSERT_EQ(submitted.external_job_id, "external-" + submitted.id);
+
+  manager.cancel(submitted.id, WorkerJobState::Cancelled, "cancel accepted external job");
+
+  const auto cancelled = manager.job(submitted.id);
+  EXPECT_EQ(cancelled.state, WorkerJobState::Cancelled);
+  EXPECT_TRUE(cancelled.cancellation_acknowledged);
+  EXPECT_EQ(adapter->cancelled_external_job_id, submitted.external_job_id);
+}
+
 TEST(Workers, DifferentWorkerSubmissionsCanRunConcurrently) {
   struct SubmissionBarrier {
     std::mutex mutex;
@@ -1463,6 +1518,93 @@ TEST(Workers, AsyncRemoteUnknownHandleReleasesPerWorkerCapacityWithoutResubmit) 
   EXPECT_EQ(manager.job(first.id).state, WorkerJobState::Unknown);
   EXPECT_EQ(next_with_handle.state, WorkerJobState::Queued);
   EXPECT_EQ(next_with_handle.external_job_id, "external-" + next.id);
+  EXPECT_EQ(adapter->status_calls.load(), 1U);
+  EXPECT_EQ(adapter->submissions.load(), 2U);
+}
+
+TEST(Workers, RestartableRemoteTransportReconnectsBeforeReconcilingWithoutReplay) {
+  class RestartableRemoteComputer final : public WorkerAdapter {
+  public:
+    WorkerMetadata metadata() const override {
+      WorkerMetadata result;
+      result.id = "windows_computer";
+      result.name = result.id;
+      result.capabilities = {"browser.status"};
+      result.remote = true;
+      result.enabled = true;
+      result.healthy = online.load();
+      result.status = result.healthy ? "healthy" : "failed";
+      result.supports_status = true;
+      result.supports_recovery = false;
+      result.supports_cancellation = true;
+      return result;
+    }
+    WorkerSubmission submit(const WorkerRequest &request) override {
+      ++submissions;
+      return {"external-" + request.job_id, WorkerJobState::Queued, Json::object()};
+    }
+    WorkerStatus status(const std::string &) override {
+      ++status_calls;
+      WorkerStatus result;
+      result.state = WorkerJobState::Unknown;
+      return result;
+    }
+    WorkerStatus result(const std::string &) override { return {}; }
+    bool cancel(const std::string &) override { return true; }
+    bool supports_transport_restart() const override { return true; }
+    void start() override {
+      ++starts;
+      online = true;
+    }
+    void stop() noexcept override { online = false; }
+
+    std::atomic<bool> online{true};
+    std::atomic<unsigned> starts{0};
+    std::atomic<unsigned> submissions{0};
+    std::atomic<unsigned> status_calls{0};
+  };
+
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto adapter = std::make_shared<RestartableRemoteComputer>();
+  registry.add("windows_computer", adapter);
+  WorkerManager manager(storage, registry, 4, 1);
+
+  WorkerRequest first_request;
+  first_request.worker_id = "windows_computer";
+  first_request.capability = "browser.status";
+  first_request.task_type = "browser.status";
+  first_request.run_id = "computer-worker-restart";
+  first_request.node_id = "status-before-disconnect";
+  first_request.idempotency_key = "computer-worker-restart:first";
+  const auto first = manager.submit_async(first_request);
+
+  auto wait_for_handle = [&](const std::string &id) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    WorkerJob current;
+    do {
+      current = manager.job(id);
+      if (!current.external_job_id.empty())
+        return current;
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    } while (std::chrono::steady_clock::now() < deadline);
+    return current;
+  };
+  ASSERT_EQ(wait_for_handle(first.id).state, WorkerJobState::Queued);
+
+  adapter->online = false;
+  EXPECT_TRUE(manager.can_execute("windows_computer", "browser.status"));
+
+  WorkerRequest next_request = first_request;
+  next_request.node_id = "status-after-reconnect";
+  next_request.idempotency_key = "computer-worker-restart:next";
+  const auto next = manager.submit_async(next_request);
+  const auto next_with_handle = wait_for_handle(next.id);
+
+  EXPECT_EQ(manager.job(first.id).state, WorkerJobState::Unknown);
+  EXPECT_EQ(next_with_handle.state, WorkerJobState::Queued);
+  EXPECT_EQ(next_with_handle.external_job_id, "external-" + next.id);
+  EXPECT_EQ(adapter->starts.load(), 1U);
   EXPECT_EQ(adapter->status_calls.load(), 1U);
   EXPECT_EQ(adapter->submissions.load(), 2U);
 }
