@@ -248,7 +248,8 @@ TEST(ProcessWorker, HandshakeAndSubmitStatusResultLifecycle) {
 TEST(ProcessWorker, FetchesDurableResultWhenCompletedStatusOmitsPayload) {
   InMemoryWorkerStorage storage;
   WorkerRegistry registry;
-  auto transport = std::make_shared<ProcessWorkerTransport>("process", worker_config("split-result"));
+  auto transport =
+      std::make_shared<ProcessWorkerTransport>("process", worker_config("split-result"));
   registry.add("process", transport);
   WorkerManager manager(storage, registry);
 
@@ -451,8 +452,17 @@ TEST(ProcessWorker, MalformedOversizedExitAndHangAreBoundedFailures) {
 TEST(ProcessWorker, RestartsExitedHealthyChildBeforeDispatchingNewRequest) {
   TemporaryDirectory dir;
   const auto marker = dir.path / "first-worker-exit-after-hello";
-  auto config = worker_config("exit-after-hello-once", 1000);
-  config.args = {"--mode", "exit-after-hello-once", "--exit-marker", marker.string()};
+  const auto release_marker = dir.path / "release-first-worker-exit";
+  const auto owner_token = worker_owner_token();
+  auto config = worker_config("exit-after-hello-once", 1000, owner_token);
+  config.args = {"--mode",
+                 "exit-after-hello-once",
+                 "--exit-marker",
+                 marker.string(),
+                 "--exit-release-marker",
+                 release_marker.string(),
+                 "--laso-test-owner-token",
+                 owner_token};
   auto transport = std::make_shared<ProcessWorkerTransport>("process", std::move(config));
   WorkerRegistry registry;
   registry.add("process", transport);
@@ -463,10 +473,19 @@ TEST(ProcessWorker, RestartsExitedHealthyChildBeforeDispatchingNewRequest) {
   ASSERT_TRUE(std::filesystem::exists(marker));
   ASSERT_TRUE(transport->metadata().healthy);
 
-  // The first child acknowledged hello and exited before the submit call. The
-  // adapter still has a healthy snapshot, but waitpid can prove the request
-  // has not been sent to that dead process.
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  // Release the first child only after start() consumed its hello response.
+  // This deterministically exercises restart after a healthy child exits,
+  // without racing the startup handshake against process scheduling.
+  {
+    std::ofstream release(release_marker);
+    ASSERT_TRUE(release) << "unable to release first worker process";
+    release << "exit after acknowledged hello\n";
+    ASSERT_TRUE(release) << "unable to write worker release marker";
+  }
+  ASSERT_TRUE(wait_for_reference_host(owner_token, false));
+
+  // The adapter still has a healthy snapshot, but waitpid can prove the
+  // request has not been sent to that dead process.
   const auto completed = manager.submit(request());
   EXPECT_EQ(completed.state, WorkerJobState::Completed);
   EXPECT_TRUE(completed.result.at("ok"));

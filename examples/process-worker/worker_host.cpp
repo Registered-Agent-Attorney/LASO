@@ -129,6 +129,7 @@ int main(int argc, char **argv) {
         continue;
       }
       const auto exit_marker = option(argc, argv, "--exit-marker", "");
+      const auto exit_release_marker = option(argc, argv, "--exit-release-marker", "");
       const bool exit_after_hello = mode == "exit-after-hello-once" &&
                                     !exit_marker.empty() &&
                                     !std::filesystem::exists(exit_marker);
@@ -147,8 +148,16 @@ int main(int argc, char **argv) {
                                            {"supports_status", true},
                                            {"supports_recovery", supports_recovery},
                                            {"supports_cancellation", true}}}});
-      if (exit_after_hello)
-        std::_Exit(73);
+      if (exit_after_hello) {
+        if (exit_release_marker.empty())
+          std::_Exit(73);
+        std::thread([exit_release_marker] {
+          std::error_code error;
+          while (!std::filesystem::exists(exit_release_marker, error))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          std::_Exit(73);
+        }).detach();
+      }
       continue;
     }
     if (mode == "malformed") {
