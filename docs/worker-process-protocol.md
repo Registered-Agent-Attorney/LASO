@@ -6,8 +6,9 @@ JSON (NDJSON) over the child's stdin and stdout. The newline is the frame
 boundary; each request receives exactly one response, and unsolicited messages
 are rejected by the host transport. A worker may send one correlated
 `worker_request` while LASO is waiting for a response; the host answers it with
-one `worker_response` before continuing the original operation. No other
-unsolicited message type is accepted.
+one `worker_response` before continuing the original operation. The Codex
+adapter may also send the single fixed `worker_tool_call` described below. No
+other unsolicited message type is accepted.
 
 ## Request
 
@@ -88,6 +89,37 @@ request, and cancelling the owning job cancels its pending requests. The
 configured interaction timeout is bounded; a timeout becomes `expired`.
 Workers cannot call arbitrary LASO methods or submit pipelines through this
 channel.
+
+### Fixed Codex dynamic tool
+
+The Codex adapter may forward one app-server dynamic tool request using a
+separate message type:
+
+```json
+{"protocol_version":1,"message_type":"worker_tool_call",
+ "request_id":"call-1","worker_job_id":"worker-123","worker_id":"agent-one",
+ "external_job_id":"codex:thread-1","session_id":"thread-1",
+ "turn_id":"turn-1","deadline":"","namespace":"laso",
+ "tool":"browser_status","arguments":{}}
+```
+
+Core accepts only `namespace: "laso"`, `tool: "browser_status"`, and an empty
+object for `arguments`. It maps the request to the configured
+`windows_computer` worker and `browser.status` capability, applies worker
+policy, persists a child job linked to the parent Codex job, and returns only
+that child result. Other names, arguments, and worker targets fail closed. The
+correlated response is:
+
+```json
+{"protocol_version":1,"message_type":"worker_tool_response",
+ "request_id":"call-1","success":true,
+ "result":{"window_count":1,"browser_status":{"browser_visible":true,
+ "active_browser_visible":true}},"error":""}
+```
+
+Parent cancellation or deadline expiry requests cancellation of the linked
+Computer child. This channel does not expose generic worker dispatch or
+command execution.
 
 `Unknown` means the adapter cannot establish the job's outcome. Core persists
 that state and does not resubmit the same durable job. If Core restarts while

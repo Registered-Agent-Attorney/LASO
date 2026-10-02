@@ -128,13 +128,35 @@ int main(int argc, char **argv) {
         response(request, {{"ok", true}, {"metadata", Json::object()}}, 999);
         continue;
       }
+      const auto exit_marker = option(argc, argv, "--exit-marker", "");
+      const auto exit_release_marker = option(argc, argv, "--exit-release-marker", "");
+      const bool exit_after_hello = mode == "exit-after-hello-once" && !exit_marker.empty() &&
+                                    !std::filesystem::exists(exit_marker);
+      if (exit_after_hello) {
+        std::ofstream marker(exit_marker);
+        if (!marker)
+          return 66;
+        marker << "first worker exited after hello\n";
+      }
+      const bool supports_recovery = mode != "no-recovery";
       response(request, {{"ok", true},
                          {"metadata", Json{{"name", "process-reference"},
                                            {"version", "1"},
                                            {"description", "deterministic reference worker"},
                                            {"capabilities", Json::array({"deterministic"})},
-                                           {"supports_recovery", true},
+                                           {"supports_status", true},
+                                           {"supports_recovery", supports_recovery},
                                            {"supports_cancellation", true}}}});
+      if (exit_after_hello) {
+        if (exit_release_marker.empty())
+          std::_Exit(73);
+        std::thread([exit_release_marker] {
+          std::error_code error;
+          while (!std::filesystem::exists(exit_release_marker, error))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          std::_Exit(73);
+        }).detach();
+      }
       continue;
     }
     if (mode == "malformed") {
@@ -161,13 +183,50 @@ int main(int argc, char **argv) {
     if (operation == "submit") {
       const auto job_id = request.value("job_id", std::string{});
       const auto external = "process-" + job_id;
+      const auto submit_marker = option(argc, argv, "--submit-marker", "");
+      if (!submit_marker.empty()) {
+        std::ofstream marker(submit_marker, std::ios::app);
+        if (!marker)
+          return 68;
+        marker << job_id << '\n' << std::flush;
+        if (!marker)
+          return 68;
+      }
       jobs[external] = {job_id, 0, false};
+      if (mode == "tool-call-mismatch-job" || mode == "tool-call-mismatch-worker" ||
+          mode == "tool-call-wait") {
+        Json tool_call{
+            {"protocol_version", process_protocol::version},
+                       {"message_type", "worker_tool_call"},
+                       {"request_id", "forged-tool-call"},
+            {"worker_job_id", mode == "tool-call-mismatch-job" ? job_id + "-other" : job_id},
+            {"worker_id",
+             mode == "tool-call-mismatch-worker"
+                                         ? "different-worker"
+                 : request.value("payload", Json::object()).value("worker_id", std::string{})},
+                       {"external_job_id", external},
+                       {"session_id", "fixture-session"},
+                       {"turn_id", "fixture-turn"},
+                       {"deadline", ""},
+                       {"namespace", "laso"},
+                       {"tool", "browser_status"},
+                       {"arguments", Json::object()}};
+        std::cout << tool_call.dump() << '\n' << std::flush;
+        std::string tool_response;
+        if (!std::getline(std::cin, tool_response))
+          return 0;
+        const auto parsed = Json::parse(tool_response, nullptr, false);
+        if (parsed.is_discarded() ||
+            parsed.value("message_type", std::string{}) != "worker_tool_response" ||
+            parsed.value("request_id", std::string{}) != "forged-tool-call")
+          return 67;
+      }
       if (mode == "failure") {
         response(request, {{"ok", true},
                            {"state", "Failed"},
                            {"external_job_id", external},
                            {"error", "reference worker declared failure"}});
-      } else if (mode == "delay" || mode == "cancel") {
+      } else if (mode == "delay" || mode == "cancel" || mode == "split-result") {
         response(request, {{"ok", true}, {"state", "Queued"}, {"external_job_id", external}});
       } else {
         if (mode == "artifact")
@@ -217,9 +276,9 @@ int main(int argc, char **argv) {
     }
     ++found->second.status_checks;
     const bool done = mode != "delay" || found->second.status_checks > 1;
-    Json body{{"ok", true},
-              {"state", done ? "Completed" : "Running"},
-              {"payload", done ? terminal_result(mode) : Json::object()}};
+    Json body{{"ok", true}, {"state", done ? "Completed" : "Running"}};
+    if (done && !(mode == "split-result" && operation == "status"))
+      body["payload"] = terminal_result(mode);
     if (done && mode != "no-usage")
       body["usage"] = usage(mode);
     response(request, body);

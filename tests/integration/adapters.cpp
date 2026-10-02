@@ -3427,6 +3427,28 @@ TEST(Api, HealthAndVersion) {
                   "sessions.run_context_snapshots", "health.readiness",
                   "observability.prometheus_api_metrics", "operator.coordinated_drain"}));
 }
+
+TEST(Api, CoreRemainsReadyWhenRemoteComputerWorkerIsUnavailable) {
+  TemporaryDirectory dir;
+  asio::io_context io;
+  auto options = config(dir.path);
+  ProcessWorkerConfig computer;
+  computer.executable = (dir.path / "missing-computer-worker").string();
+  computer.remote = true;
+  computer.startup_timeout_ms = 500;
+  computer.request_timeout_ms = 500;
+  options.process_workers.emplace("windows_computer", computer);
+  options.allow_remote_workers.emplace_back("windows_computer");
+
+  Service service(io, options);
+  const auto readiness = service.readiness();
+  EXPECT_EQ(readiness.at("status"), "ready");
+  const auto worker = service.worker("windows_computer");
+  EXPECT_EQ(worker.at("status"), "failed");
+  EXPECT_FALSE(worker.at("healthy"));
+  EXPECT_TRUE(worker.at("enabled"));
+}
+
 TEST(Api, PrometheusMetricsHaveBoundedLabelsAndOmitRequestData) {
   TemporaryDirectory dir;
   asio::io_context io;

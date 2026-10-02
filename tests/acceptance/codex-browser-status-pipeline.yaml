@@ -1,0 +1,23 @@
+laso: '1'
+name: codex-windows-browser-status
+version: 1
+max_steps: 16
+timeout_ms: 120000
+nodes:
+  input: {type: input}
+  agent:
+    type: worker
+    worker: codex
+    capability: coding-agent
+    task_type: acceptance
+    timeout_ms: 90000
+    max_attempts: 1
+    instructions: >-
+      Call the registered laso.browser_status tool exactly once. Do not use any
+      other tool or perform an action. Return the browser status JSON you
+      receive from that tool, including its window_count and browser_status
+      fields.
+  output: {type: output}
+edges:
+  - {from: input, to: agent}
+  - {from: agent, to: output}

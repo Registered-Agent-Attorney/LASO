@@ -198,6 +198,16 @@ void Config::validate() {
       configured_environment_bytes += name.size() + value.size() + 2;
     }
   }
+  if (allow_remote_workers.size() > 64)
+    throw Error(ErrorCode::Configuration, "Too many explicitly allowed remote workers");
+  std::set<std::string> allowed_remote_worker_ids;
+  for (const auto &id : allow_remote_workers) {
+    const auto worker = process_workers.find(id);
+    if (!std::regex_match(id, source_id_pattern) || !allowed_remote_worker_ids.insert(id).second ||
+        worker == process_workers.end() || !worker->second.remote)
+      throw Error(ErrorCode::Configuration,
+                  "allow_remote_workers must name unique configured remote process workers");
+  }
 }
 Config load_config(const std::filesystem::path &supplied,
                    const std::map<std::string, std::string> &overrides) {
@@ -276,6 +286,11 @@ Config load_config(const std::filesystem::path &supplied,
             throw Error(ErrorCode::Configuration, "schema_roots must be a sequence");
           for (const auto &root : pair.second)
             c.schema_roots.emplace_back(root.as<std::string>());
+        } else if (key == "allow_remote_workers") {
+          if (!pair.second.IsSequence())
+            throw Error(ErrorCode::Configuration, "allow_remote_workers must be a sequence");
+          for (const auto &worker : pair.second)
+            c.allow_remote_workers.push_back(worker.as<std::string>());
         } else if (key == "policies") {
           for (const auto &rule : pair.second) {
             auto decision = rule["decision"].as<std::string>();
@@ -367,14 +382,17 @@ Config load_config(const std::filesystem::path &supplied,
               if (!fields.insert(field.first.as<std::string>()).second)
                 throw Error(ErrorCode::Configuration, "Duplicate process worker field");
             for (const auto &field : fields)
-              if (field != "executable" && field != "args" && field != "environment_allowlist" &&
-                  field != "environment" && field != "startup_timeout_ms" &&
-                  field != "request_timeout_ms" && field != "interaction_timeout_ms")
+              if (field != "executable" && field != "args" && field != "remote" &&
+                  field != "environment_allowlist" && field != "environment" &&
+                  field != "startup_timeout_ms" && field != "request_timeout_ms" &&
+                  field != "interaction_timeout_ms")
                 throw Error(ErrorCode::Configuration, "Unknown process worker field");
             ProcessWorkerConfig cfg;
             if (!node["executable"])
               throw Error(ErrorCode::Configuration, "Process worker executable is required");
             cfg.executable = node["executable"].as<std::string>();
+            if (node["remote"])
+              cfg.remote = node["remote"].as<bool>();
             auto sequence = [](const YAML::Node &value, const char *name) {
               std::vector<std::string> result;
               if (!value.IsSequence())

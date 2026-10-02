@@ -20,6 +20,10 @@ public:
   bool cancel(const std::string &external_job_id) override;
   bool cancel_pending(const std::string &job_id) override;
   void set_interaction_handler(WorkerInteractionHandler) override;
+  void set_tool_call_handler(WorkerToolCallHandler) override;
+  bool supports_transport_restart() const override {
+    return true;
+  }
   void start() override;
   void stop() noexcept override;
 

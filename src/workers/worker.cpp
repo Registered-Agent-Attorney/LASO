@@ -106,6 +106,7 @@ void to_json(Json &j, const WorkerMetadata &m) {
        {"remote", m.remote},
        {"healthy", m.healthy},
        {"enabled", m.enabled},
+       {"supports_status", m.supports_status},
        {"supports_recovery", m.supports_recovery},
        {"supports_cancellation", m.supports_cancellation}};
 }
@@ -125,6 +126,7 @@ void from_json(const Json &j, WorkerMetadata &m) {
   m.healthy = j.value("healthy", false);
   m.enabled = j.value("enabled", false);
   m.supports_recovery = j.value("supports_recovery", false);
+  m.supports_status = j.value("supports_status", m.supports_recovery);
   m.supports_cancellation = j.value("supports_cancellation", false);
 }
 
@@ -137,6 +139,7 @@ void to_json(Json &j, const WorkerJob &job) {
        {"external_job_id", job.external_job_id},
        {"attempt", job.attempt},
        {"status", job.state},
+       {"cancellation_target_state", job.cancellation_target_state},
        {"failure_kind", job.failure_kind},
        {"submitted_at", job.submitted_at},
        {"started_at", job.started_at},
@@ -165,6 +168,7 @@ void from_json(const Json &j, WorkerJob &job) {
   job.external_job_id = j.value("external_job_id", std::string{});
   job.attempt = j.value("attempt", 1U);
   j.at("status").get_to(job.state);
+  job.cancellation_target_state = j.value("cancellation_target_state", WorkerJobState::Cancelled);
   job.failure_kind = j.value("failure_kind", WorkerFailureKind::None);
   job.submitted_at = j.value("submitted_at", std::string{});
   job.started_at = j.value("started_at", std::string{});
@@ -259,6 +263,46 @@ void from_json(const Json &j, WorkerInteractionResponse &response) {
     throw std::invalid_argument("unknown worker interaction decision");
   response.payload = j.value("payload", Json::object());
   response.reason = j.value("reason", std::string{});
+}
+
+void to_json(Json &j, const WorkerToolCallRequest &request) {
+  j = {{"request_id", request.request_id},
+       {"worker_job_id", request.worker_job_id},
+       {"worker_id", request.worker_id},
+       {"external_job_id", request.external_job_id},
+       {"session_id", request.session_id},
+       {"turn_id", request.turn_id},
+       {"deadline", request.deadline},
+       {"namespace", request.namespace_name},
+       {"tool", request.tool},
+       {"arguments", request.arguments}};
+}
+
+void from_json(const Json &j, WorkerToolCallRequest &request) {
+  request.request_id = j.value("request_id", std::string{});
+  request.worker_job_id = j.value("worker_job_id", std::string{});
+  request.worker_id = j.value("worker_id", std::string{});
+  request.external_job_id = j.value("external_job_id", std::string{});
+  request.session_id = j.value("session_id", std::string{});
+  request.turn_id = j.value("turn_id", std::string{});
+  request.deadline = j.value("deadline", std::string{});
+  request.namespace_name = j.value("namespace", std::string{});
+  request.tool = j.value("tool", std::string{});
+  request.arguments = j.value("arguments", Json::object());
+}
+
+void to_json(Json &j, const WorkerToolCallResponse &response) {
+  j = {{"request_id", response.request_id},
+       {"success", response.success},
+       {"result", response.result},
+       {"error", response.error}};
+}
+
+void from_json(const Json &j, WorkerToolCallResponse &response) {
+  response.request_id = j.value("request_id", std::string{});
+  response.success = j.value("success", false);
+  response.result = j.value("result", Json::object());
+  response.error = j.value("error", std::string{});
 }
 
 void to_json(Json &j, const WorkerInteraction &interaction) {

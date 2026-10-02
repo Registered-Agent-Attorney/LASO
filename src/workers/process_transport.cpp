@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -9,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -31,6 +33,49 @@ void nonblocking(int fd) {
   const auto flags = ::fcntl(fd, F_GETFL, 0);
   if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
     throw WorkerTransportError("Unable to configure worker process pipe");
+}
+
+ssize_t write_without_sigpipe(int fd, const void *buffer, std::size_t size) noexcept {
+  sigset_t sigpipe_set;
+  sigset_t previous_mask;
+  sigset_t pending_signals;
+  ::sigemptyset(&sigpipe_set);
+  ::sigaddset(&sigpipe_set, SIGPIPE);
+  const auto block_error = ::pthread_sigmask(SIG_BLOCK, &sigpipe_set, &previous_mask);
+  if (block_error != 0) {
+    errno = block_error;
+    return -1;
+  }
+  if (::sigpending(&pending_signals) != 0) {
+    const auto pending_error = errno;
+    (void)::pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr);
+    errno = pending_error;
+    return -1;
+  }
+  const bool sigpipe_was_pending = ::sigismember(&pending_signals, SIGPIPE) == 1;
+  const auto written = ::write(fd, buffer, size);
+  const auto write_error = written < 0 ? errno : 0;
+  bool restore_mask = true;
+  if (written < 0 && write_error == EPIPE && !sigpipe_was_pending) {
+    int received_signal = 0;
+    int wait_error = 0;
+    do {
+      wait_error = ::sigwait(&sigpipe_set, &received_signal);
+    } while (wait_error == EINTR);
+    // EPIPE generates a thread-directed SIGPIPE. Consume it before restoring
+    // the prior mask, or an unblocked SIGPIPE could terminate the Core process.
+    if (wait_error != 0 || received_signal != SIGPIPE)
+      restore_mask = false;
+  }
+  if (restore_mask) {
+    const auto restore_error = ::pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr);
+    if (restore_error != 0) {
+      errno = restore_error;
+      return -1;
+    }
+  }
+  errno = write_error;
+  return written;
 }
 
 void reserve_process_fd(int &fd) {
@@ -57,6 +102,10 @@ int remaining_ms(Clock::time_point deadline) {
 
 bool bounded_text(const std::string &value, std::size_t maximum) {
   return !value.empty() && value.size() <= maximum;
+}
+
+std::string bounded_error_text(const std::string &value) {
+  return value.size() <= max_error_bytes ? value : value.substr(0, max_error_bytes);
 }
 
 Json continuation_json(const OpaqueProviderContinuation &continuation) {
@@ -98,21 +147,31 @@ bool process_group_alive(pid_t process_group) noexcept {
   return errno == EPERM;
 }
 
-void terminate_process_group(pid_t process_group) noexcept {
+bool terminate_process_group(pid_t process_group) noexcept {
   if (process_group <= 0)
-    return;
+    return true;
+  const auto group_gone = [process_group] {
+    // The group leader is our direct child. Reap it while probing so a dead
+    // worker does not look alive solely because it is still a zombie awaiting
+    // the submit thread's normal cleanup path.
+    int status = 0;
+    while (::waitpid(process_group, &status, WNOHANG) < 0 && errno == EINTR) {
+    }
+    return !process_group_alive(process_group);
+  };
   if (::kill(-process_group, SIGTERM) < 0 && errno != ESRCH)
     (void)::kill(process_group, SIGTERM);
   const auto graceful_deadline = Clock::now() + std::chrono::milliseconds(500);
-  while (process_group_alive(process_group) && Clock::now() < graceful_deadline)
+  while (!group_gone() && Clock::now() < graceful_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  if (!process_group_alive(process_group))
-    return;
+  if (group_gone())
+    return true;
   if (::kill(-process_group, SIGKILL) < 0 && errno != ESRCH)
     (void)::kill(process_group, SIGKILL);
   const auto force_deadline = Clock::now() + std::chrono::milliseconds(500);
-  while (process_group_alive(process_group) && Clock::now() < force_deadline)
+  while (!group_gone() && Clock::now() < force_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  return group_gone();
 }
 } // namespace
 
@@ -123,9 +182,10 @@ struct ProcessWorkerTransport::Impl {
     metadata_.name = id;
     metadata_.plugin = "process";
     metadata_.event_source_id = "worker." + id;
-    metadata_.local = true;
-    metadata_.remote = false;
+    metadata_.local = !config.remote;
+    metadata_.remote = config.remote;
     metadata_.enabled = true;
+    metadata_.supports_status = true;
     metadata_.supports_recovery = true;
     metadata_.status = "stopped";
     publish_metadata_locked();
@@ -141,16 +201,24 @@ struct ProcessWorkerTransport::Impl {
   }
 
   void set_interaction_handler(WorkerInteractionHandler handler) {
-    std::lock_guard lock(mutex);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
     interaction_handler = std::move(handler);
   }
 
-  void start() {
-    std::lock_guard lock(mutex);
-    start_locked();
+  void set_tool_call_handler(WorkerToolCallHandler handler) {
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    tool_call_handler = std::move(handler);
   }
 
-  void start_locked() {
+  void start() {
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    start_locked(lock);
+  }
+
+  void start_locked(std::unique_lock<std::mutex> &lock) {
     if (pid > 0 && metadata_.healthy)
       return;
     if (pid > 0)
@@ -162,8 +230,8 @@ struct ProcessWorkerTransport::Impl {
     publish_metadata_locked();
     try {
       spawn_locked();
-      const auto response =
-          request_locked("hello", "", "", Json{{"client", "laso"}}, config.startup_timeout_ms);
+      const auto response = request_locked(lock, "hello", "", "", Json{{"client", "laso"}},
+                                           config.startup_timeout_ms);
       if (!response.value("ok", false))
         throw WorkerTransportError("Worker hello was rejected");
       if (!response.contains("metadata") || !response.at("metadata").is_object() ||
@@ -179,10 +247,9 @@ struct ProcessWorkerTransport::Impl {
       metadata_.id = id;
       metadata_.plugin = "process";
       metadata_.event_source_id = "worker." + id;
-      metadata_.local = true;
-      metadata_.remote = false;
+      metadata_.local = !config.remote;
+      metadata_.remote = config.remote;
       metadata_.enabled = true;
-      metadata_.supports_recovery = true;
       metadata_.healthy = true;
       metadata_.status = "healthy";
       publish_metadata_locked();
@@ -196,15 +263,26 @@ struct ProcessWorkerTransport::Impl {
   }
 
   WorkerSubmission submit(const WorkerRequest &request) {
-    std::lock_guard lock(mutex);
-    ensure_started_locked();
-    active_submit.store(true, std::memory_order_release);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    ensure_started_locked(lock);
+    {
+      std::lock_guard active_lock(active_submit_mutex);
+      if (request.cancellation_signal &&
+          request.cancellation_signal->load(std::memory_order_acquire))
+        throw WorkerSubmissionCancelled();
+      active_submit_job_id = request.job_id;
+    }
     struct ActiveSubmitGuard {
-      std::atomic<bool> &active;
+      std::mutex &mutex;
+      std::string &active_job_id;
+      const std::string &job_id;
       ~ActiveSubmitGuard() {
-        active.store(false, std::memory_order_release);
+        std::lock_guard active_lock(mutex);
+        if (active_job_id == job_id)
+          active_job_id.clear();
       }
-    } active_guard{active_submit};
+    } active_guard{active_submit_mutex, active_submit_job_id, request.job_id};
     const auto timeout_ms = request.timeout_ms == 0
                                 ? config.request_timeout_ms
                                 : std::min(request.timeout_ms, config.request_timeout_ms);
@@ -230,7 +308,8 @@ struct ProcessWorkerTransport::Impl {
     if (request.session_context)
       payload["session_context"] = session_context_json(*request.session_context);
     return parse_submission_locked(
-        request.job_id, request_response_locked("submit", request.job_id, "", payload, timeout_ms));
+        request.job_id,
+        request_response_locked(lock, "submit", request.job_id, "", payload, timeout_ms));
   }
 
   WorkerStatus status(const std::string &external_job_id) {
@@ -242,10 +321,11 @@ struct ProcessWorkerTransport::Impl {
   }
 
   bool cancel(const std::string &external_job_id) {
-    std::lock_guard lock(mutex);
-    ensure_started_locked();
-    const auto response = request_response_locked("cancel", "", external_job_id, Json::object(),
-                                                  config.request_timeout_ms);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    ensure_started_locked(lock);
+    const auto response = request_response_locked(lock, "cancel", "", external_job_id,
+                                                  Json::object(), config.request_timeout_ms);
     if (!response.value("ok", false))
       throw WorkerTransportError("Worker cancellation was rejected");
     if (response.contains("acknowledged"))
@@ -253,18 +333,21 @@ struct ProcessWorkerTransport::Impl {
     return response.value("payload", Json::object()).value("acknowledged", false);
   }
 
-  bool cancel_pending(const std::string &) noexcept {
-    if (!active_submit.load(std::memory_order_acquire))
+  bool cancel_pending(const std::string &job_id) noexcept {
+    if (job_id.empty())
+      return false;
+    std::lock_guard active_lock(active_submit_mutex);
+    if (active_submit_job_id != job_id)
       return false;
     const auto process_group = owned_process_group.load(std::memory_order_acquire);
     if (process_group <= 0)
       return false;
-    terminate_process_group(process_group);
-    return true;
+    return terminate_process_group(process_group);
   }
 
   void stop() noexcept {
-    std::lock_guard lock(mutex);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
     if (pid <= 0) {
       terminate_process_group(owned_process_group.load(std::memory_order_acquire));
       owned_process_group.store(-1, std::memory_order_release);
@@ -274,7 +357,7 @@ struct ProcessWorkerTransport::Impl {
       return;
     }
     try {
-      (void)request_locked("shutdown", "", "", Json::object(), 500);
+      (void)request_locked(lock, "shutdown", "", "", Json::object(), 500);
     } catch (...) {
     }
     terminate_locked();
@@ -290,29 +373,41 @@ private:
   ProcessWorkerConfig config;
   mutable std::mutex mutex;
   mutable std::mutex metadata_mutex;
+  std::mutex active_submit_mutex;
+  std::string active_submit_job_id;
   pid_t pid = -1;
   std::atomic<pid_t> owned_process_group{-1};
-  std::atomic<bool> active_submit{false};
   int input_fd = -1, output_fd = -1, error_fd = -1;
   std::uint64_t request_number = 0;
   std::string stderr_capture;
   std::string output_buffer;
   WorkerInteractionHandler interaction_handler;
+  WorkerToolCallHandler tool_call_handler;
+  std::condition_variable tool_call_changed;
+  bool tool_call_inflight = false;
+
+  void wait_for_tool_call(std::unique_lock<std::mutex> &lock) {
+    tool_call_changed.wait(lock, [&] { return !tool_call_inflight; });
+  }
 
   void publish_metadata_locked() {
     std::lock_guard lock(metadata_mutex);
     metadata_snapshot_ = metadata_;
   }
 
-  void ensure_started_locked() {
+  void ensure_started_locked(std::unique_lock<std::mutex> &lock) {
     if (pid <= 0 || !metadata_.healthy) {
-      start_locked();
+      start_locked(lock);
       return;
     }
     int status = 0;
     if (::waitpid(pid, &status, WNOHANG) == pid) {
       mark_dead_locked();
-      throw WorkerTransportError("Worker process exited unexpectedly");
+      // The dead child was detected before this request was written, so no
+      // external submission could have been accepted. Restart the supervised
+      // process and let this first request proceed; failures after dispatch
+      // remain ambiguous and are still handled by request_response_locked().
+      start_locked(lock);
     }
   }
 
@@ -500,7 +595,8 @@ private:
         throw WorkerTransportError("Worker request timed out", true);
       if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))
         throw WorkerTransportError("Worker process closed its input");
-      const auto written = ::write(input_fd, wire.data() + offset, wire.size() - offset);
+      const auto written =
+          write_without_sigpipe(input_fd, wire.data() + offset, wire.size() - offset);
       if (written > 0)
         offset += static_cast<std::size_t>(written);
       else if (written < 0 && errno != EAGAIN && errno != EINTR)
@@ -573,9 +669,9 @@ private:
     }
   }
 
-  Json request_locked(const std::string &operation, const std::string &job_id,
-                      const std::string &external_job_id, const Json &payload,
-                      std::uint64_t timeout_ms) {
+  Json request_locked(std::unique_lock<std::mutex> &lock, const std::string &operation,
+                      const std::string &job_id, const std::string &external_job_id,
+                      const Json &payload, std::uint64_t timeout_ms) {
     const auto request_id = "req-" + std::to_string(++request_number);
     Json request{{"protocol_version", process_protocol::version},
                  {"request_id", request_id},
@@ -598,6 +694,58 @@ private:
           response.at("protocol_version").get<std::uint32_t>() != process_protocol::version)
         throw WorkerTransportError("Worker protocol version is incompatible");
       const auto message_type = response.value("message_type", std::string{"response"});
+      if (message_type == "worker_tool_call") {
+        deadline = std::max(deadline, Clock::now() +
+                                          std::chrono::milliseconds(config.interaction_timeout_ms));
+        WorkerToolCallRequest call;
+        try {
+          call = response.get<WorkerToolCallRequest>();
+        } catch (...) {
+          throw WorkerTransportError("Worker tool call request is invalid");
+        }
+        if (!bounded_text(call.request_id, process_protocol::max_interaction_id_bytes) ||
+            !bounded_text(call.worker_job_id, process_protocol::max_interaction_id_bytes) ||
+            !bounded_text(call.worker_id, process_protocol::max_interaction_id_bytes) ||
+            call.external_job_id.size() > process_protocol::max_interaction_id_bytes ||
+            call.session_id.size() > process_protocol::max_interaction_id_bytes ||
+            call.turn_id.size() > process_protocol::max_interaction_id_bytes ||
+            call.deadline.size() > 64 || call.namespace_name.size() > 128 ||
+            call.tool.size() > 128 || !call.arguments.is_object() ||
+            call.arguments.dump().size() > process_protocol::max_interaction_payload_bytes)
+          throw WorkerTransportError("Worker tool call request exceeds its limits");
+        if (operation != "submit" || job_id.empty() || call.worker_job_id != job_id ||
+            call.worker_id != id)
+          throw WorkerTransportError("Worker tool call does not match the active submission");
+        if (!tool_call_handler)
+          throw WorkerTransportError("Worker tool call handler is unavailable");
+
+        const auto handler = tool_call_handler;
+        WorkerToolCallResponse answer;
+        tool_call_inflight = true;
+        lock.unlock();
+        try {
+          answer = handler(call);
+        } catch (const std::exception &error) {
+          answer = {call.request_id, false, Json::object(), bounded_error_text(error.what())};
+        } catch (...) {
+          answer = {call.request_id, false, Json::object(), "Worker tool call failed"};
+        }
+        lock.lock();
+        tool_call_inflight = false;
+        tool_call_changed.notify_all();
+        if (answer.request_id != call.request_id)
+          throw WorkerTransportError("Worker tool call response id does not match");
+        Json response_message{{"protocol_version", process_protocol::version},
+                              {"message_type", "worker_tool_response"},
+                              {"request_id", answer.request_id},
+                              {"success", answer.success},
+                              {"result", answer.result},
+                              {"error", bounded_error_text(answer.error)}};
+        if (response_message.dump().size() > process_protocol::max_frame_bytes)
+          throw WorkerTransportError("Worker tool call response exceeds the frame limit");
+        write_frame_locked(response_message.dump(), deadline);
+        continue;
+      }
       if (message_type == "worker_request") {
         deadline = std::max(deadline, Clock::now() +
                                           std::chrono::milliseconds(config.interaction_timeout_ms));
@@ -646,11 +794,11 @@ private:
     }
   }
 
-  Json request_response_locked(const std::string &operation, const std::string &job_id,
-                               const std::string &external_job_id, const Json &payload,
-                               std::uint64_t timeout_ms) {
+  Json request_response_locked(std::unique_lock<std::mutex> &lock, const std::string &operation,
+                               const std::string &job_id, const std::string &external_job_id,
+                               const Json &payload, std::uint64_t timeout_ms) {
     try {
-      return request_locked(operation, job_id, external_job_id, payload, timeout_ms);
+      return request_locked(lock, operation, job_id, external_job_id, payload, timeout_ms);
     } catch (...) {
       // A protocol or pipe failure makes this child unusable. Never reuse it
       // for an ambiguous external submission.
@@ -731,15 +879,19 @@ private:
   }
 
   WorkerStatus status_operation(const std::string &operation, const std::string &external_job_id) {
-    std::lock_guard lock(mutex);
-    ensure_started_locked();
-    const auto response = request_response_locked(operation, "", external_job_id, Json::object(),
-                                                  config.request_timeout_ms);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    ensure_started_locked(lock);
+    const auto response = request_response_locked(lock, operation, "", external_job_id,
+                                                  Json::object(), config.request_timeout_ms);
     try {
       validate_response_metadata(response);
       WorkerStatus result;
       result.state = response_state(response);
-      result.result = response_payload(response);
+      // Preserve an omitted payload as null so WorkerManager can distinguish
+      // it from an explicitly empty object and fetch the final result after a
+      // worker reports terminal completion.
+      result.result = response.contains("payload") ? response_payload(response) : Json(nullptr);
       result.metadata = response.value("metadata", Json::object());
       result.continuation = response_continuation(response);
       result.artifacts = response.value("artifacts", std::vector<Json>{});
@@ -783,5 +935,8 @@ void ProcessWorkerTransport::stop() noexcept {
 }
 void ProcessWorkerTransport::set_interaction_handler(WorkerInteractionHandler handler) {
   impl_->set_interaction_handler(std::move(handler));
+}
+void ProcessWorkerTransport::set_tool_call_handler(WorkerToolCallHandler handler) {
+  impl_->set_tool_call_handler(std::move(handler));
 }
 } // namespace laso

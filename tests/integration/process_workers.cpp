@@ -7,6 +7,8 @@
 #include <laso/api/api.hpp>
 #include <laso/workers/manager.hpp>
 #include <laso/workers/process_transport.hpp>
+#include <map>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -85,6 +87,27 @@ bool wait_for_reference_host(const std::string &owner_token, bool expected_runni
   return reference_host_running(owner_token) == expected_running;
 }
 
+bool wait_for_submit_marker(const std::filesystem::path &marker, const std::string &job_id,
+                            std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  do {
+    std::ifstream stream(marker);
+    std::string line;
+    while (std::getline(stream, line))
+      if (line == job_id)
+        return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+
+bool submit_marker_contains_only(const std::filesystem::path &marker,
+                                 const std::string &expected_job_id) {
+  std::ifstream stream(marker);
+  std::string line;
+  return std::getline(stream, line) && line == expected_job_id && !std::getline(stream, line);
+}
+
 bool cancel_when_submit_is_active(ProcessWorkerTransport &transport, const std::string &job_id,
                                   std::chrono::milliseconds timeout) {
   // start() creates an idle child before submit begins, so process existence is
@@ -97,6 +120,109 @@ bool cancel_when_submit_is_active(ProcessWorkerTransport &transport, const std::
   }
   return false;
 }
+
+class NonRecoverableAsyncWorker final : public WorkerTransport {
+public:
+  explicit NonRecoverableAsyncWorker(std::promise<void> &started, std::shared_future<void> release,
+                                     WorkerJobState status_state = WorkerJobState::Completed)
+      : started_(started), release_(std::move(release)), status_state_(status_state) {}
+
+  WorkerMetadata metadata() const override {
+    WorkerMetadata result;
+    result.id = "non-recoverable";
+    result.name = result.id;
+    result.enabled = true;
+    result.healthy = true;
+    result.status = "healthy";
+    result.supports_status = true;
+    result.supports_recovery = false;
+    return result;
+  }
+  WorkerSubmission submit(const WorkerRequest &) override {
+    ++submit_count;
+    started_.set_value();
+    (void)release_.wait_for(std::chrono::seconds(2));
+    WorkerSubmission result;
+    result.external_job_id = "accepted-once";
+    result.state = WorkerJobState::Queued;
+    return result;
+  }
+  WorkerStatus status(const std::string &) override {
+    WorkerStatus result;
+    result.state = status_state_;
+    if (status_state_ == WorkerJobState::Completed)
+      result.result = Json{{"ok", true}};
+    return result;
+  }
+  WorkerStatus result(const std::string &) override {
+    return {};
+  }
+  bool cancel(const std::string &) override {
+    return false;
+  }
+  void start() override {}
+  void stop() noexcept override {}
+
+  std::atomic<unsigned> submit_count{0};
+
+private:
+  std::promise<void> &started_;
+  std::shared_future<void> release_;
+  WorkerJobState status_state_;
+};
+
+class InMemoryWorkerStorage final : public Storage {
+public:
+  void commit(const std::vector<Record> &records) override {
+    std::lock_guard lock(mutex_);
+    for (const auto &record : records)
+      records_[{record.kind, record.id}] = record;
+  }
+  void commit_owned(const std::vector<Record> &records, const std::string &, const std::string &,
+                    std::uint64_t) override {
+    commit(records);
+  }
+  void request_cancellation(const std::string &) override {}
+  bool claim(const Record &record, const std::vector<Record> &associated = {}) override {
+    std::lock_guard lock(mutex_);
+    const auto key = std::make_pair(record.kind, record.id);
+    if (records_.contains(key))
+      return false;
+    records_[key] = record;
+    for (const auto &item : associated)
+      records_[{item.kind, item.id}] = item;
+    return true;
+  }
+  Json get(RecordKind kind, const std::string &id) const override {
+    std::lock_guard lock(mutex_);
+    const auto found = records_.find({kind, id});
+    if (found == records_.end())
+      throw Error(ErrorCode::NotFound, "Test record was not found");
+    return found->second.value;
+  }
+  std::vector<Json> list(RecordKind kind, const std::string &run_id = "", std::size_t limit = 1000,
+                         std::size_t offset = 0) const override {
+    std::lock_guard lock(mutex_);
+    std::vector<Json> result;
+    for (const auto &[key, record] : records_) {
+      (void)key;
+      if (record.kind != kind || (!run_id.empty() && record.run_id != run_id))
+        continue;
+      if (offset > 0) {
+        --offset;
+        continue;
+      }
+      if (result.size() >= limit)
+        break;
+      result.push_back(record.value);
+    }
+    return result;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::map<std::pair<RecordKind, std::string>, Record> records_;
+};
 
 boost::beast::http::response<boost::beast::http::string_body>
 http_request(unsigned short port, boost::beast::http::verb method, const std::string &target,
@@ -140,6 +266,33 @@ TEST(ProcessWorker, HandshakeAndSubmitStatusResultLifecycle) {
   EXPECT_EQ(transport.result(submission.external_job_id).result.at("worker"), "process-reference");
 }
 
+TEST(ProcessWorker, FetchesDurableResultWhenCompletedStatusOmitsPayload) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto transport =
+      std::make_shared<ProcessWorkerTransport>("process", worker_config("split-result"));
+  registry.add("process", transport);
+  WorkerManager manager(storage, registry);
+
+  auto worker_request = request();
+  const auto submitted = manager.submit(worker_request);
+  ASSERT_EQ(submitted.state, WorkerJobState::Queued);
+  ASSERT_FALSE(submitted.external_job_id.empty());
+
+  const auto completed = manager.refresh(submitted.id);
+  EXPECT_EQ(completed.state, WorkerJobState::Completed);
+  EXPECT_TRUE(completed.result.at("ok"));
+  EXPECT_EQ(completed.result.at("worker"), "process-reference");
+  EXPECT_EQ(manager.job(submitted.id).result, completed.result);
+}
+
+TEST(ProcessWorker, PreservesWorkerRecoveryCapabilityFromHandshake) {
+  ProcessWorkerTransport transport("process", worker_config("no-recovery"));
+  ASSERT_NO_THROW(transport.start());
+  EXPECT_TRUE(transport.metadata().supports_status);
+  EXPECT_FALSE(transport.metadata().supports_recovery);
+}
+
 TEST(ProcessWorker, SubmitCarriesBoundedTimeoutInPayload) {
   ProcessWorkerTransport transport("process", worker_config("timeout-echo", 500));
   ASSERT_NO_THROW(transport.start());
@@ -179,6 +332,68 @@ TEST(ProcessWorker, LostChildJobRemainsUnknownAndIsNotResubmitted) {
   const auto retried = manager.submit(worker_request);
   EXPECT_EQ(retried.state, WorkerJobState::Unknown);
   EXPECT_EQ(retried.external_job_id, submitted.external_job_id);
+}
+
+TEST(ProcessWorker, AsyncNonRecoverableAdapterPollsActiveJobWithoutResubmission) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  std::promise<void> release;
+  auto adapter = std::make_shared<NonRecoverableAsyncWorker>(started, release.get_future().share());
+  registry.add("non-recoverable", adapter);
+  WorkerManager manager(storage, registry);
+
+  auto worker_request = request("non-recoverable");
+  worker_request.idempotency_key = "non-recoverable-async-initial";
+  const auto submitted = manager.submit_async(worker_request);
+  ASSERT_EQ(submitted.state, WorkerJobState::Submitting);
+  EXPECT_EQ(started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_EQ(manager.refresh(submitted.id).state, WorkerJobState::Submitting);
+
+  release.set_value();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  WorkerJob completed;
+  do {
+    completed = manager.refresh(submitted.id);
+    if (completed.state == WorkerJobState::Completed)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  } while (std::chrono::steady_clock::now() < deadline);
+
+  ASSERT_EQ(completed.state, WorkerJobState::Completed);
+  EXPECT_EQ(completed.external_job_id, "accepted-once");
+  EXPECT_TRUE(completed.result.at("ok"));
+  EXPECT_EQ(adapter->submit_count.load(), 1U);
+}
+
+TEST(ProcessWorker, ReconcilesStaleStatusCapableJobsBeforeEnforcingCapacity) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  std::promise<void> started;
+  std::promise<void> release;
+  auto adapter = std::make_shared<NonRecoverableAsyncWorker>(started, release.get_future().share(),
+                                                             WorkerJobState::Unknown);
+  release.set_value();
+  registry.add("non-recoverable", adapter);
+
+  WorkerJob stale;
+  stale.id = "stale-computer-job";
+  stale.worker_id = "non-recoverable";
+  stale.run_id = "stale-computer-run";
+  stale.idempotency_key = "stale-computer-idempotency-key";
+  stale.external_job_id = "lost-after-worker-restart";
+  stale.state = WorkerJobState::Running;
+  storage.commit({{RecordKind::WorkerJob, stale.id, stale.run_id, Json(stale)}});
+
+  WorkerManager manager(storage, registry, 8, 1);
+  auto request_value = request("non-recoverable");
+  request_value.idempotency_key = "new-computer-job";
+  const auto submitted = manager.submit(request_value);
+
+  EXPECT_EQ(manager.job(stale.id).state, WorkerJobState::Unknown);
+  EXPECT_EQ(submitted.external_job_id, "accepted-once");
+  EXPECT_EQ(adapter->submit_count.load(), 1U);
 }
 
 TEST(ProcessWorker, VersionMismatchIsTransportFailure) {
@@ -255,6 +470,49 @@ TEST(ProcessWorker, MalformedOversizedExitAndHangAreBoundedFailures) {
   }
 }
 
+TEST(ProcessWorker, RestartsExitedHealthyChildBeforeDispatchingNewRequest) {
+  TemporaryDirectory dir;
+  const auto marker = dir.path / "first-worker-exit-after-hello";
+  const auto release_marker = dir.path / "release-first-worker-exit";
+  const auto owner_token = worker_owner_token();
+  auto config = worker_config("exit-after-hello-once", 1000, owner_token);
+  config.args = {"--mode",
+                 "exit-after-hello-once",
+                 "--exit-marker",
+                 marker.string(),
+                 "--exit-release-marker",
+                 release_marker.string(),
+                 "--laso-test-owner-token",
+                 owner_token};
+  auto transport = std::make_shared<ProcessWorkerTransport>("process", std::move(config));
+  WorkerRegistry registry;
+  registry.add("process", transport);
+  InMemoryWorkerStorage storage;
+  WorkerManager manager(storage, registry);
+
+  ASSERT_NO_THROW(transport->start());
+  ASSERT_TRUE(std::filesystem::exists(marker));
+  ASSERT_TRUE(transport->metadata().healthy);
+
+  // Release the first child only after start() consumed its hello response.
+  // This deterministically exercises restart after a healthy child exits,
+  // without racing the startup handshake against process scheduling.
+  {
+    std::ofstream release(release_marker);
+    ASSERT_TRUE(release) << "unable to release first worker process";
+    release << "exit after acknowledged hello\n";
+    ASSERT_TRUE(release) << "unable to write worker release marker";
+  }
+  ASSERT_TRUE(wait_for_reference_host(owner_token, false));
+
+  // The adapter still has a healthy snapshot, but waitpid can prove the
+  // request has not been sent to that dead process.
+  const auto completed = manager.submit(request());
+  EXPECT_EQ(completed.state, WorkerJobState::Completed);
+  EXPECT_TRUE(completed.result.at("ok"));
+  EXPECT_TRUE(transport->metadata().healthy);
+}
+
 TEST(ProcessWorker, RequestTimeoutTerminatesOwnedProcessGroup) {
   const auto owner_token = worker_owner_token();
   auto config = worker_config("delay-ms", 5000, owner_token);
@@ -305,6 +563,101 @@ TEST(ProcessWorker, PendingCancellationTerminatesAndRestartsOwnedProcessGroup) {
   EXPECT_TRUE(wait_for_reference_host(owner_token, false));
 }
 
+TEST(ProcessWorker, ManagerCancellationOfQueuedJobDoesNotDispatchIt) {
+  TemporaryDirectory dir;
+  const auto marker = dir.path / "submitted-jobs";
+  const auto owner_token = worker_owner_token();
+  auto config = worker_config("delay-ms", 5000, owner_token);
+  config.args = {"--mode",
+                 "delay-ms",
+                 "--delay-ms",
+                 "500",
+                 "--submit-marker",
+                 marker.string(),
+                 "--laso-test-owner-token",
+                 owner_token};
+  auto transport = std::make_shared<ProcessWorkerTransport>("process", std::move(config));
+  transport->start();
+  WorkerRegistry registry;
+  registry.add("process-a", transport);
+  registry.add("process-b", transport);
+  InMemoryWorkerStorage storage;
+  WorkerManager manager(storage, registry);
+
+  auto first_request = request("process-a");
+  first_request.run_id = "queued-manager-cancel";
+  first_request.idempotency_key = "queued-manager-cancel:first";
+  const auto first = manager.submit_async(first_request);
+  ASSERT_TRUE(wait_for_submit_marker(marker, first.id));
+
+  auto second_request = request("process-b");
+  second_request.run_id = "queued-manager-cancel";
+  second_request.idempotency_key = "queued-manager-cancel:second";
+  const auto second = manager.submit_async(second_request);
+  ASSERT_EQ(second.state, WorkerJobState::Submitting);
+  manager.cancel(second.id, WorkerJobState::Cancelled, "cancel queued worker request");
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  WorkerJob first_result;
+  WorkerJob second_result;
+  do {
+    first_result = manager.job(first.id);
+    second_result = manager.job(second.id);
+    if (first_result.state == WorkerJobState::Completed &&
+        second_result.state == WorkerJobState::Cancelled)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  } while (std::chrono::steady_clock::now() < deadline);
+
+  EXPECT_EQ(first_result.state, WorkerJobState::Completed);
+  EXPECT_EQ(second_result.state, WorkerJobState::Cancelled);
+  EXPECT_TRUE(second_result.external_job_id.empty());
+  EXPECT_TRUE(second_result.cancellation_acknowledged);
+  EXPECT_TRUE(submit_marker_contains_only(marker, first.id));
+  manager.stop();
+  transport->stop();
+}
+
+TEST(ProcessWorker, PendingCancellationDuringToolCallbackDoesNotRaiseSigpipe) {
+  ProcessWorkerTransport transport("process", worker_config("tool-call-wait", 3000));
+  std::promise<void> callback_started;
+  auto callback_started_future = callback_started.get_future();
+  std::promise<void> release_callback;
+  auto release_callback_future = release_callback.get_future().share();
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    callback_started.set_value();
+    release_callback_future.wait();
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  transport.start();
+
+  std::promise<void> submit_finished;
+  auto submit_finished_future = submit_finished.get_future();
+  std::atomic<bool> submit_failed = false;
+  std::thread submitter([&] {
+    try {
+      (void)transport.submit(request());
+    } catch (const WorkerTransportError &) {
+      submit_failed.store(true, std::memory_order_release);
+    }
+    submit_finished.set_value();
+  });
+
+  const bool callback_entered =
+      callback_started_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  const bool cancelled = callback_entered && transport.cancel_pending("job-process-1");
+  release_callback.set_value();
+  const auto submit_state = submit_finished_future.wait_for(std::chrono::seconds(3));
+  submitter.join();
+
+  EXPECT_TRUE(callback_entered);
+  EXPECT_TRUE(cancelled);
+  EXPECT_EQ(submit_state, std::future_status::ready);
+  EXPECT_TRUE(submit_failed.load(std::memory_order_acquire));
+  EXPECT_FALSE(transport.metadata().healthy);
+  transport.stop();
+}
+
 TEST(ProcessWorker, ConcurrentTransportsAreObservedByTheirOwnTestIdentity) {
   const auto first_token = worker_owner_token();
   const auto second_token = worker_owner_token();
@@ -347,20 +700,59 @@ TEST(ProcessWorker, WorkerInteractionIsCorrelatedAndAnsweredByLASO) {
   EXPECT_EQ(requests.load(), 1U);
 }
 
+TEST(ProcessWorker, RejectsToolCallFromDifferentActiveJobBeforeDispatch) {
+  ProcessWorkerTransport transport("process", worker_config("tool-call-mismatch-job", 1500));
+  std::atomic<unsigned> dispatches = 0;
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    ++dispatches;
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  transport.start();
+  EXPECT_THROW(transport.submit(request()), WorkerTransportError);
+  EXPECT_EQ(dispatches.load(), 0U);
+}
+
+TEST(ProcessWorker, RejectsToolCallFromDifferentWorkerBeforeDispatch) {
+  ProcessWorkerTransport transport("process", worker_config("tool-call-mismatch-worker", 1500));
+  std::atomic<unsigned> dispatches = 0;
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    ++dispatches;
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  transport.start();
+  EXPECT_THROW(transport.submit(request()), WorkerTransportError);
+  EXPECT_EQ(dispatches.load(), 0U);
+}
+
 TEST(ProcessWorker, ConfigurationUsesExplicitExecutableAndEnvironmentBoundary) {
   TemporaryDirectory dir;
   const auto path = dir.path / "process.yaml";
-  std::ofstream(path) << "process_workers:\n  example:\n    executable: "
-                      << LASO_PROCESS_WORKER_HOST
-                      << "\n    args: [--mode, success]\n    environment_allowlist: [PATH]\n"
-                         "    environment: {LASO_REFERENCE: enabled}\n    startup_timeout_ms: 700\n"
-                         "    request_timeout_ms: 800\n";
+  std::ofstream(path)
+      << "postgres_dsn: host=127.0.0.1 dbname=laso_test user=laso_test\n"
+      << "process_workers:\n  example:\n    executable: " << LASO_PROCESS_WORKER_HOST
+      << "\n    args: [--mode, success]\n    remote: true\n    environment_allowlist: [PATH]\n"
+         "    environment: {LASO_REFERENCE: enabled}\n    startup_timeout_ms: 700\n"
+         "    request_timeout_ms: 800\n"
+         "allow_remote_workers: [example]\n";
   const auto loaded = load_config(path);
   ASSERT_EQ(loaded.process_workers.size(), 1U);
   EXPECT_EQ(loaded.process_workers.at("example").executable, LASO_PROCESS_WORKER_HOST);
   EXPECT_EQ(loaded.process_workers.at("example").args.size(), 2U);
   EXPECT_EQ(loaded.process_workers.at("example").environment.at("LASO_REFERENCE"), "enabled");
   EXPECT_EQ(loaded.process_workers.at("example").startup_timeout_ms, 700U);
+  EXPECT_TRUE(loaded.process_workers.at("example").remote);
+  ASSERT_EQ(loaded.allow_remote_workers.size(), 1U);
+  EXPECT_EQ(loaded.allow_remote_workers.front(), "example");
+}
+
+TEST(ProcessWorker, MetadataTracksRemoteProcessConfiguration) {
+  auto config = worker_config("success");
+  config.remote = true;
+  ProcessWorkerTransport transport("remote-computer", config);
+  transport.start();
+  const auto metadata = transport.metadata();
+  EXPECT_TRUE(metadata.remote);
+  EXPECT_FALSE(metadata.local);
 }
 
 TEST(ProcessWorker, ShutdownDoesNotLeaveReferenceChildRunning) {

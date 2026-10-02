@@ -156,7 +156,8 @@ Service::Service(asio::io_context &io, Config config)
            config_.postgres_pool_max_connections, config_.postgres_pool_acquisition_timeout_ms,
            config_.execution_mode == "multi_instance"})),
       coordination_(make_coordination(config_, instance_id_)),
-      policy_(config_.rules, config_.allow_network), schemas_(config_.schema_roots),
+      policy_(config_.rules, config_.allow_network, config_.allow_remote_workers),
+      schemas_(config_.schema_roots),
       ingress_(*storage_, events_, schemas_, config_.max_event_trigger_depth,
                config_.max_pending_scheduler_launches, 32),
       worker_manager_(std::make_shared<WorkerManager>(
@@ -221,7 +222,19 @@ Service::Service(asio::io_context &io, Config config)
         [manager = worker_manager_](const WorkerInteractionRequest &request) {
           return manager->handle_interaction(request);
         });
-    transport->start();
+    transport->set_tool_call_handler(
+        [manager = worker_manager_](const WorkerToolCallRequest &request) {
+          return manager->handle_tool_call(request);
+        });
+    try {
+      transport->start();
+    } catch (const std::exception &error) {
+      // A disconnected or misconfigured endpoint is degraded worker health,
+      // not a control-plane startup failure. Keep it registered so operators
+      // can see the failure and later submissions can retry its supervised
+      // transport without restarting Core.
+      log_diagnostic("worker.initial_start_failed", {{"worker_id", id}, {"error", error.what()}});
+    }
   }
   plugins_.discover(config_.plugin_dirs, config_.event_sources, config_.worker_plugins);
   for (const auto &source : plugins_.event_sources())

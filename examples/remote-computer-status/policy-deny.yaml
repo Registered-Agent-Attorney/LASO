@@ -1,0 +1,13 @@
+laso: '1'
+name: remote-computer-policy-deny
+version: 1
+nodes:
+  probe:
+    type: worker
+    worker: windows_computer
+    task_type: window.list
+    capability: window.list
+    instructions: This test must be denied by the endpoint's explicit default-deny policy.
+edges:
+  - {from: input, to: probe}
+  - {from: probe, to: output}

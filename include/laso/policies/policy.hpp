@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <laso/core/types.hpp>
 #include <memory>
 
@@ -6,7 +7,7 @@ namespace laso {
 enum class PolicyDecision { Allow, Deny, RequireApproval };
 struct PolicyContext {
   std::string pipeline_id, node_id, resource, classification = "public";
-  bool network = false, remote = false, approval_required = false;
+  bool network = false, remote = false, worker_node = false, approval_required = false;
 };
 struct PolicyResult {
   PolicyDecision decision;
@@ -23,12 +24,18 @@ struct PolicyRule {
 };
 class PolicyEngine final : public Policy {
 public:
-  explicit PolicyEngine(std::vector<PolicyRule> rules = {}, bool allow_network = false)
-      : rules_(std::move(rules)), allow_network_(allow_network) {}
+  explicit PolicyEngine(std::vector<PolicyRule> rules = {}, bool allow_network = false,
+                        std::vector<std::string> allow_remote_workers = {})
+      : rules_(std::move(rules)), allow_network_(allow_network),
+        allow_remote_workers_(std::move(allow_remote_workers)) {}
   PolicyResult evaluate(const PolicyContext &c) const override {
-    if ((c.network || c.remote) && !allow_network_)
+    const bool trusted_remote_worker =
+        c.remote && c.worker_node &&
+        std::find(allow_remote_workers_.begin(), allow_remote_workers_.end(), c.resource) !=
+            allow_remote_workers_.end();
+    if ((c.network || c.remote) && !allow_network_ && !trusted_remote_worker)
       return {PolicyDecision::Deny, "Network access is disabled"};
-    if (c.remote && c.classification != "public")
+    if (c.remote && !c.worker_node && c.classification != "public")
       return {PolicyDecision::Deny,
               "Non-public data cannot leave the process through remote models"};
     PolicyDecision decision =
@@ -47,5 +54,6 @@ public:
 private:
   std::vector<PolicyRule> rules_;
   bool allow_network_;
+  std::vector<std::string> allow_remote_workers_;
 };
 } // namespace laso

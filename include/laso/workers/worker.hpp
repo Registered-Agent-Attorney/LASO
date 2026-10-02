@@ -1,8 +1,10 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <laso/core/async.hpp>
 #include <laso/core/registry.hpp>
+#include <memory>
 #include <optional>
 
 namespace laso {
@@ -57,24 +59,34 @@ public:
   bool timed_out = false;
 };
 
+class WorkerSubmissionCancelled final : public WorkerTransportError {
+public:
+  WorkerSubmissionCancelled()
+      : WorkerTransportError("Worker submission was cancelled before dispatch") {}
+};
+
 struct WorkerMetadata {
   std::string id, name, version, description, plugin, event_schema, event_source_id,
       status = "disabled";
   std::vector<std::string> capabilities;
   bool local = true, remote = false, healthy = false, enabled = false;
-  bool supports_recovery = false, supports_cancellation = false;
+  bool supports_status = false, supports_recovery = false, supports_cancellation = false;
 };
 void to_json(Json &, const WorkerMetadata &);
 void from_json(const Json &, WorkerMetadata &);
 
 struct WorkerRequest {
   std::string job_id, worker_id, capability, task_type, instructions, idempotency_key, deadline,
-      run_id, node_id, durable_session_id;
+      run_id, node_id, durable_session_id, parent_worker_job_id, parent_tool_call_id,
+      parent_tool_turn_id, parent_provider_session_id;
   unsigned attempt = 1;
   std::uint64_t timeout_ms = 0;
   Json input = Json::object(), output_schema = Json::object(), metadata = Json::object();
   std::vector<std::string> artifact_ids;
   bool durable_session = false;
+  // In-process only: supervised transports check this before crossing the
+  // external dispatch boundary. It is deliberately not serialized.
+  std::shared_ptr<std::atomic<bool>> cancellation_signal;
   std::optional<OpaqueProviderContinuation> continuation;
   std::optional<SessionContext> session_context;
 };
@@ -104,6 +116,7 @@ struct WorkerJob {
               submitted_at = timestamp(), started_at, completed_at, error, cancellation_error;
   unsigned attempt = 1;
   WorkerJobState state = WorkerJobState::Created;
+  WorkerJobState cancellation_target_state = WorkerJobState::Cancelled;
   WorkerFailureKind failure_kind = WorkerFailureKind::None;
   bool cancellation_requested = false, cancellation_acknowledged = false;
   Json request_metadata = Json::object(), result = Json::object(), result_metadata = Json::object();
@@ -165,6 +178,25 @@ void from_json(const Json &, WorkerInteraction &);
 using WorkerInteractionHandler =
     std::function<WorkerInteractionResponse(const WorkerInteractionRequest &)>;
 
+// A Codex dynamic-tool request crosses the process boundary as a distinct,
+// bounded capability call. It is intentionally not a generic worker RPC.
+struct WorkerToolCallRequest {
+  std::string request_id, worker_job_id, worker_id, external_job_id, session_id, turn_id, deadline;
+  std::string namespace_name, tool;
+  Json arguments = Json::object();
+};
+void to_json(Json &, const WorkerToolCallRequest &);
+void from_json(const Json &, WorkerToolCallRequest &);
+struct WorkerToolCallResponse {
+  std::string request_id;
+  bool success = false;
+  Json result = Json::object();
+  std::string error;
+};
+void to_json(Json &, const WorkerToolCallResponse &);
+void from_json(const Json &, WorkerToolCallResponse &);
+using WorkerToolCallHandler = std::function<WorkerToolCallResponse(const WorkerToolCallRequest &)>;
+
 // The transport boundary is lifecycle- and job-operation-complete. Native
 // plugins continue to implement WorkerAdapter below; supervised or remote
 // implementations can implement this interface without changing WorkerNode.
@@ -186,6 +218,12 @@ public:
   // Optional for native adapters. Process transports use it to route bounded
   // worker-originated approval/permission/question requests to LASO.
   virtual void set_interaction_handler(WorkerInteractionHandler) {}
+  virtual void set_tool_call_handler(WorkerToolCallHandler) {}
+  // Whether start() can restore the transport process after it fails. This is
+  // independent of supports_recovery, which controls replay of provider jobs.
+  virtual bool supports_transport_restart() const {
+    return false;
+  }
   virtual void start() = 0;
   virtual void stop() noexcept = 0;
 };

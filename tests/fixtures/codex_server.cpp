@@ -14,6 +14,7 @@ using namespace laso;
 namespace {
 unsigned thread_sequence = 0;
 std::string active_thread;
+bool dynamic_tools_advertised = false;
 
 void send(const Json &value) {
   std::cout << value.dump() << '\n' << std::flush;
@@ -92,6 +93,10 @@ int main(int argc, char **argv) {
     if (!request.contains("id"))
       continue;
     if (method == "initialize") {
+      const auto capabilities =
+          request.value("params", Json::object()).value("capabilities", Json::object());
+      if (capabilities.value("experimentalApi", false) != true)
+        return 75;
       send({{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"server", "fixture"}}}});
       continue;
     }
@@ -102,7 +107,22 @@ int main(int argc, char **argv) {
     if (mode == "crash")
       return 73;
     if (method == "thread/start") {
-      const auto cwd = request.value("params", Json::object()).value("cwd", std::string{});
+      const auto params = request.value("params", Json::object());
+      const auto cwd = params.value("cwd", std::string{});
+      const auto tools = params.value("dynamicTools", Json::array());
+      const auto tool_functions =
+          tools.size() == 1 ? tools.front().value("tools", Json::array()) : Json::array();
+      const auto function = tool_functions.size() == 1 ? tool_functions.front() : Json::object();
+      const auto input_schema = function.value("inputSchema", Json::object());
+      dynamic_tools_advertised = tools.size() == 1 &&
+                                 tools.front().value("type", std::string{}) == "namespace" &&
+                                 tools.front().value("name", std::string{}) == "laso" &&
+                                 function.value("type", std::string{}) == "function" &&
+                                 function.value("name", std::string{}) == "browser_status" &&
+                                 input_schema.value("type", std::string{}) == "object" &&
+                                 input_schema.value("properties", Json::object()).empty() &&
+                                 input_schema.value("required", Json::array()).empty() &&
+                                 input_schema.value("additionalProperties", true) == false;
       const auto sequence_file = std::filesystem::path(cwd) / ".laso-codex-fixture-sequence";
       {
         std::ifstream stored(sequence_file);
@@ -115,8 +135,13 @@ int main(int argc, char **argv) {
         if (!(stored << thread_sequence << '\n'))
           return 74;
       }
-      active_thread = thread_sequence == 1 ? "fixture-session"
-                                           : "fixture-session-" + std::to_string(thread_sequence);
+      if (const auto *configured = std::getenv("LASO_CODEX_FIXTURE_SESSION_ID");
+          configured && *configured != '\0') {
+        active_thread = configured;
+      } else {
+        active_thread = thread_sequence == 1 ? "fixture-session"
+                                             : "fixture-session-" + std::to_string(thread_sequence);
+      }
       send({{"jsonrpc", "2.0"},
             {"id", id},
             {"result", Json{{"thread", thread(active_thread, cwd)},
@@ -181,11 +206,34 @@ int main(int argc, char **argv) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
       }
-      if (const auto *marker = std::getenv("LASO_CODEX_FIXTURE_DONE_MARKER");
-          marker && *marker != '\0') {
-        std::ofstream done(marker, std::ios_base::trunc);
-        if (!(done << "done\n"))
-          return 74;
+      std::string dynamic_tool_result;
+      const auto turn = Json{{"id", "fixture-turn"}, {"status", "inProgress"}};
+      if (prompt.find("request-browser-status") != std::string::npos) {
+        if (!dynamic_tools_advertised)
+          return 76;
+        send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
+        send(Json{{"jsonrpc", "2.0"},
+                  {"id", 101},
+                  {"method", "item/tool/call"},
+                  {"params",
+                   Json{{"threadId", active_thread},
+                        {"turnId", mode == "mismatched-tool-turn" ? "other-turn" : "fixture-turn"},
+                        {"callId", "fixture-browser-status-call"},
+                        {"namespace", "laso"},
+                        {"tool", "browser_status"},
+                        {"arguments", Json::object()}}}});
+        std::string tool_response_line;
+        if (!std::getline(std::cin, tool_response_line))
+          return 77;
+        const auto tool_response = Json::parse(tool_response_line, nullptr, false);
+        if (tool_response.is_discarded() || tool_response.value("id", Json()) != Json(101))
+          return 78;
+        const auto tool_result = tool_response.value("result", Json::object());
+        const auto content = tool_result.value("contentItems", Json::array());
+        if (!tool_result.value("success", false) || content.size() != 1 ||
+            content.front().value("type", std::string{}) != "inputText")
+          return 79;
+        dynamic_tool_result = content.front().value("text", std::string{});
       }
       if (prompt.find("request-permission") != std::string::npos) {
         send({{"jsonrpc", "2.0"},
@@ -223,12 +271,23 @@ int main(int argc, char **argv) {
         if (answer.is_discarded() || !answer.value("result", Json::object()).is_object())
           return 69;
       }
-      const auto turn = Json{{"id", "fixture-turn"}, {"status", "inProgress"}};
-      send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
-      const auto text = prompt.find("M6 context marker") != std::string::npos
-                            ? "FIXTURE-CONTEXT-SEEN"
-                        : prompt.find("continue") != std::string::npos ? "FIXTURE-CONTINUED"
-                                                                       : "FIXTURE-COMPLETE";
+      if (prompt.find("request-browser-status") == std::string::npos) {
+        send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
+      }
+      send(Json{{"method", "turn/started"},
+                {"params", Json{{"threadId", active_thread}, {"turn", turn}}}});
+      const auto *configured_output = std::getenv("LASO_CODEX_FIXTURE_OUTPUT");
+      std::string text;
+      if (configured_output && *configured_output != '\0')
+        text = configured_output;
+      else if (!dynamic_tool_result.empty())
+        text = "BROWSER_STATUS_RESULT:" + dynamic_tool_result;
+      else if (prompt.find("M6 context marker") != std::string::npos)
+        text = "FIXTURE-CONTEXT-SEEN";
+      else if (prompt.find("continue") != std::string::npos)
+        text = "FIXTURE-CONTINUED";
+      else
+        text = "FIXTURE-COMPLETE";
       const auto item = Json{{"type", "agentMessage"}, {"text", text}};
       send(Json{{"method", "item/completed"}, {"params", Json{{"item", item}}}});
       const auto usage = Json{{"inputTokens", 11}, {"outputTokens", 7}, {"totalTokens", 18}};

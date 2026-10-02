@@ -1,0 +1,54 @@
+laso: "1"
+name: codex-full-system
+version: 1
+max_steps: 32
+timeout_ms: 240000
+nodes:
+  fork:
+    type: parallel
+    join: join
+  agent_one:
+    type: worker
+    worker: codex_agent_one
+    task_type: coding
+    capability: coding-agent
+    timeout_ms: 180000
+    max_attempts: 1
+    instructions: >-
+      This is a harmless reasoning-only LASO acceptance check. Do not access
+      files, browsers, networks, or invoke tools. Calculate 19 + 23 mentally
+      and return exactly LASO_AGENT_ISOLATION_ONE: 42.
+  agent_two:
+    type: worker
+    worker: codex_agent_two
+    task_type: coding
+    capability: coding-agent
+    timeout_ms: 180000
+    max_attempts: 1
+    instructions: >-
+      This is a harmless reasoning-only LASO acceptance check. Do not access
+      files, browsers, networks, or invoke tools. Count the vowels in LASO
+      and return exactly LASO_AGENT_ISOLATION_TWO: 2.
+  agent_three:
+    type: worker
+    worker: codex_agent_three
+    task_type: coding
+    capability: coding-agent
+    timeout_ms: 180000
+    max_attempts: 1
+    instructions: >-
+      Call the registered laso.browser_status tool with an empty object exactly
+      once. Do not use any other tool or perform any browser action. Return
+      exactly LASO_AGENT_COMPUTER_STATUS: followed by a JSON object containing
+      only the returned window_count and browser_status fields.
+  join:
+    type: join
+edges:
+  - {from: input, to: fork}
+  - {from: fork, to: agent_one}
+  - {from: fork, to: agent_two}
+  - {from: fork, to: agent_three}
+  - {from: agent_one, to: join}
+  - {from: agent_two, to: join}
+  - {from: agent_three, to: join}
+  - {from: join, to: output}

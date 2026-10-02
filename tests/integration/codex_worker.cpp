@@ -1,18 +1,30 @@
 #include "../support.hpp"
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <laso/api/api.hpp>
 #include <laso/workers/process_transport.hpp>
+#include <memory>
+#include <set>
+#include <string>
+#include <thread>
 
 using namespace laso;
 using namespace laso::test;
 
 namespace {
 ProcessWorkerConfig codex_config(const std::filesystem::path &root,
-                                 const std::string &fixture_mode = "success") {
+                                 const std::string &fixture_mode = "success",
+                                 const std::string &worker_id = "codex") {
   ProcessWorkerConfig result;
   result.executable = LASO_CODEX_WORKER;
-  result.args = {"--codex",     LASO_CODEX_FIXTURE, "--allowed-root",
-                 root.string(), "--timeout-ms",     "2000"};
+  result.args = {"--worker-id",    worker_id,     "--codex",      LASO_CODEX_FIXTURE,
+                 "--allowed-root", root.string(), "--timeout-ms", "2000"};
   if (fixture_mode != "success")
     result.environment["LASO_CODEX_FIXTURE_MODE"] = fixture_mode;
   result.startup_timeout_ms = 2000;
@@ -21,10 +33,11 @@ ProcessWorkerConfig codex_config(const std::filesystem::path &root,
 }
 
 WorkerRequest request(const std::filesystem::path &root, const std::string &key,
-                      const std::string &instructions, const std::string &session = {}) {
+                      const std::string &instructions, const std::string &session = {},
+                      const std::string &worker_id = "codex") {
   WorkerRequest result;
   result.job_id = key;
-  result.worker_id = "codex";
+  result.worker_id = worker_id;
   result.task_type = "coding";
   result.instructions = instructions;
   result.idempotency_key = key;
@@ -104,11 +117,207 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
   ASSERT_EQ(first.usage.input_tokens, std::optional<std::uint64_t>(11));
   ASSERT_EQ(first.usage.output_tokens, std::optional<std::uint64_t>(7));
   ASSERT_EQ(first.usage.executor, "codex");
+  EXPECT_EQ(first.metadata.value("codex_turn_id", ""), "fixture-turn");
+  EXPECT_FALSE(first.metadata.value("codex_turn_started_at", "").empty());
+  EXPECT_FALSE(first.metadata.value("codex_turn_completed_at", "").empty());
   const auto second = transport.submit(
       request(root.path, "codex-second", "continue the existing session", "fixture-session"));
   EXPECT_EQ(second.state, WorkerJobState::Completed);
   EXPECT_EQ(second.result.value("summary", ""), "FIXTURE-CONTINUED");
   transport.stop();
+}
+
+TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport("agent-one", codex_config(root.path, "success", "agent-one"));
+  std::atomic<unsigned> calls{0};
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &request) {
+    ++calls;
+    EXPECT_EQ(request.request_id, "fixture-browser-status-call");
+    EXPECT_EQ(request.worker_job_id, "codex-browser-status-turn");
+    EXPECT_EQ(request.worker_id, "agent-one");
+    EXPECT_EQ(request.session_id, "fixture-session");
+    EXPECT_EQ(request.turn_id, "fixture-turn");
+    EXPECT_EQ(request.namespace_name, "laso");
+    EXPECT_EQ(request.tool, "browser_status");
+    EXPECT_EQ(request.arguments, Json::object());
+    return WorkerToolCallResponse{
+        request.request_id,
+        true,
+        Json{{"window_count", 1},
+             {"browser_status", Json{{"browser_visible", true}, {"active_browser_visible", true}}}},
+        {}};
+  });
+  ASSERT_NO_THROW(transport.start());
+  const auto result = transport.submit(
+      request(root.path, "codex-browser-status-turn", "request-browser-status", {}, "agent-one"));
+  ASSERT_EQ(result.state, WorkerJobState::Completed) << result.error;
+  EXPECT_EQ(calls.load(), 1U);
+  EXPECT_NE(result.result.value("summary", std::string{}).find("BROWSER_STATUS_RESULT:"),
+            std::string::npos);
+  EXPECT_NE(result.result.value("summary", std::string{}).find("window_count"), std::string::npos);
+  transport.stop();
+}
+
+TEST(CodexWorker, RejectsDynamicToolCallForDifferentActiveTurn) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport("agent-one",
+                                   codex_config(root.path, "mismatched-tool-turn", "agent-one"));
+  std::atomic<unsigned> dispatches{0};
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    ++dispatches;
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  ASSERT_NO_THROW(transport.start());
+  EXPECT_THROW(transport.submit(request(root.path, "codex-mismatched-turn",
+                                        "request-browser-status", {}, "agent-one")),
+               WorkerTransportError);
+  EXPECT_EQ(dispatches.load(), 0U);
+  transport.stop();
+}
+
+TEST(CodexWorker, NonDurableSubmissionsStartIndependentCodexThreads) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport("codex", codex_config(root.path));
+  ASSERT_NO_THROW(transport.start());
+  const auto first = transport.submit(request(root.path, "codex-independent-first", "first task"));
+  const auto second =
+      transport.submit(request(root.path, "codex-independent-second", "second task"));
+  ASSERT_EQ(first.state, WorkerJobState::Completed) << first.error;
+  ASSERT_EQ(second.state, WorkerJobState::Completed) << second.error;
+  EXPECT_EQ(first.result.value("session_id", ""), "fixture-session");
+  EXPECT_EQ(second.result.value("session_id", ""), "fixture-session-2");
+  EXPECT_NE(first.result.value("session_id", ""), second.result.value("session_id", ""));
+  transport.stop();
+}
+
+TEST(CodexWorker, ThreeIndependentWorkersOverlapAndReturnDistinctSessions) {
+  TemporaryDirectory root;
+  auto storage = make_storage(root.path / "state.db");
+  WorkerRegistry registry;
+  constexpr std::array<const char *, 3> agent_ids = {"agent-one", "agent-two", "agent-three"};
+  constexpr std::array<const char *, 3> markers = {"MARKER-ONE", "MARKER-TWO", "MARKER-THREE"};
+  std::array<std::shared_ptr<ProcessWorkerTransport>, agent_ids.size()> transports;
+  std::array<std::filesystem::path, agent_ids.size()> started_markers;
+  std::array<std::chrono::system_clock::time_point, agent_ids.size()> started_at{};
+  std::array<std::chrono::system_clock::time_point, agent_ids.size()> completed_at{};
+  std::array<std::chrono::steady_clock::time_point, agent_ids.size()> overlap_started_at{};
+  std::array<std::chrono::steady_clock::time_point, agent_ids.size()> overlap_completed_at{};
+  for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+    const auto id = std::string("codex-") + agent_ids[index];
+    const auto workdir = root.path / id;
+    std::filesystem::create_directories(workdir);
+    auto worker = codex_config(root.path, "write-workspace-then-quiet", id);
+    worker.request_timeout_ms = 8000;
+    worker.environment["LASO_CODEX_FIXTURE_SLEEP_MS"] = "1200";
+    worker.environment["LASO_CODEX_FIXTURE_SESSION_ID"] = id + "-provider-thread";
+    worker.environment["LASO_CODEX_FIXTURE_OUTPUT"] = markers[index];
+    started_markers[index] = root.path / (id + ".started");
+    worker.environment["LASO_CODEX_FIXTURE_MARKER"] = started_markers[index].string();
+    transports[index] = std::make_shared<ProcessWorkerTransport>(id, std::move(worker));
+    ASSERT_NO_THROW(transports[index]->start());
+    registry.add(id, transports[index]);
+  }
+
+  WorkerManager manager(*storage, registry, 8, 1);
+  std::array<WorkerRequest, agent_ids.size()> requests;
+  std::array<std::string, agent_ids.size()> job_ids;
+  for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+    const auto id = std::string("codex-") + agent_ids[index];
+    requests[index] = request(root.path / id, "three-agent-" + id, markers[index], {}, id);
+    requests[index].run_id = "three-agent-acceptance";
+    requests[index].node_id = agent_ids[index];
+    (void)manager.submit_async(requests[index]);
+    job_ids[index] = manager.job_id_for(requests[index].idempotency_key);
+  }
+
+  const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+  bool all_started_before_any_completed = false;
+  do {
+    const auto observed_at = std::chrono::system_clock::now();
+    const auto monotonic_at = std::chrono::steady_clock::now();
+    for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+      if (started_at[index].time_since_epoch().count() == 0 &&
+          std::filesystem::exists(started_markers[index])) {
+        started_at[index] = observed_at;
+        overlap_started_at[index] = monotonic_at;
+      }
+      const auto state = manager.job(job_ids[index]).state;
+      if (completed_at[index].time_since_epoch().count() == 0 && worker_job_terminal(state)) {
+        completed_at[index] = observed_at;
+        overlap_completed_at[index] = monotonic_at;
+      }
+    }
+    const bool all_started =
+        std::all_of(started_at.begin(), started_at.end(),
+                    [](const auto &time) { return time.time_since_epoch().count() != 0; });
+    const bool any_completed =
+        std::any_of(completed_at.begin(), completed_at.end(),
+                    [](const auto &time) { return time.time_since_epoch().count() != 0; });
+    if (all_started && !any_completed) {
+      all_started_before_any_completed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  } while (std::chrono::steady_clock::now() < start_deadline);
+  EXPECT_TRUE(all_started_before_any_completed)
+      << "three Codex workers did not overlap before the first provider turn completed";
+
+  const auto completion_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool all_completed = false;
+  do {
+    const auto observed_at = std::chrono::system_clock::now();
+    const auto monotonic_at = std::chrono::steady_clock::now();
+    all_completed = true;
+    for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+      const auto job = manager.job(job_ids[index]);
+      if (completed_at[index].time_since_epoch().count() == 0 && worker_job_terminal(job.state)) {
+        completed_at[index] = observed_at;
+        overlap_completed_at[index] = monotonic_at;
+      }
+      all_completed = all_completed && job.state == WorkerJobState::Completed;
+    }
+    if (all_completed)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  } while (std::chrono::steady_clock::now() < completion_deadline);
+  ASSERT_TRUE(all_completed) << "one or more independent Codex worker jobs failed to complete";
+
+  std::set<std::string> provider_sessions;
+  auto latest_start = std::chrono::steady_clock::time_point::min();
+  auto earliest_completion = std::chrono::steady_clock::time_point::max();
+  for (std::size_t index = 0; index < agent_ids.size(); ++index) {
+    const auto completed = manager.job(job_ids[index]);
+    EXPECT_EQ(completed.worker_id, std::string("codex-") + agent_ids[index]);
+    EXPECT_EQ(completed.result.value("summary", ""), markers[index]);
+    EXPECT_EQ(completed.result_metadata.value("codex_turn_id", ""), "fixture-turn");
+    EXPECT_FALSE(completed.result_metadata.value("codex_turn_started_at", "").empty());
+    EXPECT_FALSE(completed.result_metadata.value("codex_turn_completed_at", "").empty());
+    const auto provider_session = completed.result.value("session_id", "");
+    ASSERT_FALSE(provider_session.empty());
+    provider_sessions.insert(provider_session);
+    const auto started_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(started_at[index].time_since_epoch())
+            .count();
+    const auto completed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  completed_at[index].time_since_epoch())
+                                  .count();
+    ASSERT_GT(started_ms, 0);
+    ASSERT_NE(completed_at[index].time_since_epoch().count(), 0);
+    ASSERT_NE(overlap_started_at[index].time_since_epoch().count(), 0);
+    ASSERT_NE(overlap_completed_at[index].time_since_epoch().count(), 0);
+    ASSERT_LT(overlap_started_at[index], overlap_completed_at[index]);
+    latest_start = std::max(latest_start, overlap_started_at[index]);
+    earliest_completion = std::min(earliest_completion, overlap_completed_at[index]);
+    std::clog << "codex-isolation agent=" << agent_ids[index] << " worker=" << completed.worker_id
+              << " job=" << completed.id << " provider_session=" << provider_session
+              << " started_unix_ms=" << started_ms << " completed_unix_ms=" << completed_ms << '\n';
+  }
+  EXPECT_EQ(provider_sessions.size(), agent_ids.size());
+  EXPECT_LT(latest_start, earliest_completion) << "provider execution intervals did not overlap";
+  manager.stop();
+  for (const auto &transport : transports)
+    transport->stop();
 }
 
 TEST(CodexWorker, DurableSessionContinuationSurvivesAdapterRestartAndContextGeneration) {
@@ -438,18 +647,20 @@ TEST(CodexWorker, ProjectRootIsEnforced) {
 
 TEST(CodexWorker, PermissionRequestUsesGenericWorkerChannel) {
   TemporaryDirectory root;
-  ProcessWorkerTransport transport("codex", codex_config(root.path));
+  const std::string worker_id = "codex-agent-test";
+  ProcessWorkerTransport transport(worker_id, codex_config(root.path, "success", worker_id));
+  ASSERT_NO_THROW(transport.start());
+  EXPECT_EQ(transport.metadata().id, worker_id);
   unsigned requests = 0;
   transport.set_interaction_handler([&](const WorkerInteractionRequest &interaction) {
     ++requests;
     EXPECT_EQ(interaction.type, WorkerInteractionType::Permission);
-    EXPECT_EQ(interaction.worker_id, "codex");
+    EXPECT_EQ(interaction.worker_id, worker_id);
     return WorkerInteractionResponse{interaction.request_id, WorkerInteractionState::Approved,
                                      Json{{"scope", "once"}}, "approved by test"};
   });
-  ASSERT_NO_THROW(transport.start());
   const auto result =
-      transport.submit(request(root.path, "codex-permission", "request-permission"));
+      transport.submit(request(root.path, "codex-permission", "request-permission", {}, worker_id));
   EXPECT_EQ(result.state, WorkerJobState::Completed);
   EXPECT_EQ(requests, 1U);
 }

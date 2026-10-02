@@ -104,6 +104,14 @@ std::vector<std::string> options(int argc, char **argv, const std::string &name)
   return result;
 }
 
+bool valid_worker_id(const std::string &value) {
+  return !value.empty() && value.size() <= 128 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char c) {
+           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+         });
+}
+
 bool within(const std::filesystem::path &path, const std::filesystem::path &root) {
   std::error_code ec;
   const auto relative = std::filesystem::relative(path, root, ec);
@@ -114,6 +122,11 @@ bool within(const std::filesystem::path &path, const std::filesystem::path &root
 class CodexFailure final : public std::runtime_error {
 public:
   explicit CodexFailure(const std::string &message) : std::runtime_error(message) {}
+};
+
+struct TurnStartObservation {
+  std::string turn_id;
+  std::string observed_at;
 };
 
 class CodexProcess {
@@ -305,9 +318,12 @@ private:
 
 class CodexAdapter {
 public:
-  CodexAdapter(std::string executable, std::vector<std::filesystem::path> roots,
-               std::uint64_t timeout_ms)
-      : executable_(std::move(executable)), timeout_ms_(timeout_ms), process_(executable_, timeout_ms_) {
+  CodexAdapter(std::string worker_id, std::string executable,
+               std::vector<std::filesystem::path> roots, std::uint64_t timeout_ms)
+      : executable_(std::move(executable)), timeout_ms_(timeout_ms),
+        process_(executable_, timeout_ms_), worker_id_(std::move(worker_id)) {
+    if (!valid_worker_id(worker_id_))
+      throw WorkerTransportError("Codex worker id is invalid");
     for (const auto &root : roots) {
       std::error_code ec;
       const auto canonical = std::filesystem::canonical(root, ec);
@@ -321,9 +337,11 @@ public:
 
   void start() {
     process_.start();
-    const auto response = call("initialize", Json{{"clientInfo", Json{{"name", "laso-codex-worker"},
-                                                                         {"version", "0.1"}}}},
-                               {});
+    const auto response = call(
+        "initialize",
+        Json{{"clientInfo", Json{{"name", "laso-codex-worker"}, {"version", "0.1"}}},
+             {"capabilities", Json{{"experimentalApi", true}}}},
+        {});
     if (!response.is_object())
       throw WorkerTransportError("Codex initialize response is invalid");
     Json initialized{{"jsonrpc", "2.0"}, {"method", "initialized"}, {"params", Json::object()}};
@@ -333,8 +351,9 @@ public:
 
   WorkerMetadata metadata() const {
     WorkerMetadata result;
-    result.id = "codex";
-    result.name = "Codex coding worker";
+    result.id = worker_id_;
+    result.name = worker_id_ == "codex" ? "Codex coding worker"
+                                        : "Codex coding worker (" + worker_id_ + ")";
     result.version = "app-server";
     result.description = "Optional supervised Codex coding worker";
     result.plugin = "process";
@@ -391,7 +410,9 @@ public:
         start_thread(directory, metadata);
       }
     } else {
-      if (!requested_session.empty() && requested_session != session_id_)
+      if (requested_session.empty() && !session_id_.empty())
+        reset_thread();
+      else if (!requested_session.empty() && requested_session != session_id_)
         resume_thread(requested_session, directory);
       if (session_id_.empty())
         start_thread(directory, metadata);
@@ -427,19 +448,33 @@ public:
     if (input.at("text").get<std::string>().size() > max_text)
       throw WorkerTransportError("Codex session input exceeds the limit");
     active_job_id_ = request.value("job_id", std::string{});
+    active_deadline_ = payload.value("deadline", std::string{});
+    TurnStartObservation start_observation;
     const auto turn_response = call("turn/start", Json{{"threadId", session_id_},
                                                          {"input", Json::array({input})},
                                                          {"cwd", project_dir_}},
-                                    request.value("job_id", std::string{}));
+                                    request.value("job_id", std::string{}), &start_observation);
     const auto turn_id = turn_response.value("turn", Json::object()).value("id", std::string{});
     if (turn_id.empty())
       throw WorkerTransportError("Codex turn/start response has no turn id");
     active_turn_id_ = turn_id;
+    std::string turn_started_at;
+    if (start_observation.turn_id == turn_id)
+      turn_started_at = start_observation.observed_at;
+    std::string turn_completed_at;
     Json completed;
     while (true) {
       const auto message = process_.receive(deadline());
       if (handle_server_request(message, request.value("job_id", std::string{})))
         continue;
+      if (message.value("method", std::string{}) == "turn/started") {
+        const auto params = message.value("params", Json::object());
+        const auto started_turn = params.value("turn", Json::object());
+        if (params.value("threadId", std::string{}) == session_id_ &&
+            started_turn.value("id", std::string{}) == turn_id && turn_started_at.empty())
+          turn_started_at = timestamp();
+        continue;
+      }
       if (message.value("method", std::string{}) == "thread/tokenUsage/updated") {
         record_usage(message.value("params", Json::object()));
         continue;
@@ -449,14 +484,22 @@ public:
         continue;
       }
       if (message.value("method", std::string{}) == "turn/completed") {
-        completed = message.value("params", Json::object());
-        break;
+        const auto params = message.value("params", Json::object());
+        const auto completed_turn = params.value("turn", Json::object());
+        if (params.value("threadId", std::string{}) == session_id_ &&
+            completed_turn.value("id", std::string{}) == turn_id) {
+          completed = params;
+          turn_completed_at = timestamp();
+          break;
+        }
+        continue;
       }
       if (message.contains("id") && message.value("id", 0) == 0)
         throw WorkerTransportError("Codex emitted an unrelated response");
     }
     active_turn_id_.clear();
     active_job_id_.clear();
+    active_deadline_.clear();
     const auto turn = completed.value("turn", Json::object());
     const auto status = turn.value("status", std::string{});
     if (status == "failed" || status == "interrupted")
@@ -467,6 +510,11 @@ public:
     result.state = WorkerJobState::Completed;
     result.usage = usage_;
     result.metadata = {{"model", model_}, {"provider", provider_}};
+    result.metadata["codex_turn_id"] = turn_id;
+    if (!turn_started_at.empty())
+      result.metadata["codex_turn_started_at"] = turn_started_at;
+    if (!turn_completed_at.empty())
+      result.metadata["codex_turn_completed_at"] = turn_completed_at;
     result.result = {{"summary", summary_}};
     if (!durable_session) {
       result.metadata["codex_session_id"] = session_id_;
@@ -522,8 +570,8 @@ private:
   CodexProcess process_;
   bool healthy_ = false;
   std::uint64_t rpc_id_ = 0, interaction_id_ = 0;
-  std::string session_id_, durable_session_id_, project_dir_, active_turn_id_, active_job_id_,
-      model_, provider_, summary_;
+  std::string worker_id_, session_id_, durable_session_id_, project_dir_, active_turn_id_,
+      active_job_id_, active_deadline_, model_, provider_, summary_;
   WorkerUsage usage_;
   Json actions_ = Json::array();
 
@@ -562,7 +610,8 @@ private:
     throw CodexFailure("Codex project directory is outside an allowed root");
   }
 
-  Json call(const std::string &method, const Json &params, const std::string &job_id) {
+  Json call(const std::string &method, const Json &params, const std::string &job_id,
+            TurnStartObservation *turn_start = nullptr) {
     const auto id = ++rpc_id_;
     process_.send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}},
                   deadline());
@@ -583,6 +632,16 @@ private:
         record_item(message.value("params", Json::object()));
         continue;
       }
+      if (message.value("method", std::string{}) == "turn/started") {
+        const auto notification = message.value("params", Json::object());
+        const auto turn = notification.value("turn", Json::object());
+        if (turn_start && notification.value("threadId", std::string{}) == session_id_ &&
+            !turn.value("id", std::string{}).empty()) {
+          turn_start->turn_id = turn.value("id", std::string{});
+          turn_start->observed_at = timestamp();
+        }
+        continue;
+      }
       if (!message.contains("id") && message.contains("method"))
         continue;
       throw WorkerTransportError("Codex response id does not match the request");
@@ -593,6 +652,8 @@ private:
     if (!message.contains("method") || !message.contains("id"))
       return false;
     const auto method = message.value("method", std::string{});
+    if (method == "item/tool/call")
+      return handle_dynamic_tool_call(message, job_id);
     WorkerInteractionType type;
     if (method == "item/commandExecution/requestApproval" || method == "item/fileChange/requestApproval")
       type = method.find("fileChange") != std::string::npos ? WorkerInteractionType::Approval
@@ -613,7 +674,7 @@ private:
                         {"message_type", "worker_request"},
                         {"request_id", request_id},
                         {"worker_job_id", job_id},
-                        {"worker_id", "codex"},
+                        {"worker_id", worker_id_},
                         {"external_job_id", durable_session_id_.empty()
                                                 ? "codex:" + session_id_
                                                 : job_id},
@@ -646,6 +707,69 @@ private:
     return true;
   }
 
+  bool handle_dynamic_tool_call(const Json &message, const std::string &job_id) {
+    const auto params = message.value("params", Json::object());
+    const auto request_id = params.value("callId", std::string{});
+    const auto thread_id = params.value("threadId", std::string{});
+    const auto turn_id = params.value("turnId", std::string{});
+    if (job_id.empty() || job_id != active_job_id_ || active_turn_id_.empty() ||
+        request_id.empty() || request_id.size() > 512 || thread_id.empty() ||
+        thread_id != session_id_ || turn_id.empty() || turn_id.size() > 512 ||
+        turn_id != active_turn_id_) {
+      process_.send(Json{{"jsonrpc", "2.0"},
+                         {"id", message.at("id")},
+                         {"error", Json{{"code", -32602},
+                                        {"message", "Invalid LASO tool call context"}}}},
+                    deadline());
+      return true;
+    }
+    Json worker_request{{"protocol_version", process_protocol::version},
+                        {"message_type", "worker_tool_call"},
+                        {"request_id", request_id},
+                        {"worker_job_id", job_id},
+                        {"worker_id", worker_id_},
+                        {"external_job_id", durable_session_id_.empty()
+                                                ? "codex:" + session_id_
+                                                : job_id},
+                        {"session_id", session_id_},
+                        {"turn_id", turn_id},
+                        {"deadline", active_deadline_},
+                        {"namespace", params.value("namespace", std::string{})},
+                        {"tool", params.value("tool", std::string{})},
+                        {"arguments", params.value("arguments", Json::object())}};
+    if (worker_request.dump().size() > process_protocol::max_frame_bytes)
+      throw WorkerTransportError("Codex tool call exceeds the worker protocol limit");
+    std::cout << worker_request.dump() << '\n' << std::flush;
+    const auto answer = receive_worker_tool_response(request_id);
+    const auto text = answer.success ? answer.result.dump() : answer.error;
+    process_.send(Json{{"jsonrpc", "2.0"},
+                       {"id", message.at("id")},
+                       {"result", Json{{"success", answer.success},
+                                        {"contentItems", Json::array({Json{{"type", "inputText"},
+                                                                         {"text", text}}})}}}},
+                  deadline());
+    return true;
+  }
+
+  WorkerToolCallResponse receive_worker_tool_response(const std::string &request_id) {
+    pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+    if (::poll(&descriptor, 1, static_cast<int>(std::min<std::uint64_t>(timeout_ms_, 60000))) <= 0)
+      throw WorkerTransportError("LASO tool call response timed out");
+    std::string line;
+    if (!std::getline(std::cin, line) || line.size() > process_protocol::max_frame_bytes)
+      throw WorkerTransportError("LASO tool call response was truncated");
+    const auto parsed = Json::parse(line, nullptr, false);
+    if (parsed.is_discarded() ||
+        parsed.value("message_type", std::string{}) != "worker_tool_response" ||
+        parsed.value("request_id", std::string{}) != request_id)
+      throw WorkerTransportError("LASO tool call response is invalid");
+    try {
+      return parsed.get<WorkerToolCallResponse>();
+    } catch (...) {
+      throw WorkerTransportError("LASO tool call response has invalid fields");
+    }
+  }
+
   WorkerInteractionResponse receive_worker_response(const std::string &request_id) {
     pollfd descriptor{STDIN_FILENO, POLLIN, 0};
     if (::poll(&descriptor, 1, static_cast<int>(std::min<std::uint64_t>(timeout_ms_, 60000))) <= 0)
@@ -666,7 +790,8 @@ private:
 
   void start_thread(const std::filesystem::path &directory, const Json &metadata) {
     Json params{{"cwd", directory.string()}, {"approvalPolicy", "on-request"},
-                {"sandbox", "workspace-write"}, {"ephemeral", false}};
+                {"sandbox", "workspace-write"}, {"ephemeral", false},
+                {"dynamicTools", Json::array({browser_status_tool_spec()})}};
     if (metadata.contains("model") && metadata.at("model").is_string())
       params["model"] = metadata.at("model");
     const auto response = call("thread/start", params, {});
@@ -677,6 +802,19 @@ private:
     project_dir_ = directory.string();
     model_ = response.value("model", thread.value("model", std::string{}));
     provider_ = response.value("modelProvider", thread.value("modelProvider", std::string{}));
+  }
+
+  static Json browser_status_tool_spec() {
+    return Json{{"type", "namespace"},
+                {"name", "laso"},
+                {"description", "Read-only LASO Computer status"},
+                {"tools", Json::array({Json{{"type", "function"},
+                                           {"name", "browser_status"},
+                                           {"description", "Read browser visibility status on the configured Windows Computer."},
+                                           {"inputSchema", Json{{"type", "object"},
+                                                                 {"properties", Json::object()},
+                                                                 {"required", Json::array()},
+                                                                 {"additionalProperties", false}}}}})}};
   }
 
   void resume_thread(const std::string &session, const std::filesystem::path &directory) {
@@ -743,10 +881,11 @@ int main(int argc, char **argv) {
   try {
     if (!arm_parent_death_signal())
       return 125;
+    const auto worker_id = option(argc, argv, "--worker-id", "codex");
     const auto codex = option(argc, argv, "--codex", "codex");
     auto roots = options(argc, argv, "--allowed-root");
     const auto timeout = std::stoull(option(argc, argv, "--timeout-ms", "60000"));
-    CodexAdapter adapter(codex, {roots.begin(), roots.end()}, timeout);
+    CodexAdapter adapter(worker_id, codex, {roots.begin(), roots.end()}, timeout);
     std::string line;
     while (std::getline(std::cin, line)) {
       if (line.size() > process_protocol::max_frame_bytes)

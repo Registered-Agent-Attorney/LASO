@@ -321,6 +321,24 @@ TEST(Policy, DeniesNetworkByDefault) {
   context.network = true;
   EXPECT_EQ(p.evaluate(context).decision, PolicyDecision::Deny);
 }
+TEST(Policy, AllowsOnlyExplicitlyTrustedRemoteWorkerWhenNetworkIsDisabled) {
+  PolicyEngine p({}, false, {"windows_computer"});
+  PolicyContext worker;
+  worker.network = true;
+  worker.remote = true;
+  worker.worker_node = true;
+  worker.resource = "windows_computer";
+  worker.classification = "restricted";
+  EXPECT_EQ(p.evaluate(worker).decision, PolicyDecision::Allow);
+
+  auto other_worker = worker;
+  other_worker.resource = "unlisted_worker";
+  EXPECT_EQ(p.evaluate(other_worker).decision, PolicyDecision::Deny);
+
+  auto remote_model = worker;
+  remote_model.worker_node = false;
+  EXPECT_EQ(p.evaluate(remote_model).decision, PolicyDecision::Deny);
+}
 TEST(Policy, ExplicitDenyWins) {
   PolicyEngine p({{"echo", PolicyDecision::Deny}});
   PolicyContext context;

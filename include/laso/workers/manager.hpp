@@ -5,9 +5,12 @@
 #include <laso/policies/policy.hpp>
 #include <laso/storage/storage.hpp>
 #include <laso/workers/worker.hpp>
+#include <memory>
 #include <mutex>
 #include <set>
+#include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace laso {
 class WorkerManager final : public EventSubscriber {
@@ -40,6 +43,7 @@ public:
   std::string resolve_worker(const std::string &worker_id, const std::string &capability) const;
   void cancel(const std::string &, WorkerJobState requested_state, const std::string &reason);
   WorkerInteractionResponse handle_interaction(const WorkerInteractionRequest &);
+  WorkerToolCallResponse handle_tool_call(const WorkerToolCallRequest &);
   std::vector<Json> worker_interactions(const std::string &run_id = "", std::size_t limit = 1000,
                                         std::size_t offset = 0) const;
   Json worker_interaction(const std::string &id) const;
@@ -56,18 +60,29 @@ private:
   double max_cost_units_per_run_;
   Policy *policy_ = nullptr;
   std::atomic<bool> stopped_{false};
-  mutable std::mutex submit_mutex_;
+  mutable std::mutex submit_mutexes_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<std::mutex>> submit_mutexes_;
   mutable std::mutex async_mutex_;
   std::set<std::string> async_submissions_;
+  std::set<std::string> active_submissions_;
   std::vector<std::jthread> async_threads_;
   mutable std::mutex state_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>>
+      submission_cancellation_signals_;
   std::condition_variable state_changed_;
   mutable std::mutex interaction_mutex_;
   std::condition_variable interaction_changed_;
   void apply_event(const Event &);
   WorkerJob reconcile(WorkerJob, bool fail_transport);
-  WorkerJob submit_impl(const WorkerRequest &, bool asynchronous_dispatch);
+  WorkerJob finalize_pending_cancellation(const std::string &);
+  WorkerJob record_submission(const std::string &, const WorkerSubmission &,
+                              const std::shared_ptr<WorkerTransport> &);
+  std::shared_ptr<std::mutex> submit_mutex_for(const std::string &worker_id);
+  WorkerJob submit_impl(const WorkerRequest &, bool asynchronous_dispatch,
+                        const std::string &initial_submission_id = {});
   void retire_superseded_distributed_jobs_locked();
+  void fence_stale_submission_locked(WorkerJob &);
+  void fence_stale_submissions_locked();
   void persist(WorkerJob &);
   std::string budget_violation(const WorkerJob &) const;
   static void merge_usage(WorkerUsage &, const WorkerUsage &);
