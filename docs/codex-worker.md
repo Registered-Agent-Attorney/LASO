@@ -131,13 +131,15 @@ as approval.
 
 ## Bounded Windows Computer tool
 
-New Codex threads receive one experimental dynamic tool:
-`laso.browser_status({})`. Its schema has no arguments. Core accepts only that
-namespace and tool with an empty object, then maps it internally to the
-configured `windows_computer` worker and `browser.status` capability. It never
-uses model-supplied worker IDs, commands, prompts, or capability names. Core
-fails closed unless the Computer worker is healthy and the deployment policy
-allows that exact worker.
+Only a worker node authorized by validated pipeline configuration with
+`required_tool: laso.browser_status` receives the experimental
+`laso.browser_status({})` dynamic tool. Other Codex threads do not receive this
+tool. Its schema has no arguments. Core accepts the namespace and tool only for
+the authorized active worker job with an empty object, then maps it internally
+to the configured `windows_computer` worker and `browser.status` capability.
+It never uses model-supplied worker IDs, commands, prompts, or capability names.
+Core fails closed unless the Computer worker is healthy and the deployment
+policy allows that exact worker.
 
 The Computer request is a durable child `WorkerJob` in the parent run. Its
 metadata records the parent worker-job ID, Codex session and turn IDs, and

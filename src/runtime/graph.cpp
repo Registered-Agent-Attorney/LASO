@@ -60,7 +60,7 @@ std::unique_ptr<Node> Runtime::make_node(const NodeDefinition &n) {
       throw Error(ErrorCode::Execution, "Worker manager is unavailable");
     auto worker_id = deps_.workers->resolve_worker(n.binding, n.capability);
     return std::make_unique<WorkerNode>(deps_.workers, worker_id, n.task_type, n.instructions,
-                                        n.capability, n.output_schema);
+                                        n.capability, n.output_schema, n.required_tool);
   }
   if (n.type == "agent") {
     auto binding = config_.models.find(n.binding);

@@ -75,6 +75,55 @@ TEST(Pipeline, RejectsUnknownNode) {
 TEST(Pipeline, RejectsWrongBindingField) {
   EXPECT_THROW(parse_pipeline(single("type: tool\n    function: echo")), Error);
 }
+TEST(Pipeline, FullSystemAcceptanceRequiresDesignatedBrowserStatusWorker) {
+  const std::string yaml = R"(laso: "1"
+name: codex-full-system
+version: 2
+nodes:
+  agent_three:
+    type: worker
+    worker: codex_agent_three
+    capability: coding-agent
+    required_tool: laso.browser_status
+edges:
+  - {from: input, to: agent_three}
+  - {from: agent_three, to: output}
+)";
+  EXPECT_NO_THROW(parse_pipeline(yaml));
+  const std::string standalone_yaml = R"(laso: "1"
+name: codex-windows-browser-status
+version: 2
+nodes:
+  browser:
+    type: worker
+    worker: codex
+    capability: coding-agent
+    required_tool: laso.browser_status
+edges:
+  - {from: input, to: browser}
+  - {from: browser, to: output}
+)";
+  EXPECT_NO_THROW(parse_pipeline(standalone_yaml));
+  auto legacy_v1 = yaml;
+  const auto version = legacy_v1.find("version: 2\n");
+  ASSERT_NE(version, std::string::npos);
+  legacy_v1.replace(version, std::string("version: 2\n").size(), "version: 1\n");
+  const auto legacy_required_tool = legacy_v1.find("    required_tool: laso.browser_status\n");
+  ASSERT_NE(legacy_required_tool, std::string::npos);
+  legacy_v1.erase(legacy_required_tool,
+                  std::string("    required_tool: laso.browser_status\n").size());
+  EXPECT_NO_THROW(parse_pipeline(legacy_v1));
+  auto missing_tool = yaml;
+  const auto required_tool = missing_tool.find("    required_tool: laso.browser_status\n");
+  ASSERT_NE(required_tool, std::string::npos);
+  missing_tool.erase(required_tool, std::string("    required_tool: laso.browser_status\n").size());
+  EXPECT_THROW(parse_pipeline(missing_tool), Error);
+  auto wrong_worker = yaml;
+  const auto worker = wrong_worker.find("codex_agent_three");
+  ASSERT_NE(worker, std::string::npos);
+  wrong_worker.replace(worker, std::string("codex_agent_three").size(), "codex_agent_one");
+  EXPECT_THROW(parse_pipeline(wrong_worker), Error);
+}
 TEST(Pipeline, ParsesExplicitSubpipelineRevision) {
   const auto reference = parse_pipeline_reference("research@2");
   EXPECT_EQ(reference.name, "research");

@@ -77,6 +77,11 @@ std::optional<OperatorAction> operator_action_for(const std::string &method,
 ApiResponse operator_audit_unavailable() {
   return {503, {{"error", "Operator audit is unavailable"}, {"error_code", "AUDIT_UNAVAILABLE"}}};
 }
+Json redact_worker_session_id(Json job) {
+  if (job.is_object() && job.contains("result_metadata") && job.at("result_metadata").is_object())
+    job["result_metadata"].erase("codex_session_id");
+  return job;
+}
 } // namespace
 
 // NOLINTBEGIN(bugprone-exception-escape): this noexcept boundary converts all exceptions to HTTP
@@ -558,13 +563,17 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
     return {405, {{"error", "Method not supported"}}};
   }
   if (collection == "worker-jobs") {
-    if (method == "GET" && id.empty())
-      return {200, service_.worker_jobs("", limit, offset)};
+    if (method == "GET" && id.empty()) {
+      auto jobs = service_.worker_jobs("", limit, offset);
+      for (auto &job : jobs)
+        job = redact_worker_session_id(std::move(job));
+      return {200, jobs};
+    }
     if (method == "GET" && action.empty())
-      return {200, service_.worker_job(id)};
+      return {200, redact_worker_session_id(service_.worker_job(id))};
     if (method == "POST" && action == "cancel") {
       service_.cancel_worker_job(id);
-      return {202, service_.worker_job(id)};
+      return {202, redact_worker_session_id(service_.worker_job(id))};
     }
     return {405, {{"error", "Method not supported"}}};
   }

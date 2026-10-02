@@ -1,6 +1,6 @@
 laso: "1"
 name: codex-full-system
-version: 1
+version: 2
 max_steps: 32
 timeout_ms: 240000
 nodes:
@@ -36,11 +36,14 @@ nodes:
     capability: coding-agent
     timeout_ms: 180000
     max_attempts: 1
+    required_tool: laso.browser_status
     instructions: >-
-      Call the registered laso.browser_status tool with an empty object exactly
-      once. Do not use any other tool or perform any browser action. Return
-      exactly LASO_AGENT_COMPUTER_STATUS: followed by a JSON object containing
-      only the returned window_count and browser_status fields.
+      You must call the registered laso.browser_status tool exactly once with
+      empty JSON arguments {}. Do not claim the tool is unavailable, use any
+      other tool, or perform any browser action. Wait for the tool result and
+      use it verbatim. Return exactly LASO_AGENT_COMPUTER_STATUS: followed by
+      the returned window_count and browser_status fields without changing
+      their values.
   join:
     type: join
 edges:

@@ -320,19 +320,21 @@ TEST(Workers, DistributedCapabilityAdvertisementContainsOnlySafeClaimData) {
 }
 
 TEST(Workers, CodexBrowserStatusToolDispatchesFixedComputerJobAndPersistsResult) {
-  TemporaryDirectory directory;
-  auto storage = make_storage(directory.path / "state.db");
+  InMemoryWorkerStorage storage;
   WorkerRegistry registry;
   auto agent = std::make_shared<ParentAgentWorker>();
   auto computer = std::make_shared<BrowserStatusWorker>();
   registry.add("agent-one", agent);
   registry.add("windows_computer", computer);
   PolicyEngine policy({}, false, {"windows_computer"});
-  WorkerManager manager(*storage, registry, policy);
-  const auto parent = parent_codex_job();
-  storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+  WorkerManager manager(storage, registry, policy);
+  auto parent = parent_codex_job();
+  parent.node_id = "agent_three";
+  parent.request_metadata["required_tool"] = "laso.browser_status";
+  storage.commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
 
   const auto request = browser_status_call();
+  EXPECT_FALSE(manager.has_completed_browser_status_tool_result(parent.id, parent.run_id));
   const auto response = manager.handle_tool_call(request);
   ASSERT_TRUE(response.success) << response.error;
   EXPECT_EQ(response.request_id, request.request_id);
@@ -350,8 +352,14 @@ TEST(Workers, CodexBrowserStatusToolDispatchesFixedComputerJobAndPersistsResult)
             request.turn_id + ":" + request.request_id);
   EXPECT_EQ(child.request_metadata.value("parent_codex_turn_id", ""), request.turn_id);
   EXPECT_EQ(child.request_metadata.value("parent_codex_session_id", ""), request.session_id);
+  EXPECT_TRUE(child.request_metadata.value("codex_tool_result_retrieved", false));
   EXPECT_EQ(child.result, response.result);
   EXPECT_GE(computer->result_calls(), 1U);
+
+  auto second_call = request;
+  second_call.request_id = "call-browser-status-2";
+  EXPECT_FALSE(manager.handle_tool_call(second_call).success);
+  EXPECT_EQ(manager.jobs(parent.run_id).size(), 2U);
 
   const auto dispatched = computer->request();
   EXPECT_EQ(dispatched.worker_id, "windows_computer");
@@ -359,6 +367,31 @@ TEST(Workers, CodexBrowserStatusToolDispatchesFixedComputerJobAndPersistsResult)
   EXPECT_EQ(dispatched.task_type, "browser.status");
   EXPECT_EQ(dispatched.input, Json::object());
   EXPECT_EQ(dispatched.run_id, parent.run_id);
+
+  auto completed_parent = manager.job(parent.id);
+  completed_parent.worker_id = "codex_agent_three";
+  completed_parent.node_id = "agent_three";
+  completed_parent.state = WorkerJobState::Completed;
+  completed_parent.result_metadata = {{"provider", "openai"},
+                                      {"model", "gpt-6-luna"},
+                                      {"reasoningEffort", "high"},
+                                      {"codex_session_id", request.session_id},
+                                      {"codex_turn_id", request.turn_id}};
+  completed_parent.request_metadata.erase("required_tool");
+  storage.commit({{RecordKind::WorkerJob, completed_parent.id, completed_parent.run_id,
+                   Json(completed_parent)}});
+  EXPECT_FALSE(manager.has_completed_browser_status_tool_result(parent.id, parent.run_id));
+  completed_parent.request_metadata["required_tool"] = "laso.browser_status";
+  storage.commit({{RecordKind::WorkerJob, completed_parent.id, completed_parent.run_id,
+                   Json(completed_parent)}});
+  EXPECT_TRUE(manager.has_completed_browser_status_tool_result(parent.id, parent.run_id));
+  EXPECT_FALSE(manager.has_completed_browser_status_tool_result(parent.id, "different-run"));
+
+  auto invalid_child = manager.job(child.id);
+  invalid_child.result["window_count"] = nullptr;
+  storage.commit(
+      {{RecordKind::WorkerJob, invalid_child.id, invalid_child.run_id, Json(invalid_child)}});
+  EXPECT_FALSE(manager.has_completed_browser_status_tool_result(parent.id, parent.run_id));
 }
 
 TEST(Workers, CodexBrowserStatusToolRejectsOtherToolsAndArguments) {
@@ -373,6 +406,11 @@ TEST(Workers, CodexBrowserStatusToolRejectsOtherToolsAndArguments) {
   WorkerManager manager(*storage, registry, policy);
   const auto parent = parent_codex_job();
   storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+
+  const auto unmarked = manager.handle_tool_call(browser_status_call());
+  EXPECT_FALSE(unmarked.success);
+  EXPECT_EQ(manager.jobs(parent.run_id).size(), 1U);
+  EXPECT_FALSE(computer->wait_for_submission(std::chrono::milliseconds(50)));
 
   auto request = browser_status_call();
   request.tool = "command";
@@ -395,7 +433,8 @@ TEST(Workers, CodexBrowserStatusToolFailsClosedWhenPolicyDeniesComputer) {
   registry.add("windows_computer", computer);
   PolicyEngine policy({{"windows_computer", PolicyDecision::Deny}}, false, {"windows_computer"});
   WorkerManager manager(*storage, registry, policy);
-  const auto parent = parent_codex_job();
+  auto parent = parent_codex_job();
+  parent.request_metadata["required_tool"] = "laso.browser_status";
   storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
 
   const auto response = manager.handle_tool_call(browser_status_call());
@@ -417,6 +456,7 @@ TEST(Workers, ParentCancellationCancelsDurableComputerToolChild) {
   WorkerManager manager(*storage, registry, policy);
   auto parent = parent_codex_job("parent-cancel-job");
   parent.external_job_id = "codex:fixture-thread";
+  parent.request_metadata["required_tool"] = "laso.browser_status";
   storage->commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
 
   auto future = std::async(

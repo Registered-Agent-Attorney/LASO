@@ -124,7 +124,7 @@ struct TimeoutPolicy {
 };
 struct NodeDefinition {
   std::string id, type, binding, prompt, field, condition, reason, join, input_schema,
-      output_schema, schema, task_type, capability, instructions;
+      output_schema, schema, task_type, capability, instructions, required_tool;
   Json value = nullptr;
   RetryPolicy retry;
   TimeoutPolicy timeout;

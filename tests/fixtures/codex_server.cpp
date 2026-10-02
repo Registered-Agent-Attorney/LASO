@@ -21,8 +21,11 @@ void send(const Json &value) {
 }
 
 Json thread(const std::string &id, const std::string &cwd) {
-  return Json{
-      {"id", id}, {"cwd", cwd}, {"model", "fixture-model"}, {"modelProvider", "fixture-provider"}};
+  return Json{{"id", id},
+              {"cwd", cwd},
+              {"model", "gpt-6-luna"},
+              {"modelProvider", "openai"},
+              {"reasoningEffort", "high"}};
 }
 
 void repair_synthetic_project(const std::filesystem::path &root) {
@@ -110,19 +113,25 @@ int main(int argc, char **argv) {
       const auto params = request.value("params", Json::object());
       const auto cwd = params.value("cwd", std::string{});
       const auto tools = params.value("dynamicTools", Json::array());
+      dynamic_tools_advertised = false;
       const auto tool_functions =
           tools.size() == 1 ? tools.front().value("tools", Json::array()) : Json::array();
       const auto function = tool_functions.size() == 1 ? tool_functions.front() : Json::object();
       const auto input_schema = function.value("inputSchema", Json::object());
-      dynamic_tools_advertised = tools.size() == 1 &&
-                                 tools.front().value("type", std::string{}) == "namespace" &&
-                                 tools.front().value("name", std::string{}) == "laso" &&
-                                 function.value("type", std::string{}) == "function" &&
-                                 function.value("name", std::string{}) == "browser_status" &&
-                                 input_schema.value("type", std::string{}) == "object" &&
-                                 input_schema.value("properties", Json::object()).empty() &&
-                                 input_schema.value("required", Json::array()).empty() &&
-                                 input_schema.value("additionalProperties", true) == false;
+      dynamic_tools_advertised =
+          tools.size() == 1 && tools.front().value("type", std::string{}) == "namespace" &&
+          tools.front().value("name", std::string{}) == "laso" &&
+          tools.front().value("description", std::string{}).find("call exactly once with {}") !=
+              std::string::npos &&
+          function.value("type", std::string{}) == "function" &&
+          function.value("name", std::string{}) == "browser_status" &&
+          function.value("description", std::string{}).find("Do not claim it is unavailable") !=
+              std::string::npos &&
+          function.value("deferLoading", true) == false &&
+          input_schema.value("type", std::string{}) == "object" &&
+          input_schema.value("properties", Json::object()).empty() &&
+          input_schema.value("required", Json::array()).empty() &&
+          input_schema.value("additionalProperties", true) == false;
       const auto sequence_file = std::filesystem::path(cwd) / ".laso-codex-fixture-sequence";
       {
         std::ifstream stored(sequence_file);
@@ -145,8 +154,9 @@ int main(int argc, char **argv) {
       send({{"jsonrpc", "2.0"},
             {"id", id},
             {"result", Json{{"thread", thread(active_thread, cwd)},
-                            {"model", "fixture-model"},
-                            {"modelProvider", "fixture-provider"}}}});
+                            {"model", "gpt-6-luna"},
+                            {"modelProvider", "openai"},
+                            {"reasoningEffort", "high"}}}});
     } else if (method == "thread/resume") {
       const auto params = request.value("params", Json::object());
       const auto cwd = params.value("cwd", std::string{});
@@ -154,8 +164,9 @@ int main(int argc, char **argv) {
       send({{"jsonrpc", "2.0"},
             {"id", id},
             {"result", Json{{"thread", thread(active_thread, cwd)},
-                            {"model", "fixture-model"},
-                            {"modelProvider", "fixture-provider"}}}});
+                            {"model", "gpt-6-luna"},
+                            {"modelProvider", "openai"},
+                            {"reasoningEffort", "high"}}}});
     } else if (method == "turn/start") {
       const auto params = request.value("params", Json::object());
       const auto input = params.value("input", Json::array());

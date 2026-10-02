@@ -107,10 +107,12 @@ private:
 class WorkerNode final : public Node {
 public:
   WorkerNode(std::shared_ptr<WorkerManager> manager, std::string worker_id, std::string task_type,
-             std::string instructions, std::string capability, std::string output_schema)
+             std::string instructions, std::string capability, std::string output_schema,
+             std::string required_tool)
       : manager_(std::move(manager)), worker_id_(std::move(worker_id)),
         task_type_(std::move(task_type)), instructions_(std::move(instructions)),
-        capability_(std::move(capability)), output_schema_(std::move(output_schema)) {}
+        capability_(std::move(capability)), required_tool_(std::move(required_tool)),
+        output_schema_(std::move(output_schema)) {}
   Task<NodeResult> execute(ExecutionContext &, const Message &) override;
   std::string_view type() const noexcept override {
     return "worker";
@@ -118,7 +120,7 @@ public:
 
 private:
   std::shared_ptr<WorkerManager> manager_;
-  std::string worker_id_, task_type_, instructions_, capability_;
+  std::string worker_id_, task_type_, instructions_, capability_, required_tool_;
   std::string output_schema_;
 };
 class RouterNode : public Node {

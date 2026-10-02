@@ -1,6 +1,6 @@
 laso: '1'
 name: codex-windows-browser-status
-version: 1
+version: 2
 max_steps: 16
 timeout_ms: 120000
 nodes:
@@ -12,6 +12,7 @@ nodes:
     task_type: acceptance
     timeout_ms: 90000
     max_attempts: 1
+    required_tool: laso.browser_status
     instructions: >-
       Call the registered laso.browser_status tool exactly once. Do not use any
       other tool or perform an action. Return the browser status JSON you

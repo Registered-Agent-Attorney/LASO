@@ -38,6 +38,8 @@ public:
                          std::size_t offset = 0) const;
   Json workers() const;
   Json worker(const std::string &) const;
+  bool has_completed_browser_status_tool_result(const std::string &parent_job_id,
+                                                const std::string &run_id) const;
   bool can_execute(const std::string &worker_id, const std::string &capability) const;
   Json distributed_capabilities() const;
   std::string resolve_worker(const std::string &worker_id, const std::string &capability) const;

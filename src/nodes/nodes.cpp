@@ -107,6 +107,11 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
   request.output_schema =
       output_schema_.empty() ? Json::object() : Json{{"reference", output_schema_}};
   request.metadata = input.metadata;
+  // This dispatch marker is controlled by validated pipeline configuration,
+  // never by user-supplied input metadata.
+  request.metadata.erase("required_tool");
+  if (!required_tool_.empty())
+    request.metadata["required_tool"] = required_tool_;
   if (!c.distributed_work_id.empty())
     request.metadata["node_work_id"] = c.distributed_work_id;
   if (!c.distributed_attempt_id.empty())
@@ -125,6 +130,12 @@ Task<NodeResult> WorkerNode::execute(ExecutionContext &c, const Message &input) 
     for (;;) {
       current = manager_->refresh(current.id);
       if (current.state == WorkerJobState::Completed) {
+        if (required_tool_ == "laso.browser_status" &&
+            !manager_->has_completed_browser_status_tool_result(current.id, request.run_id))
+          throw Error(
+              ErrorCode::Execution,
+              "Required LASO browser status tool result was not returned to this Codex turn",
+              {{"worker_job_id", current.id}, {"worker_id", current.worker_id}});
         if (durable_session) {
           const auto continuation = manager_->continuation_candidate(current.id);
           if (!continuation || continuation->provider_id != worker_id_ ||
