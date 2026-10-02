@@ -208,14 +208,17 @@ int main(int argc, char **argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
       }
       std::string dynamic_tool_result;
+      const auto turn = Json{{"id", "fixture-turn"}, {"status", "inProgress"}};
       if (prompt.find("request-browser-status") != std::string::npos) {
         if (!dynamic_tools_advertised)
           return 76;
+        send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
         send(Json{{"jsonrpc", "2.0"},
                   {"id", 101},
                   {"method", "item/tool/call"},
                   {"params", Json{{"threadId", active_thread},
-                                  {"turnId", "fixture-turn"},
+                                  {"turnId", mode == "mismatched-tool-turn" ? "other-turn"
+                                                                             : "fixture-turn"},
                                   {"callId", "fixture-browser-status-call"},
                                   {"namespace", "laso"},
                                   {"tool", "browser_status"},
@@ -269,8 +272,9 @@ int main(int argc, char **argv) {
         if (answer.is_discarded() || !answer.value("result", Json::object()).is_object())
           return 69;
       }
-      const auto turn = Json{{"id", "fixture-turn"}, {"status", "inProgress"}};
-      send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
+      if (prompt.find("request-browser-status") == std::string::npos) {
+        send(Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", Json{{"turn", turn}}}});
+      }
       send(Json{{"method", "turn/started"},
                 {"params", Json{{"threadId", active_thread}, {"turn", turn}}}});
       const auto *configured_output = std::getenv("LASO_CODEX_FIXTURE_OUTPUT");

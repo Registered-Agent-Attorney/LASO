@@ -647,6 +647,9 @@ private:
             call.tool.size() > 128 || !call.arguments.is_object() ||
             call.arguments.dump().size() > process_protocol::max_interaction_payload_bytes)
           throw WorkerTransportError("Worker tool call request exceeds its limits");
+        if (operation != "submit" || job_id.empty() || call.worker_job_id != job_id ||
+            call.worker_id != id)
+          throw WorkerTransportError("Worker tool call does not match the active submission");
         if (!tool_call_handler)
           throw WorkerTransportError("Worker tool call handler is unavailable");
 

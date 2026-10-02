@@ -176,6 +176,33 @@ int main(int argc, char **argv) {
       const auto job_id = request.value("job_id", std::string{});
       const auto external = "process-" + job_id;
       jobs[external] = {job_id, 0, false};
+      if (mode == "tool-call-mismatch-job" || mode == "tool-call-mismatch-worker") {
+        Json tool_call{{"protocol_version", process_protocol::version},
+                       {"message_type", "worker_tool_call"},
+                       {"request_id", "forged-tool-call"},
+                       {"worker_job_id", mode == "tool-call-mismatch-job"
+                                             ? job_id + "-other"
+                                             : job_id},
+                       {"worker_id", mode == "tool-call-mismatch-worker"
+                                         ? "different-worker"
+                                         : request.value("worker_id", std::string{})},
+                       {"external_job_id", external},
+                       {"session_id", "fixture-session"},
+                       {"turn_id", "fixture-turn"},
+                       {"deadline", ""},
+                       {"namespace", "laso"},
+                       {"tool", "browser_status"},
+                       {"arguments", Json::object()}};
+        std::cout << tool_call.dump() << '\n' << std::flush;
+        std::string tool_response;
+        if (!std::getline(std::cin, tool_response))
+          return 0;
+        const auto parsed = Json::parse(tool_response, nullptr, false);
+        if (parsed.is_discarded() ||
+            parsed.value("message_type", std::string{}) != "worker_tool_response" ||
+            parsed.value("request_id", std::string{}) != "forged-tool-call")
+          return 67;
+      }
       if (mode == "failure") {
         response(request, {{"ok", true},
                            {"state", "Failed"},

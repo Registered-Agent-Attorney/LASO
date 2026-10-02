@@ -159,6 +159,23 @@ TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
   transport.stop();
 }
 
+TEST(CodexWorker, RejectsDynamicToolCallForDifferentActiveTurn) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport(
+      "agent-one", codex_config(root.path, "mismatched-tool-turn", "agent-one"));
+  std::atomic<unsigned> dispatches{0};
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    ++dispatches;
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  ASSERT_NO_THROW(transport.start());
+  EXPECT_THROW(transport.submit(request(root.path, "codex-mismatched-turn",
+                                        "request-browser-status", {}, "agent-one")),
+               WorkerTransportError);
+  EXPECT_EQ(dispatches.load(), 0U);
+  transport.stop();
+}
+
 TEST(CodexWorker, NonDurableSubmissionsStartIndependentCodexThreads) {
   TemporaryDirectory root;
   ProcessWorkerTransport transport("codex", codex_config(root.path));

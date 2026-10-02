@@ -712,9 +712,10 @@ private:
     const auto request_id = params.value("callId", std::string{});
     const auto thread_id = params.value("threadId", std::string{});
     const auto turn_id = params.value("turnId", std::string{});
-    if (job_id.empty() || request_id.empty() || request_id.size() > 512 || thread_id.empty() ||
+    if (job_id.empty() || job_id != active_job_id_ || active_turn_id_.empty() ||
+        request_id.empty() || request_id.size() > 512 || thread_id.empty() ||
         thread_id != session_id_ || turn_id.empty() || turn_id.size() > 512 ||
-        (!active_turn_id_.empty() && turn_id != active_turn_id_)) {
+        turn_id != active_turn_id_) {
       process_.send(Json{{"jsonrpc", "2.0"},
                          {"id", message.at("id")},
                          {"error", Json{{"code", -32602},

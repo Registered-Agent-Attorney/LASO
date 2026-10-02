@@ -565,6 +565,30 @@ TEST(ProcessWorker, WorkerInteractionIsCorrelatedAndAnsweredByLASO) {
   EXPECT_EQ(requests.load(), 1U);
 }
 
+TEST(ProcessWorker, RejectsToolCallFromDifferentActiveJobBeforeDispatch) {
+  ProcessWorkerTransport transport("process", worker_config("tool-call-mismatch-job", 1500));
+  std::atomic<unsigned> dispatches = 0;
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    ++dispatches;
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  transport.start();
+  EXPECT_THROW(transport.submit(request()), WorkerTransportError);
+  EXPECT_EQ(dispatches.load(), 0U);
+}
+
+TEST(ProcessWorker, RejectsToolCallFromDifferentWorkerBeforeDispatch) {
+  ProcessWorkerTransport transport("process", worker_config("tool-call-mismatch-worker", 1500));
+  std::atomic<unsigned> dispatches = 0;
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    ++dispatches;
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  transport.start();
+  EXPECT_THROW(transport.submit(request()), WorkerTransportError);
+  EXPECT_EQ(dispatches.load(), 0U);
+}
+
 TEST(ProcessWorker, ConfigurationUsesExplicitExecutableAndEnvironmentBoundary) {
   TemporaryDirectory dir;
   const auto path = dir.path / "process.yaml";
