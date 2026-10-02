@@ -90,6 +90,20 @@ edges:
   - {from: agent_three, to: output}
 )";
   EXPECT_NO_THROW(parse_pipeline(yaml));
+  const std::string standalone_yaml = R"(laso: "1"
+name: codex-windows-browser-status
+version: 2
+nodes:
+  browser:
+    type: worker
+    worker: codex
+    capability: coding-agent
+    required_tool: laso.browser_status
+edges:
+  - {from: input, to: browser}
+  - {from: browser, to: output}
+)";
+  EXPECT_NO_THROW(parse_pipeline(standalone_yaml));
   auto legacy_v1 = yaml;
   const auto version = legacy_v1.find("version: 2\n");
   ASSERT_NE(version, std::string::npos);
