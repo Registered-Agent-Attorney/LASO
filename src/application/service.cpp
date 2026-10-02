@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <laso/application/service.hpp>
 #include <laso/pipeline/parser.hpp>
+#include <laso/scheduler/scheduler.hpp>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -1101,24 +1102,71 @@ Json operator_worker_job_summary(const Json &value) {
     usage["total_tokens"] = *job.usage.total_tokens;
   if (job.usage.cost_units)
     usage["cost_units"] = *job.usage.cost_units;
-  return {{"id", job.id},
-          {"run_id", job.run_id},
-          {"node_id", job.node_id},
-          {"worker_id", job.worker_id},
-          {"attempt", job.attempt},
-          {"state", job.state},
-          {"failure_kind", job.failure_kind},
-          {"submitted_at", job.submitted_at},
-          {"started_at", job.started_at},
-          {"completed_at", job.completed_at},
-          {"external_job_id", job.external_job_id},
-          {"error", job.error},
-          {"cancellation_error", job.cancellation_error},
-          {"cancellation_requested", job.cancellation_requested},
-          {"cancellation_acknowledged", job.cancellation_acknowledged},
-          {"result_present", !job.result.is_null() && !job.result.empty()},
-          {"artifact_count", job.artifacts.size()},
-          {"usage", std::move(usage)}};
+  Json summary{{"id", job.id},
+               {"run_id", job.run_id},
+               {"node_id", job.node_id},
+               {"worker_id", job.worker_id},
+               {"attempt", job.attempt},
+               {"state", job.state},
+               {"failure_kind", job.failure_kind},
+               {"submitted_at", job.submitted_at},
+               {"started_at", job.started_at},
+               {"completed_at", job.completed_at},
+               {"external_job_id", job.external_job_id},
+               {"error", job.error},
+               {"cancellation_error", job.cancellation_error},
+               {"cancellation_requested", job.cancellation_requested},
+               {"cancellation_acknowledged", job.cancellation_acknowledged},
+               {"result_present", !job.result.is_null() && !job.result.empty()},
+               {"artifact_count", job.artifacts.size()},
+               {"usage", std::move(usage)}};
+  // The operator endpoint is authenticated and exposes only the provider-turn
+  // fields needed to correlate real Codex execution. General job/message APIs
+  // redact these identifiers and paths.
+  if (job.worker_id.starts_with("codex")) {
+    const auto add_safe_identifier = [&summary, &job](const char *source, const char *target,
+                                                      std::size_t maximum, bool allow_slash) {
+      const auto &metadata = job.result_metadata;
+      if (!metadata.is_object() || !metadata.contains(source) || !metadata.at(source).is_string())
+        return;
+      const auto value = metadata.at(source).get<std::string>();
+      if (value.empty() || value.size() > maximum)
+        return;
+      for (const unsigned char character : value) {
+        const bool alphanumeric = (character >= 'a' && character <= 'z') ||
+                                  (character >= 'A' && character <= 'Z') ||
+                                  (character >= '0' && character <= '9');
+        if (!alphanumeric && character != '-' && character != '_' && character != '.' &&
+            character != ':' && (!allow_slash || character != '/'))
+          return;
+      }
+      summary[target] = value;
+    };
+    const auto add_safe_timestamp = [&summary, &job](const char *source, const char *target) {
+      const auto &metadata = job.result_metadata;
+      if (!metadata.is_object() || !metadata.contains(source) || !metadata.at(source).is_string())
+        return;
+      const auto value = metadata.at(source).get<std::string>();
+      if (value.size() != 24)
+        return;
+      try {
+        const auto parsed = parse_utc_timestamp(value);
+        if (format_utc_timestamp(parsed) != value)
+          return;
+      } catch (const Error &) {
+        return;
+      }
+      summary[target] = value;
+    };
+    add_safe_identifier("provider", "provider", 64, true);
+    add_safe_identifier("model", "model", 128, true);
+    add_safe_identifier("reasoningEffort", "reasoning_effort", 32, true);
+    add_safe_identifier("codex_session_id", "codex_session_id", 128, false);
+    add_safe_identifier("codex_turn_id", "codex_turn_id", 128, false);
+    add_safe_timestamp("codex_turn_started_at", "codex_turn_started_at");
+    add_safe_timestamp("codex_turn_completed_at", "codex_turn_completed_at");
+  }
+  return summary;
 }
 Json operator_artifact_summary(const Json &value) {
   const auto artifact = value.get<Artifact>();
