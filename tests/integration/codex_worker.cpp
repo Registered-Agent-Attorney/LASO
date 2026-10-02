@@ -1,6 +1,7 @@
 #include "../support.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -123,6 +124,38 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
       request(root.path, "codex-second", "continue the existing session", "fixture-session"));
   EXPECT_EQ(second.state, WorkerJobState::Completed);
   EXPECT_EQ(second.result.value("summary", ""), "FIXTURE-CONTINUED");
+  transport.stop();
+}
+
+TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport("agent-one", codex_config(root.path, "success", "agent-one"));
+  std::atomic<unsigned> calls{0};
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &request) {
+    ++calls;
+    EXPECT_EQ(request.request_id, "fixture-browser-status-call");
+    EXPECT_EQ(request.worker_job_id, "codex-browser-status-turn");
+    EXPECT_EQ(request.worker_id, "agent-one");
+    EXPECT_EQ(request.session_id, "fixture-session");
+    EXPECT_EQ(request.turn_id, "fixture-turn");
+    EXPECT_EQ(request.namespace_name, "laso");
+    EXPECT_EQ(request.tool, "browser_status");
+    EXPECT_EQ(request.arguments, Json::object());
+    return WorkerToolCallResponse{
+        request.request_id, true,
+        Json{{"window_count", 1},
+             {"browser_status", Json{{"browser_visible", true},
+                                      {"active_browser_visible", true}}}},
+        {}};
+  });
+  ASSERT_NO_THROW(transport.start());
+  const auto result = transport.submit(
+      request(root.path, "codex-browser-status-turn", "request-browser-status", {}, "agent-one"));
+  ASSERT_EQ(result.state, WorkerJobState::Completed) << result.error;
+  EXPECT_EQ(calls.load(), 1U);
+  EXPECT_NE(result.result.value("summary", std::string{}).find("BROWSER_STATUS_RESULT:"),
+            std::string::npos);
+  EXPECT_NE(result.result.value("summary", std::string{}).find("window_count"), std::string::npos);
   transport.stop();
 }
 

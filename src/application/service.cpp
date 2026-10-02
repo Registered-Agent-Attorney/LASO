@@ -222,6 +222,10 @@ Service::Service(asio::io_context &io, Config config)
         [manager = worker_manager_](const WorkerInteractionRequest &request) {
           return manager->handle_interaction(request);
         });
+    transport->set_tool_call_handler(
+        [manager = worker_manager_](const WorkerToolCallRequest &request) {
+          return manager->handle_tool_call(request);
+        });
     try {
       transport->start();
     } catch (const std::exception &error) {

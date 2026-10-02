@@ -11,11 +11,11 @@ WorkerNode -> WorkerManager -> ProcessWorkerTransport
 
 The adapter targets the structured local app-server interface shipped with
 Codex CLI 0.154.0 and later-compatible revisions. It uses JSON-RPC messages for
-`initialize`, `thread/start`, `thread/resume`, `turn/start`, and
-`turn/interrupt`. It consumes structured thread, turn, item, and token-usage
-notifications; it does not scrape terminal output. The app-server interface is
-experimental in Codex, so deployments should pin and validate their installed
-Codex version.
+`initialize`, `thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`,
+and the experimental `item/tool/call` flow. It consumes structured thread,
+turn, item, and token-usage notifications; it does not scrape terminal output.
+The app-server interface is experimental in Codex, so deployments should pin
+and validate their installed Codex version.
 
 Build and install the adapter explicitly when the deployment uses it. Configure
 the final install prefix before building so the generated systemd unit points at
@@ -128,6 +128,24 @@ permission/approval/question channel. LASO policy or a durable operator
 decision returns the correlated response; the Codex worker cannot approve its
 own request. Unsupported app-server requests are rejected rather than treated
 as approval.
+
+## Bounded Windows Computer tool
+
+New Codex threads receive one experimental dynamic tool:
+`laso.browser_status({})`. Its schema has no arguments. Core accepts only that
+namespace and tool with an empty object, then maps it internally to the
+configured `windows_computer` worker and `browser.status` capability. It never
+uses model-supplied worker IDs, commands, prompts, or capability names. Core
+fails closed unless the Computer worker is healthy and the deployment policy
+allows that exact worker.
+
+The Computer request is a durable child `WorkerJob` in the parent run. Its
+metadata records the parent worker-job ID, Codex session and turn IDs, and
+dynamic-tool call ID. After terminal status, Core fetches the Computer result
+and stores it on the child job before returning the JSON result to the same
+Codex turn. Parent cancellation or deadline expiry cancels the child job. The
+acceptance example is
+[`codex-browser-status-pipeline.yaml`](../tests/acceptance/codex-browser-status-pipeline.yaml).
 
 ## Cancellation and security boundary
 

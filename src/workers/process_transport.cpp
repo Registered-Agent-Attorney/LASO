@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -57,6 +58,10 @@ int remaining_ms(Clock::time_point deadline) {
 
 bool bounded_text(const std::string &value, std::size_t maximum) {
   return !value.empty() && value.size() <= maximum;
+}
+
+std::string bounded_error_text(const std::string &value) {
+  return value.size() <= max_error_bytes ? value : value.substr(0, max_error_bytes);
 }
 
 Json continuation_json(const OpaqueProviderContinuation &continuation) {
@@ -142,16 +147,24 @@ struct ProcessWorkerTransport::Impl {
   }
 
   void set_interaction_handler(WorkerInteractionHandler handler) {
-    std::lock_guard lock(mutex);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
     interaction_handler = std::move(handler);
   }
 
-  void start() {
-    std::lock_guard lock(mutex);
-    start_locked();
+  void set_tool_call_handler(WorkerToolCallHandler handler) {
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    tool_call_handler = std::move(handler);
   }
 
-  void start_locked() {
+  void start() {
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    start_locked(lock);
+  }
+
+  void start_locked(std::unique_lock<std::mutex> &lock) {
     if (pid > 0 && metadata_.healthy)
       return;
     if (pid > 0)
@@ -164,7 +177,8 @@ struct ProcessWorkerTransport::Impl {
     try {
       spawn_locked();
       const auto response =
-          request_locked("hello", "", "", Json{{"client", "laso"}}, config.startup_timeout_ms);
+          request_locked(lock, "hello", "", "", Json{{"client", "laso"}},
+                         config.startup_timeout_ms);
       if (!response.value("ok", false))
         throw WorkerTransportError("Worker hello was rejected");
       if (!response.contains("metadata") || !response.at("metadata").is_object() ||
@@ -196,8 +210,9 @@ struct ProcessWorkerTransport::Impl {
   }
 
   WorkerSubmission submit(const WorkerRequest &request) {
-    std::lock_guard lock(mutex);
-    ensure_started_locked();
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    ensure_started_locked(lock);
     active_submit.store(true, std::memory_order_release);
     struct ActiveSubmitGuard {
       std::atomic<bool> &active;
@@ -229,8 +244,9 @@ struct ProcessWorkerTransport::Impl {
       payload["continuation"] = continuation_json(*request.continuation);
     if (request.session_context)
       payload["session_context"] = session_context_json(*request.session_context);
-    return parse_submission_locked(
-        request.job_id, request_response_locked("submit", request.job_id, "", payload, timeout_ms));
+    return parse_submission_locked(request.job_id, request_response_locked(
+                                                       lock, "submit", request.job_id, "", payload,
+                                                       timeout_ms));
   }
 
   WorkerStatus status(const std::string &external_job_id) {
@@ -242,10 +258,11 @@ struct ProcessWorkerTransport::Impl {
   }
 
   bool cancel(const std::string &external_job_id) {
-    std::lock_guard lock(mutex);
-    ensure_started_locked();
-    const auto response = request_response_locked("cancel", "", external_job_id, Json::object(),
-                                                  config.request_timeout_ms);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    ensure_started_locked(lock);
+    const auto response = request_response_locked(lock, "cancel", "", external_job_id,
+                                                  Json::object(), config.request_timeout_ms);
     if (!response.value("ok", false))
       throw WorkerTransportError("Worker cancellation was rejected");
     if (response.contains("acknowledged"))
@@ -264,7 +281,8 @@ struct ProcessWorkerTransport::Impl {
   }
 
   void stop() noexcept {
-    std::lock_guard lock(mutex);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
     if (pid <= 0) {
       terminate_process_group(owned_process_group.load(std::memory_order_acquire));
       owned_process_group.store(-1, std::memory_order_release);
@@ -274,7 +292,7 @@ struct ProcessWorkerTransport::Impl {
       return;
     }
     try {
-      (void)request_locked("shutdown", "", "", Json::object(), 500);
+      (void)request_locked(lock, "shutdown", "", "", Json::object(), 500);
     } catch (...) {
     }
     terminate_locked();
@@ -298,15 +316,22 @@ private:
   std::string stderr_capture;
   std::string output_buffer;
   WorkerInteractionHandler interaction_handler;
+  WorkerToolCallHandler tool_call_handler;
+  std::condition_variable tool_call_changed;
+  bool tool_call_inflight = false;
+
+  void wait_for_tool_call(std::unique_lock<std::mutex> &lock) {
+    tool_call_changed.wait(lock, [&] { return !tool_call_inflight; });
+  }
 
   void publish_metadata_locked() {
     std::lock_guard lock(metadata_mutex);
     metadata_snapshot_ = metadata_;
   }
 
-  void ensure_started_locked() {
+  void ensure_started_locked(std::unique_lock<std::mutex> &lock) {
     if (pid <= 0 || !metadata_.healthy) {
-      start_locked();
+      start_locked(lock);
       return;
     }
     int status = 0;
@@ -573,7 +598,8 @@ private:
     }
   }
 
-  Json request_locked(const std::string &operation, const std::string &job_id,
+  Json request_locked(std::unique_lock<std::mutex> &lock, const std::string &operation,
+                      const std::string &job_id,
                       const std::string &external_job_id, const Json &payload,
                       std::uint64_t timeout_ms) {
     const auto request_id = "req-" + std::to_string(++request_number);
@@ -598,6 +624,55 @@ private:
           response.at("protocol_version").get<std::uint32_t>() != process_protocol::version)
         throw WorkerTransportError("Worker protocol version is incompatible");
       const auto message_type = response.value("message_type", std::string{"response"});
+      if (message_type == "worker_tool_call") {
+        deadline = std::max(deadline, Clock::now() +
+                                          std::chrono::milliseconds(config.interaction_timeout_ms));
+        WorkerToolCallRequest call;
+        try {
+          call = response.get<WorkerToolCallRequest>();
+        } catch (...) {
+          throw WorkerTransportError("Worker tool call request is invalid");
+        }
+        if (!bounded_text(call.request_id, process_protocol::max_interaction_id_bytes) ||
+            !bounded_text(call.worker_job_id, process_protocol::max_interaction_id_bytes) ||
+            !bounded_text(call.worker_id, process_protocol::max_interaction_id_bytes) ||
+            call.external_job_id.size() > process_protocol::max_interaction_id_bytes ||
+            call.session_id.size() > process_protocol::max_interaction_id_bytes ||
+            call.turn_id.size() > process_protocol::max_interaction_id_bytes ||
+            call.deadline.size() > 64 || call.namespace_name.size() > 128 ||
+            call.tool.size() > 128 || !call.arguments.is_object() ||
+            call.arguments.dump().size() > process_protocol::max_interaction_payload_bytes)
+          throw WorkerTransportError("Worker tool call request exceeds its limits");
+        if (!tool_call_handler)
+          throw WorkerTransportError("Worker tool call handler is unavailable");
+
+        const auto handler = tool_call_handler;
+        WorkerToolCallResponse answer;
+        tool_call_inflight = true;
+        lock.unlock();
+        try {
+          answer = handler(call);
+        } catch (const std::exception &error) {
+          answer = {call.request_id, false, Json::object(), bounded_error_text(error.what())};
+        } catch (...) {
+          answer = {call.request_id, false, Json::object(), "Worker tool call failed"};
+        }
+        lock.lock();
+        tool_call_inflight = false;
+        tool_call_changed.notify_all();
+        if (answer.request_id != call.request_id)
+          throw WorkerTransportError("Worker tool call response id does not match");
+        Json response_message{{"protocol_version", process_protocol::version},
+                              {"message_type", "worker_tool_response"},
+                              {"request_id", answer.request_id},
+                              {"success", answer.success},
+                              {"result", answer.result},
+                              {"error", bounded_error_text(answer.error)}};
+        if (response_message.dump().size() > process_protocol::max_frame_bytes)
+          throw WorkerTransportError("Worker tool call response exceeds the frame limit");
+        write_frame_locked(response_message.dump(), deadline);
+        continue;
+      }
       if (message_type == "worker_request") {
         deadline = std::max(deadline, Clock::now() +
                                           std::chrono::milliseconds(config.interaction_timeout_ms));
@@ -646,11 +721,12 @@ private:
     }
   }
 
-  Json request_response_locked(const std::string &operation, const std::string &job_id,
+  Json request_response_locked(std::unique_lock<std::mutex> &lock,
+                               const std::string &operation, const std::string &job_id,
                                const std::string &external_job_id, const Json &payload,
                                std::uint64_t timeout_ms) {
     try {
-      return request_locked(operation, job_id, external_job_id, payload, timeout_ms);
+      return request_locked(lock, operation, job_id, external_job_id, payload, timeout_ms);
     } catch (...) {
       // A protocol or pipe failure makes this child unusable. Never reuse it
       // for an ambiguous external submission.
@@ -731,10 +807,11 @@ private:
   }
 
   WorkerStatus status_operation(const std::string &operation, const std::string &external_job_id) {
-    std::lock_guard lock(mutex);
-    ensure_started_locked();
-    const auto response = request_response_locked(operation, "", external_job_id, Json::object(),
-                                                  config.request_timeout_ms);
+    std::unique_lock lock(mutex);
+    wait_for_tool_call(lock);
+    ensure_started_locked(lock);
+    const auto response = request_response_locked(lock, operation, "", external_job_id,
+                                                  Json::object(), config.request_timeout_ms);
     try {
       validate_response_metadata(response);
       WorkerStatus result;
@@ -783,5 +860,8 @@ void ProcessWorkerTransport::stop() noexcept {
 }
 void ProcessWorkerTransport::set_interaction_handler(WorkerInteractionHandler handler) {
   impl_->set_interaction_handler(std::move(handler));
+}
+void ProcessWorkerTransport::set_tool_call_handler(WorkerToolCallHandler handler) {
+  impl_->set_tool_call_handler(std::move(handler));
 }
 } // namespace laso

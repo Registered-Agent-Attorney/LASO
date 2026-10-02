@@ -69,7 +69,8 @@ void from_json(const Json &, WorkerMetadata &);
 
 struct WorkerRequest {
   std::string job_id, worker_id, capability, task_type, instructions, idempotency_key, deadline,
-      run_id, node_id, durable_session_id;
+      run_id, node_id, durable_session_id, parent_worker_job_id, parent_tool_call_id,
+      parent_tool_turn_id, parent_provider_session_id;
   unsigned attempt = 1;
   std::uint64_t timeout_ms = 0;
   Json input = Json::object(), output_schema = Json::object(), metadata = Json::object();
@@ -165,6 +166,25 @@ void from_json(const Json &, WorkerInteraction &);
 using WorkerInteractionHandler =
     std::function<WorkerInteractionResponse(const WorkerInteractionRequest &)>;
 
+// A Codex dynamic-tool request crosses the process boundary as a distinct,
+// bounded capability call. It is intentionally not a generic worker RPC.
+struct WorkerToolCallRequest {
+  std::string request_id, worker_job_id, worker_id, external_job_id, session_id, turn_id, deadline;
+  std::string namespace_name, tool;
+  Json arguments = Json::object();
+};
+void to_json(Json &, const WorkerToolCallRequest &);
+void from_json(const Json &, WorkerToolCallRequest &);
+struct WorkerToolCallResponse {
+  std::string request_id;
+  bool success = false;
+  Json result = Json::object();
+  std::string error;
+};
+void to_json(Json &, const WorkerToolCallResponse &);
+void from_json(const Json &, WorkerToolCallResponse &);
+using WorkerToolCallHandler = std::function<WorkerToolCallResponse(const WorkerToolCallRequest &)>;
+
 // The transport boundary is lifecycle- and job-operation-complete. Native
 // plugins continue to implement WorkerAdapter below; supervised or remote
 // implementations can implement this interface without changing WorkerNode.
@@ -186,6 +206,7 @@ public:
   // Optional for native adapters. Process transports use it to route bounded
   // worker-originated approval/permission/question requests to LASO.
   virtual void set_interaction_handler(WorkerInteractionHandler) {}
+  virtual void set_tool_call_handler(WorkerToolCallHandler) {}
   virtual void start() = 0;
   virtual void stop() noexcept = 0;
 };

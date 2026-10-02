@@ -263,6 +263,46 @@ void from_json(const Json &j, WorkerInteractionResponse &response) {
   response.reason = j.value("reason", std::string{});
 }
 
+void to_json(Json &j, const WorkerToolCallRequest &request) {
+  j = {{"request_id", request.request_id},
+       {"worker_job_id", request.worker_job_id},
+       {"worker_id", request.worker_id},
+       {"external_job_id", request.external_job_id},
+       {"session_id", request.session_id},
+       {"turn_id", request.turn_id},
+       {"deadline", request.deadline},
+       {"namespace", request.namespace_name},
+       {"tool", request.tool},
+       {"arguments", request.arguments}};
+}
+
+void from_json(const Json &j, WorkerToolCallRequest &request) {
+  request.request_id = j.value("request_id", std::string{});
+  request.worker_job_id = j.value("worker_job_id", std::string{});
+  request.worker_id = j.value("worker_id", std::string{});
+  request.external_job_id = j.value("external_job_id", std::string{});
+  request.session_id = j.value("session_id", std::string{});
+  request.turn_id = j.value("turn_id", std::string{});
+  request.deadline = j.value("deadline", std::string{});
+  request.namespace_name = j.value("namespace", std::string{});
+  request.tool = j.value("tool", std::string{});
+  request.arguments = j.value("arguments", Json::object());
+}
+
+void to_json(Json &j, const WorkerToolCallResponse &response) {
+  j = {{"request_id", response.request_id},
+       {"success", response.success},
+       {"result", response.result},
+       {"error", response.error}};
+}
+
+void from_json(const Json &j, WorkerToolCallResponse &response) {
+  response.request_id = j.value("request_id", std::string{});
+  response.success = j.value("success", false);
+  response.result = j.value("result", Json::object());
+  response.error = j.value("error", std::string{});
+}
+
 void to_json(Json &j, const WorkerInteraction &interaction) {
   j = {{"id", interaction.id},
        {"worker_job_id", interaction.worker_job_id},

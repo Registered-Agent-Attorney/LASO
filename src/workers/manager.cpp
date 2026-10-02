@@ -7,6 +7,7 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <thread>
 
 namespace laso {
 namespace {
@@ -24,6 +25,13 @@ bool bounded_identifier(const std::string &value, std::size_t maximum) {
          std::all_of(value.begin(), value.end(), [](unsigned char c) {
            return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == ':';
          });
+}
+
+bool browser_tool_child_needs_result(const WorkerJob &job) {
+  return job.state == WorkerJobState::Completed &&
+         job.request_metadata.contains("parent_worker_job_id") &&
+         !job.external_job_id.empty() &&
+         !job.request_metadata.value("codex_tool_result_retrieved", false);
 }
 
 std::string bounded_error(const std::string &value) {
@@ -102,7 +110,8 @@ std::string WorkerManager::job_id_for(const std::string &idempotency_key) const 
 
 WorkerJob WorkerManager::refresh(const std::string &id) {
   auto value = job(id);
-  if (worker_job_terminal(value.state) || value.external_job_id.empty())
+  if ((worker_job_terminal(value.state) && !browser_tool_child_needs_result(value)) ||
+      value.external_job_id.empty())
     return value;
   return reconcile(std::move(value), true);
 }
@@ -352,14 +361,59 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
   // handle is available.  Do not call adapter->status() with an empty handle:
   // process-backed transports serialize status with submit, so doing so would
   // block the runtime/lease loop behind provider startup or execution.
-  if (worker_job_terminal(value.state) || value.external_job_id.empty())
+  const auto terminal_result_missing = browser_tool_child_needs_result(value);
+  if ((worker_job_terminal(value.state) && !terminal_result_missing) || value.external_job_id.empty())
     return value;
   auto adapter = registry_.get(value.worker_id);
   const auto metadata = adapter->metadata();
   if (!metadata.supports_status && !metadata.supports_recovery)
     return value;
   try {
-    const auto status = adapter->status(value.external_job_id);
+    if (terminal_result_missing) {
+      const auto final_result = adapter->result(value.external_job_id);
+      std::lock_guard state_lock(state_mutex_);
+      value = job(value.id);
+      if (browser_tool_child_needs_result(value) &&
+          final_result.state == WorkerJobState::Completed && !final_result.result.is_null() &&
+          final_result.result.dump().size() <= max_result_bytes) {
+        value.result = final_result.result;
+        value.request_metadata["codex_tool_result_retrieved"] = true;
+        if (final_result.metadata.is_object() &&
+            final_result.metadata.dump().size() <= max_metadata_bytes)
+          value.result_metadata = final_result.metadata;
+        if (!final_result.error.empty())
+          value.error = bounded_error(final_result.error);
+        if (!final_result.artifacts.empty() && final_result.artifacts.size() <= max_artifacts_)
+          value.artifacts = final_result.artifacts;
+        merge_usage(value.usage, final_result.usage);
+        persist(value);
+      }
+      return value;
+    }
+    auto status = adapter->status(value.external_job_id);
+    bool final_tool_result_received = false;
+    // Several supervised workers acknowledge terminal state separately from
+    // their final payload. Read the result only after status says Completed;
+    // the terminal result is then committed with this durable WorkerJob.
+    if (status.state == WorkerJobState::Completed &&
+        value.request_metadata.contains("parent_worker_job_id")) {
+      const auto final_result = adapter->result(value.external_job_id);
+      if (final_result.state == WorkerJobState::Completed && !final_result.result.is_null()) {
+        status.result = final_result.result;
+        final_tool_result_received = true;
+      }
+      if (final_result.metadata.is_object() && !final_result.metadata.empty()) {
+        if (!status.metadata.is_object())
+          status.metadata = Json::object();
+        status.metadata.update(final_result.metadata);
+      }
+      if (!final_result.error.empty())
+        status.error = final_result.error;
+      if (!final_result.artifacts.empty())
+        status.artifacts = final_result.artifacts;
+      merge_usage(status.usage, final_result.usage);
+      apply_continuation(value, final_result.continuation);
+    }
     if (status.state == WorkerJobState::Unknown) {
       std::lock_guard state_lock(state_mutex_);
       value = job(value.id);
@@ -398,6 +452,9 @@ WorkerJob WorkerManager::reconcile(WorkerJob value, bool fail_transport) {
     }
     if (worker_job_terminal(value.state) && value.completed_at.empty())
       value.completed_at = timestamp();
+    if (status.state == WorkerJobState::Completed && final_tool_result_received &&
+        value.request_metadata.contains("parent_worker_job_id"))
+      value.request_metadata["codex_tool_result_retrieved"] = true;
     persist(value);
   } catch (const WorkerTransportError &error) {
     if (fail_transport) {
@@ -439,6 +496,10 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
     throw Error(ErrorCode::Conflict, "Worker manager is stopped");
   if (request.idempotency_key.empty() || request.idempotency_key.size() > 512 ||
       request.task_type.size() > 128 || request.capability.size() > 128 ||
+      request.parent_worker_job_id.size() > max_job_id_bytes ||
+      request.parent_tool_call_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.parent_tool_turn_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.parent_provider_session_id.size() > process_protocol::max_interaction_id_bytes ||
       request.instructions.size() > max_result_bytes ||
       request.input.dump().size() > max_result_bytes ||
       request.metadata.dump().size() > max_metadata_bytes ||
@@ -661,6 +722,14 @@ WorkerJob WorkerManager::submit_impl(const WorkerRequest &request, bool asynchro
                                 {"capability", request.capability},
                                 {"deadline", request.deadline},
                                 {"artifact_ids", request.artifact_ids}};
+    if (!request.parent_worker_job_id.empty())
+      created.request_metadata["parent_worker_job_id"] = request.parent_worker_job_id;
+    if (!request.parent_tool_call_id.empty())
+      created.request_metadata["parent_tool_call_id"] = request.parent_tool_call_id;
+    if (!request.parent_tool_turn_id.empty())
+      created.request_metadata["parent_codex_turn_id"] = request.parent_tool_turn_id;
+    if (!request.parent_provider_session_id.empty())
+      created.request_metadata["parent_codex_session_id"] = request.parent_provider_session_id;
     if (request.metadata.is_object()) {
       for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id"})
         if (request.metadata.contains(key))
@@ -776,6 +845,10 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
     throw Error(ErrorCode::Conflict, "Worker manager is stopped");
   if (request.idempotency_key.empty() || request.idempotency_key.size() > 512 ||
       request.task_type.size() > 128 || request.capability.size() > 128 ||
+      request.parent_worker_job_id.size() > max_job_id_bytes ||
+      request.parent_tool_call_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.parent_tool_turn_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.parent_provider_session_id.size() > process_protocol::max_interaction_id_bytes ||
       request.instructions.size() > max_result_bytes ||
       request.input.dump().size() > max_result_bytes ||
       request.metadata.dump().size() > max_metadata_bytes ||
@@ -871,6 +944,14 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
                                   {"capability", request.capability},
                                   {"deadline", request.deadline},
                                   {"artifact_ids", request.artifact_ids}};
+      if (!request.parent_worker_job_id.empty())
+        created.request_metadata["parent_worker_job_id"] = request.parent_worker_job_id;
+      if (!request.parent_tool_call_id.empty())
+        created.request_metadata["parent_tool_call_id"] = request.parent_tool_call_id;
+      if (!request.parent_tool_turn_id.empty())
+        created.request_metadata["parent_codex_turn_id"] = request.parent_tool_turn_id;
+      if (!request.parent_provider_session_id.empty())
+        created.request_metadata["parent_codex_session_id"] = request.parent_provider_session_id;
       if (request.metadata.is_object()) {
         for (const auto &key : {"classification", "node_work_id", "node_work_attempt_id"})
           if (request.metadata.contains(key))
@@ -980,46 +1061,58 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
         pending_submission ? "Worker pending cancellation failed" : "Worker cancellation failed";
   }
 
-  std::lock_guard state_lock(state_mutex_);
-  auto value = job(id);
-  if (worker_job_terminal(value.state))
-    return;
   {
-    std::lock_guard lock(interaction_mutex_);
-    for (const auto &record : storage_.list(RecordKind::WorkerInteraction, "", 10000, 0)) {
-      auto interaction = record.get<WorkerInteraction>();
-      if (interaction.worker_job_id == value.id &&
-          interaction.state == WorkerInteractionState::Pending) {
-        interaction.state = WorkerInteractionState::Cancelled;
-        interaction.reason = bounded_error(reason);
-        interaction.decided_at = timestamp();
-        interaction.response = Json{{"decision", "cancelled"}, {"reason", interaction.reason}};
-        storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
-                          Json(interaction)}});
+    std::lock_guard state_lock(state_mutex_);
+    auto value = job(id);
+    if (worker_job_terminal(value.state))
+      return;
+    {
+      std::lock_guard lock(interaction_mutex_);
+      for (const auto &record : storage_.list(RecordKind::WorkerInteraction, "", 10000, 0)) {
+        auto interaction = record.get<WorkerInteraction>();
+        if (interaction.worker_job_id == value.id &&
+            interaction.state == WorkerInteractionState::Pending) {
+          interaction.state = WorkerInteractionState::Cancelled;
+          interaction.reason = bounded_error(reason);
+          interaction.decided_at = timestamp();
+          interaction.response = Json{{"decision", "cancelled"}, {"reason", interaction.reason}};
+          storage_.commit({{RecordKind::WorkerInteraction, interaction.id, interaction.run_id,
+                            Json(interaction)}});
+        }
       }
     }
-  }
-  interaction_changed_.notify_all();
-  if (requested_state == WorkerJobState::TimedOut) {
-    if (acknowledged) {
+    interaction_changed_.notify_all();
+    if (requested_state == WorkerJobState::TimedOut) {
+      if (acknowledged) {
+        value.cancellation_acknowledged = true;
+        value.state = WorkerJobState::TimedOut;
+        value.completed_at = timestamp();
+      } else {
+        value.cancellation_error = cancellation_error.empty()
+                                       ? "Worker did not acknowledge timeout cancellation"
+                                       : cancellation_error;
+      }
+    } else if (acknowledged) {
       value.cancellation_acknowledged = true;
-      value.state = WorkerJobState::TimedOut;
+      value.state = WorkerJobState::Cancelled;
       value.completed_at = timestamp();
     } else {
-      value.cancellation_error = cancellation_error.empty()
-                                     ? "Worker did not acknowledge timeout cancellation"
-                                     : cancellation_error;
+      value.cancellation_error =
+          cancellation_error.empty() ? "Worker did not acknowledge cancellation" : cancellation_error;
     }
-  } else if (acknowledged) {
-    value.cancellation_acknowledged = true;
-    value.state = WorkerJobState::Cancelled;
-    value.completed_at = timestamp();
-  } else {
-    value.cancellation_error =
-        cancellation_error.empty() ? "Worker did not acknowledge cancellation" : cancellation_error;
+    persist(value);
+    state_changed_.notify_all();
   }
-  persist(value);
-  state_changed_.notify_all();
+
+  // Child Computer jobs are durable records with a stable parent reference.
+  // Scan and cancel after releasing the manager state lock so remote transport
+  // cancellation never runs under a global state lock.
+  for (const auto &record : storage_.list(RecordKind::WorkerJob, "", 10000, 0)) {
+    const auto child = record.get<WorkerJob>();
+    if (child.request_metadata.value("parent_worker_job_id", std::string{}) == id &&
+        !worker_job_terminal(child.state))
+      cancel(child.id, requested_state, reason);
+  }
 }
 
 namespace {
@@ -1155,6 +1248,144 @@ WorkerManager::handle_interaction(const WorkerInteractionRequest &request) {
     break;
   }
   return interaction_response(interaction);
+}
+
+WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallRequest &request) {
+  const auto failure = [&](std::string message) {
+    return WorkerToolCallResponse{request.request_id, false, Json::object(),
+                                  bounded_error(message)};
+  };
+  if (stopped_)
+    return failure("LASO worker service is stopped");
+  if (!bounded_identifier(request.worker_job_id, max_job_id_bytes) ||
+      !bounded_identifier(request.request_id, process_protocol::max_interaction_id_bytes) ||
+      !bounded_identifier(request.worker_id, process_protocol::max_interaction_id_bytes) ||
+      request.session_id.empty() || request.session_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.turn_id.empty() || request.turn_id.size() > process_protocol::max_interaction_id_bytes ||
+      request.deadline.size() > 64 || !request.arguments.is_object() ||
+      request.arguments != Json::object())
+    return failure("Invalid LASO browser status request");
+  if (request.namespace_name != "laso" || request.tool != "browser_status")
+    return failure("Unsupported LASO tool");
+
+  WorkerJob parent;
+  try {
+    parent = job(request.worker_job_id);
+  } catch (const Error &) {
+    return failure("Parent worker job was not found");
+  }
+  if (parent.worker_id != request.worker_id || worker_job_terminal(parent.state) ||
+      parent.cancellation_requested)
+    return failure("Parent worker job is no longer active");
+  WorkerMetadata parent_worker;
+  try {
+    parent_worker = registry_.get(parent.worker_id)->metadata();
+  } catch (const Error &) {
+    return failure("Parent Codex worker is not configured");
+  }
+  if (parent.worker_id == "windows_computer" || parent_worker.version != "app-server" ||
+      std::find(parent_worker.capabilities.begin(), parent_worker.capabilities.end(),
+                "coding-agent") == parent_worker.capabilities.end())
+    return failure("Only a Codex coding-agent turn may request browser status");
+
+  constexpr const char *computer_id = "windows_computer";
+  WorkerMetadata computer;
+  try {
+    computer = registry_.get(computer_id)->metadata();
+  } catch (const Error &) {
+    return failure("Windows Computer worker is not configured");
+  }
+  const auto provides_browser_status =
+      std::find(computer.capabilities.begin(), computer.capabilities.end(), "browser.status") !=
+      computer.capabilities.end();
+  if (!computer.enabled || !computer.healthy || computer.status != "healthy" ||
+      !computer.supports_status || !computer.supports_cancellation || !provides_browser_status)
+    return failure("Windows Computer browser status is unavailable");
+  if (!policy_)
+    return failure("LASO policy is unavailable");
+  const auto classification = parent.request_metadata.value("classification", std::string{"public"});
+  const auto decision = policy_->evaluate({
+      "", parent.node_id, computer_id, classification, computer.remote, computer.remote, true});
+  if (decision.decision != PolicyDecision::Allow)
+    return failure("Windows Computer browser status is not allowed by policy");
+
+  auto deadline = request.deadline;
+  if (deadline.empty())
+    deadline = parent.request_metadata.value("deadline", std::string{});
+  if (!deadline.empty() && deadline <= timestamp())
+    return failure("Parent worker job deadline has expired");
+
+  const auto call_key = request.turn_id + ":" + request.request_id;
+  const auto idempotency_key = "codex-browser-status:" + parent.id + ":" + call_key;
+  if (idempotency_key.size() > 512)
+    return failure("LASO browser status call identity exceeds its limit");
+
+  WorkerRequest child_request;
+  child_request.worker_id = computer_id;
+  child_request.capability = "browser.status";
+  child_request.task_type = "browser.status";
+  child_request.instructions = "Read-only browser status";
+  child_request.input = Json::object();
+  child_request.idempotency_key = idempotency_key;
+  child_request.deadline = deadline;
+  child_request.timeout_ms = 10000;
+  child_request.run_id = parent.run_id;
+  child_request.node_id = parent.node_id.empty() ? "codex.browser_status"
+                                                  : parent.node_id + ".browser_status";
+  child_request.parent_worker_job_id = parent.id;
+  child_request.parent_tool_call_id = call_key;
+  child_request.parent_tool_turn_id = request.turn_id;
+  child_request.parent_provider_session_id = request.session_id;
+  child_request.metadata = {{"classification", classification}};
+
+  WorkerJob child;
+  try {
+    child = submit_async(child_request);
+  } catch (const Error &error) {
+    return failure(error.what());
+  } catch (...) {
+    return failure("Unable to dispatch Windows Computer browser status");
+  }
+
+  const auto cancel_child = [&](WorkerJobState state, const std::string &reason) {
+    try {
+      cancel(child.id, state, reason);
+    } catch (...) {
+    }
+  };
+  const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (std::chrono::steady_clock::now() < wait_deadline) {
+    try {
+      parent = job(request.worker_job_id);
+    } catch (...) {
+      cancel_child(WorkerJobState::Cancelled, "Parent worker job disappeared");
+      return failure("Parent worker job disappeared");
+    }
+    if (parent.cancellation_requested || worker_job_terminal(parent.state)) {
+      cancel_child(WorkerJobState::Cancelled, "Parent Codex turn was cancelled");
+      return failure("Browser status was cancelled with its parent turn");
+    }
+    if (!deadline.empty() && deadline <= timestamp()) {
+      cancel_child(WorkerJobState::TimedOut, "Parent Codex turn deadline expired");
+      return failure("Browser status exceeded the parent turn deadline");
+    }
+
+    try {
+      child = refresh(child.id);
+    } catch (const Error &) {
+      cancel_child(WorkerJobState::Cancelled, "Unable to refresh Computer job");
+      return failure("Unable to refresh Windows Computer browser status");
+    }
+    if (worker_job_terminal(child.state)) {
+      if (child.state == WorkerJobState::Completed && child.result.is_object() &&
+          !child.result.empty())
+        return {request.request_id, true, child.result, {}};
+      return failure(child.error.empty() ? "Windows Computer browser status failed" : child.error);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  cancel_child(WorkerJobState::TimedOut, "Windows Computer browser status deadline expired");
+  return failure("Windows Computer browser status timed out");
 }
 
 std::vector<Json> WorkerManager::worker_interactions(const std::string &run_id, std::size_t limit,
