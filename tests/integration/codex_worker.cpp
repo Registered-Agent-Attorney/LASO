@@ -147,7 +147,7 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
       Json{{"session_id", "application-session-marker"}});
   io.run();
 
-  const auto run = service.get(RecordKind::Run, run_id).get<Run>();
+  const auto run = service.get(RecordKind::Run, run_id).get<laso::Run>();
   ASSERT_EQ(run.state, RunState::Completed);
   const auto jobs = service.worker_jobs(run_id);
   ASSERT_EQ(jobs.size(), 1U);
