@@ -523,6 +523,46 @@ TEST(ProcessWorker, PendingCancellationTerminatesAndRestartsOwnedProcessGroup) {
   EXPECT_TRUE(wait_for_reference_host(owner_token, false));
 }
 
+TEST(ProcessWorker, PendingCancellationDuringToolCallbackDoesNotRaiseSigpipe) {
+  ProcessWorkerTransport transport("process", worker_config("tool-call-wait", 3000));
+  std::promise<void> callback_started;
+  auto callback_started_future = callback_started.get_future();
+  std::promise<void> release_callback;
+  auto release_callback_future = release_callback.get_future().share();
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &call) {
+    callback_started.set_value();
+    release_callback_future.wait();
+    return WorkerToolCallResponse{call.request_id, true, Json::object(), {}};
+  });
+  transport.start();
+
+  std::promise<void> submit_finished;
+  auto submit_finished_future = submit_finished.get_future();
+  std::atomic<bool> submit_failed = false;
+  std::thread submitter([&] {
+    try {
+      (void)transport.submit(request());
+    } catch (const WorkerTransportError &) {
+      submit_failed.store(true, std::memory_order_release);
+    }
+    submit_finished.set_value();
+  });
+
+  const bool callback_entered =
+      callback_started_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  const bool cancelled = callback_entered && transport.cancel_pending("job-process-1");
+  release_callback.set_value();
+  const auto submit_state = submit_finished_future.wait_for(std::chrono::seconds(3));
+  submitter.join();
+
+  EXPECT_TRUE(callback_entered);
+  EXPECT_TRUE(cancelled);
+  EXPECT_EQ(submit_state, std::future_status::ready);
+  EXPECT_TRUE(submit_failed.load(std::memory_order_acquire));
+  EXPECT_FALSE(transport.metadata().healthy);
+  transport.stop();
+}
+
 TEST(ProcessWorker, ConcurrentTransportsAreObservedByTheirOwnTestIdentity) {
   const auto first_token = worker_owner_token();
   const auto second_token = worker_owner_token();

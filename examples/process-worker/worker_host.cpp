@@ -176,7 +176,8 @@ int main(int argc, char **argv) {
       const auto job_id = request.value("job_id", std::string{});
       const auto external = "process-" + job_id;
       jobs[external] = {job_id, 0, false};
-      if (mode == "tool-call-mismatch-job" || mode == "tool-call-mismatch-worker") {
+      if (mode == "tool-call-mismatch-job" || mode == "tool-call-mismatch-worker" ||
+          mode == "tool-call-wait") {
         Json tool_call{{"protocol_version", process_protocol::version},
                        {"message_type", "worker_tool_call"},
                        {"request_id", "forged-tool-call"},
@@ -185,7 +186,8 @@ int main(int argc, char **argv) {
                                              : job_id},
                        {"worker_id", mode == "tool-call-mismatch-worker"
                                          ? "different-worker"
-                                         : request.value("worker_id", std::string{})},
+                                         : request.value("payload", Json::object())
+                                               .value("worker_id", std::string{})},
                        {"external_job_id", external},
                        {"session_id", "fixture-session"},
                        {"turn_id", "fixture-turn"},

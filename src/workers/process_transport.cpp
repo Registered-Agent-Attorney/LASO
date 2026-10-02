@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -32,6 +33,49 @@ void nonblocking(int fd) {
   const auto flags = ::fcntl(fd, F_GETFL, 0);
   if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
     throw WorkerTransportError("Unable to configure worker process pipe");
+}
+
+ssize_t write_without_sigpipe(int fd, const void *buffer, std::size_t size) noexcept {
+  sigset_t sigpipe_set;
+  sigset_t previous_mask;
+  sigset_t pending_signals;
+  ::sigemptyset(&sigpipe_set);
+  ::sigaddset(&sigpipe_set, SIGPIPE);
+  const auto block_error = ::pthread_sigmask(SIG_BLOCK, &sigpipe_set, &previous_mask);
+  if (block_error != 0) {
+    errno = block_error;
+    return -1;
+  }
+  if (::sigpending(&pending_signals) != 0) {
+    const auto pending_error = errno;
+    (void)::pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr);
+    errno = pending_error;
+    return -1;
+  }
+  const bool sigpipe_was_pending = ::sigismember(&pending_signals, SIGPIPE) == 1;
+  const auto written = ::write(fd, buffer, size);
+  const auto write_error = written < 0 ? errno : 0;
+  bool restore_mask = true;
+  if (written < 0 && write_error == EPIPE && !sigpipe_was_pending) {
+    int received_signal = 0;
+    int wait_error = 0;
+    do {
+      wait_error = ::sigwait(&sigpipe_set, &received_signal);
+    } while (wait_error == EINTR);
+    // EPIPE generates a thread-directed SIGPIPE. Consume it before restoring
+    // the prior mask, or an unblocked SIGPIPE could terminate the Core process.
+    if (wait_error != 0 || received_signal != SIGPIPE)
+      restore_mask = false;
+  }
+  if (restore_mask) {
+    const auto restore_error = ::pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr);
+    if (restore_error != 0) {
+      errno = restore_error;
+      return -1;
+    }
+  }
+  errno = write_error;
+  return written;
 }
 
 void reserve_process_fd(int &fd) {
@@ -529,7 +573,8 @@ private:
         throw WorkerTransportError("Worker request timed out", true);
       if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))
         throw WorkerTransportError("Worker process closed its input");
-      const auto written = ::write(input_fd, wire.data() + offset, wire.size() - offset);
+      const auto written =
+          write_without_sigpipe(input_fd, wire.data() + offset, wire.size() - offset);
       if (written > 0)
         offset += static_cast<std::size_t>(written);
       else if (written < 0 && errno != EAGAIN && errno != EINTR)
