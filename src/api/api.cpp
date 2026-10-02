@@ -91,6 +91,18 @@ void redact_codex_session_fields(Json &value) {
       redact_codex_session_fields(entry);
   }
 }
+void redact_codex_external_handles(Json &value) {
+  if (value.is_object()) {
+    const auto external_id = value.value("external_job_id", std::string{});
+    if (external_id.starts_with("codex:"))
+      value.erase("external_job_id");
+    for (auto it = value.begin(); it != value.end(); ++it)
+      redact_codex_external_handles(it.value());
+  } else if (value.is_array()) {
+    for (auto &entry : value)
+      redact_codex_external_handles(entry);
+  }
+}
 bool is_codex_worker(const Json &worker_id) {
   return worker_id.is_string() && worker_id.get_ref<const std::string &>().starts_with("codex");
 }
@@ -106,9 +118,7 @@ Json redact_worker_session_id(Json job) {
     if (job.contains("result"))
       redact_codex_session_fields(job["result"]);
   }
-  const auto external_id = job.value("external_job_id", std::string{});
-  if (external_id.starts_with("codex:"))
-    job.erase("external_job_id");
+  redact_codex_external_handles(job);
   return job;
 }
 Json redact_worker_result_message(Json message) {
@@ -121,12 +131,21 @@ Json redact_worker_result_message(Json message) {
     return message;
   if (metadata.contains("worker_result_metadata"))
     redact_codex_session_fields(metadata["worker_result_metadata"]);
-  const auto external_id = metadata.value("external_job_id", std::string{});
-  if (external_id.starts_with("codex:"))
-    metadata.erase("external_job_id");
   if (message.contains("payload"))
     redact_codex_session_fields(message["payload"]);
+  redact_codex_external_handles(message);
   return message;
+}
+void redact_worker_result_messages(Json &value) {
+  if (value.is_object()) {
+    value = redact_worker_session_id(std::move(value));
+    value = redact_worker_result_message(std::move(value));
+    for (auto it = value.begin(); it != value.end(); ++it)
+      redact_worker_result_messages(it.value());
+  } else if (value.is_array()) {
+    for (auto &entry : value)
+      redact_worker_result_messages(entry);
+  }
 }
 } // namespace
 
@@ -647,10 +666,21 @@ ApiResponse Api::route(const std::string &method, const std::string &target, con
               : collection == "approvals" ? RecordKind::Approval
               : collection == "schedules" ? RecordKind::Schedule
                                           : RecordKind::Trigger;
-  if (method == "GET" && id.empty())
-    return {200, service_.list(kind, "", limit, offset)};
-  if (method == "GET" && action.empty())
-    return {200, collection == "runs" ? service_.run_view(id) : service_.get(kind, id)};
+  if (method == "GET" && id.empty()) {
+    auto records = service_.list(kind, "", limit, offset);
+    if (collection == "runs")
+      for (auto &run : records)
+        redact_worker_result_messages(run);
+    return {200, records};
+  }
+  if (method == "GET" && action.empty()) {
+    if (collection == "runs") {
+      auto run = service_.run_view(id);
+      redact_worker_result_messages(run);
+      return {200, run};
+    }
+    return {200, service_.get(kind, id)};
+  }
   if (method == "POST" && collection == "pipelines" && id.empty())
     return {201, service_.register_pipeline(body.at("yaml").get<std::string>())};
   if (method == "POST" && collection == "schedules" && id.empty())

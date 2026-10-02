@@ -142,7 +142,9 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   asio::io_context io;
   Service service(io, codex_session_config(root.path));
   const auto pipeline = service.register_pipeline(standalone_worker_pipeline());
-  const auto run_id = service.start(pipeline.at("id").get<std::string>(), Json::object());
+  const auto run_id = service.start(
+      pipeline.at("id").get<std::string>(), Json::object(), "local", false, Json::object(),
+      Json{{"session_id", "application-session-marker"}});
   io.run();
 
   const auto run = service.get(RecordKind::Run, run_id).get<Run>();
@@ -157,6 +159,7 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   ASSERT_EQ(public_job.status, 200U);
   const auto public_job_json = public_job.body.dump();
   EXPECT_EQ(public_job_json.find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_job_json.find("fixture-turn"), std::string::npos);
   EXPECT_EQ(public_job_json.find(root.path.string()), std::string::npos);
   EXPECT_FALSE(public_job.body.contains("external_job_id"));
   const auto public_jobs = api.handle("GET", "/api/v1/worker-jobs?limit=100", "");
@@ -174,7 +177,30 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   ASSERT_NE(worker_message, public_messages.body.end());
   const auto public_messages_json = public_messages.body.dump();
   EXPECT_EQ(public_messages_json.find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_messages_json.find("fixture-turn"), std::string::npos);
+  EXPECT_EQ(public_messages_json.find("codex:fixture-session"), std::string::npos);
   EXPECT_EQ(public_messages_json.find(root.path.string()), std::string::npos);
+
+  const auto public_run = api.handle("GET", "/api/v1/runs/" + run_id, "");
+  ASSERT_EQ(public_run.status, 200U);
+  const auto public_run_json = public_run.body.dump();
+  EXPECT_EQ(public_run_json.find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_run_json.find("fixture-turn"), std::string::npos);
+  EXPECT_EQ(public_run_json.find("codex:fixture-session"), std::string::npos);
+  EXPECT_EQ(public_run_json.find("external_job_id"), std::string::npos);
+  EXPECT_EQ(public_run_json.find(root.path.string()), std::string::npos);
+  EXPECT_NE(public_run_json.find("application-session-marker"), std::string::npos);
+  ASSERT_TRUE(public_run.body.at("message").at("metadata").contains("session_id"));
+  EXPECT_EQ(public_run.body.at("message").at("metadata").at("session_id"),
+            "application-session-marker");
+
+  const auto public_runs = api.handle("GET", "/api/v1/runs?limit=100", "");
+  ASSERT_EQ(public_runs.status, 200U);
+  EXPECT_EQ(public_runs.body.dump().find("fixture-session"), std::string::npos);
+  EXPECT_EQ(public_runs.body.dump().find("fixture-turn"), std::string::npos);
+  EXPECT_EQ(public_runs.body.dump().find("codex:fixture-session"), std::string::npos);
+  EXPECT_EQ(public_runs.body.dump().find(root.path.string()), std::string::npos);
+  EXPECT_NE(public_runs.body.dump().find("application-session-marker"), std::string::npos);
 
   const auto operator_jobs =
       api.handle("GET", "/api/v1/operator/worker-jobs?limit=100", "");
@@ -191,6 +217,7 @@ TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence)
   EXPECT_EQ(operator_job->value("codex_turn_id", std::string{}), "fixture-turn");
   EXPECT_FALSE(operator_job->value("codex_turn_started_at", std::string{}).empty());
   EXPECT_FALSE(operator_job->value("codex_turn_completed_at", std::string{}).empty());
+  EXPECT_EQ(operator_jobs.body.dump().find(root.path.string()), std::string::npos);
 }
 
 TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
