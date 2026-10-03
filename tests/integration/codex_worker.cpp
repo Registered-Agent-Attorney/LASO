@@ -159,7 +159,7 @@ ProcessWorkerConfig codex_config(const std::filesystem::path &root,
     if (!catalog)
       throw std::runtime_error("unable to create fixture model catalog");
     catalog
-        << R"({"models":[{"slug":"gpt-6-luna","tool_mode":"direct","shell_type":"disabled","multi_agent_version":"disabled","supports_search_tool":false,"experimental_supported_tools":[],"default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"}]}]})";
+        << R"({"models":[{"slug":"gpt-6-luna","tool_mode":"direct","shell_type":"disabled","apply_patch_tool_type":null,"multi_agent_version":"disabled","supports_search_tool":false,"experimental_supported_tools":[],"default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"}]}]})";
     catalog.close();
     result.args.insert(result.args.end(), {"--codex-model-catalog", catalog_path.string()});
     result.environment["LASO_CODEX_FIXTURE_REQUIRE_DIRECT_CATALOG"] = "1";
@@ -996,8 +996,9 @@ TEST(CodexWorker, StartsNewSessionForDifferentWorkspaceRoot) {
 TEST(CodexWorker, QuietProviderIntervalUsesOverallDeadline) {
   TemporaryDirectory root;
   auto worker_config = codex_config(root.path, "quiet-over-one-minute");
-  worker_config.args = {"--codex",          LASO_CODEX_FIXTURE, "--allowed-root",
-                        root.path.string(), "--timeout-ms",     "65000"};
+  worker_config.args = {"--codex", LASO_CODEX_FIXTURE, "--allowed-root", root.path.string(),
+                        "--timeout-ms", "65000", "--codex-model-catalog",
+                        (root.path / "gpt-6-luna-high-direct.json").string()};
   worker_config.startup_timeout_ms = 2000;
   worker_config.request_timeout_ms = 65000;
   ProcessWorkerTransport transport("codex", worker_config);

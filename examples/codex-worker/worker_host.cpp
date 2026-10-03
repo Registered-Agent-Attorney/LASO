@@ -63,6 +63,7 @@ std::string validate_direct_luna_catalog(const std::string &path) {
       model.value("tool_mode", std::string{}) != "direct" ||
       model.value("shell_type", std::string{}) != "disabled" ||
       model.value("multi_agent_version", std::string{}) != "disabled" ||
+      (model.contains("apply_patch_tool_type") && !model.at("apply_patch_tool_type").is_null()) ||
       model.value("supports_search_tool", true) || !experimental_tools.is_array() ||
       !experimental_tools.empty() ||
       model.value("default_reasoning_level", std::string{}) != "high" ||
@@ -863,13 +864,16 @@ private:
                               {"features.code_mode_only", false},
                               {"features.multi_agent", false},
                               {"features.multi_agent_v2", false},
+                              {"features.sleep_tool", false},
                               {"features.standalone_web_search", false},
                               {"features.apps", false},
                               {"features.plugins", false},
+                              {"features.view_image", false},
                               {"features.shell_tool", false},
                               {"features.unified_exec", false},
                               {"agents.enabled", false},
                               {"web_search", "disabled"},
+                              {"tools.update_plan.enabled", false},
                               {"tools.experimental_request_user_input.enabled", false}};
       params["developerInstructions"] =
           "LASO required-tool restriction: this task has exactly one task-specific tool, "

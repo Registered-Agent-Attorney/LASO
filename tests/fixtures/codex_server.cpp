@@ -143,13 +143,16 @@ int main(int argc, char **argv) {
           thread_config.value("features.code_mode_only", true) == false &&
           thread_config.value("features.multi_agent", true) == false &&
           thread_config.value("features.multi_agent_v2", true) == false &&
+          thread_config.value("features.sleep_tool", true) == false &&
           thread_config.value("features.standalone_web_search", true) == false &&
           thread_config.value("features.apps", true) == false &&
           thread_config.value("features.plugins", true) == false &&
+          thread_config.value("features.view_image", true) == false &&
           thread_config.value("features.shell_tool", true) == false &&
           thread_config.value("features.unified_exec", true) == false &&
           thread_config.value("agents.enabled", true) == false &&
           thread_config.value("web_search", std::string{}) == "disabled" &&
+          thread_config.value("tools.update_plan.enabled", true) == false &&
           thread_config.value("tools.experimental_request_user_input.enabled", true) == false &&
           developer_instructions.find("exactly one task-specific tool") != std::string::npos &&
           developer_instructions.find("Do not use built-in exec or shell, Code Mode") !=

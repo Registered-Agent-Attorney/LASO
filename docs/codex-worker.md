@@ -146,8 +146,9 @@ Core dynamic tool as a direct provider function. The Computer-capable worker
 must therefore use the release-pinned
 [`gpt-6-luna-high-direct-v0.156.1.json`](../deploy/codex/gpt-6-luna-high-direct-v0.156.1.json)
 catalog at app-server startup. It contains only GPT-6 Luna, sets direct tool
-mode, disables shell, search, native Codex agent collaboration, and experimental
-tools, and exposes only High reasoning. Pass its absolute
+mode, disables shell, search, native Codex agent collaboration, direct patching,
+image viewing, planning, and experimental tools, and exposes only High reasoning.
+Pass its absolute
 path to `laso-codex-worker` with `--codex-model-catalog` for the worker assigned
 to `required_tool: laso.browser_status`. The worker validates the catalog
 before launching Codex and fails closed if the catalog is absent or differs
