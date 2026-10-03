@@ -208,6 +208,62 @@ private:
   WorkerRequest request_;
 };
 
+class ReconnectingBrowserStatusWorker final : public WorkerTransport {
+public:
+  WorkerMetadata metadata() const override {
+    WorkerMetadata result;
+    result.id = "windows_computer";
+    result.name = result.id;
+    result.capabilities = {"browser.status"};
+    result.remote = true;
+    result.enabled = true;
+    result.healthy = online.load();
+    result.status = result.healthy ? "healthy" : "failed";
+    result.supports_status = true;
+    result.supports_recovery = false;
+    result.supports_cancellation = true;
+    return result;
+  }
+  WorkerSubmission submit(const WorkerRequest &request) override {
+    ++submissions;
+    if (!online.load())
+      throw WorkerTransportError("synthetic Computer transport failure");
+    WorkerSubmission submission;
+    submission.external_job_id = "computer-browser-status-" + request.job_id;
+    submission.state = WorkerJobState::Queued;
+    return submission;
+  }
+  WorkerStatus status(const std::string &) override {
+    WorkerStatus result;
+    result.state = WorkerJobState::Completed;
+    return result;
+  }
+  WorkerStatus result(const std::string &) override {
+    WorkerStatus result;
+    result.state = WorkerJobState::Completed;
+    result.result = Json{{"window_count", 1}, {"browser_status", Json{{"browser_visible", true}}}};
+    return result;
+  }
+  bool cancel(const std::string &) override {
+    return true;
+  }
+  bool supports_transport_restart() const override {
+    return true;
+  }
+  void start() override {
+    ++starts;
+    online = endpoint_reachable.load();
+  }
+  void stop() noexcept override {
+    online = false;
+  }
+
+  std::atomic<bool> endpoint_reachable{false};
+  std::atomic<bool> online{false};
+  std::atomic<unsigned> starts{0};
+  std::atomic<unsigned> submissions{0};
+};
+
 class ParentAgentWorker final : public WorkerTransport {
 public:
   WorkerMetadata metadata() const override {
@@ -392,6 +448,64 @@ TEST(Workers, CodexBrowserStatusToolDispatchesFixedComputerJobAndPersistsResult)
   storage.commit(
       {{RecordKind::WorkerJob, invalid_child.id, invalid_child.run_id, Json(invalid_child)}});
   EXPECT_FALSE(manager.has_completed_browser_status_tool_result(parent.id, parent.run_id));
+}
+
+TEST(Workers, CodexBrowserStatusRefreshesComputerTransportAfterEndpointReconnect) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto agent = std::make_shared<ParentAgentWorker>();
+  auto computer = std::make_shared<ReconnectingBrowserStatusWorker>();
+  registry.add("agent-one", agent);
+  registry.add("windows_computer", computer);
+  PolicyEngine policy({}, false, {"windows_computer"});
+  WorkerManager manager(storage, registry, policy);
+  auto parent = parent_codex_job();
+  parent.request_metadata["required_tool"] = "laso.browser_status";
+  storage.commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+
+  const auto request = browser_status_call();
+  const auto disconnected = manager.handle_tool_call(request);
+  EXPECT_FALSE(disconnected.success);
+  EXPECT_EQ(disconnected.error, "Windows Computer browser status is unavailable");
+  EXPECT_EQ(computer->starts.load(), 1U);
+  EXPECT_EQ(computer->submissions.load(), 0U);
+  EXPECT_EQ(manager.jobs(parent.run_id).size(), 1U);
+
+  // The endpoint has reconnected, but the Core transport still reports its
+  // stale failed snapshot until the authorized tool call restarts it.
+  computer->endpoint_reachable = true;
+  const auto response = manager.handle_tool_call(request);
+  ASSERT_TRUE(response.success) << response.error;
+  EXPECT_EQ(response.result.at("window_count"), 1);
+  EXPECT_EQ(computer->starts.load(), 2U);
+  EXPECT_EQ(computer->submissions.load(), 1U);
+
+  const auto child_key =
+      "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" + request.request_id;
+  const auto child = manager.job(manager.job_id_for(child_key));
+  EXPECT_EQ(child.state, WorkerJobState::Completed);
+  EXPECT_TRUE(child.request_metadata.value("codex_tool_result_retrieved", false));
+  EXPECT_EQ(child.result, response.result);
+}
+
+TEST(Workers, CodexBrowserStatusDoesNotRestartComputerWhenPolicyDenies) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  registry.add("agent-one", std::make_shared<ParentAgentWorker>());
+  auto computer = std::make_shared<ReconnectingBrowserStatusWorker>();
+  registry.add("windows_computer", computer);
+  PolicyEngine policy({{"windows_computer", PolicyDecision::Deny}}, false, {"windows_computer"});
+  WorkerManager manager(storage, registry, policy);
+  auto parent = parent_codex_job();
+  parent.request_metadata["required_tool"] = "laso.browser_status";
+  storage.commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+
+  const auto response = manager.handle_tool_call(browser_status_call());
+  EXPECT_FALSE(response.success);
+  EXPECT_NE(response.error.find("not allowed"), std::string::npos);
+  EXPECT_EQ(computer->starts.load(), 0U);
+  EXPECT_EQ(computer->submissions.load(), 0U);
+  EXPECT_EQ(manager.jobs(parent.run_id).size(), 1U);
 }
 
 TEST(Workers, CodexBrowserStatusToolRejectsOtherToolsAndArguments) {

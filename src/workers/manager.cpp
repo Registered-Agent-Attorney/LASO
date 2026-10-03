@@ -1492,26 +1492,60 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
     return failure("Only a Codex coding-agent turn may request browser status");
 
   constexpr const char *computer_id = "windows_computer";
+  std::shared_ptr<WorkerTransport> computer_adapter;
   WorkerMetadata computer;
   try {
-    computer = registry_.get(computer_id)->metadata();
+    computer_adapter = registry_.get(computer_id);
+    computer = computer_adapter->metadata();
   } catch (const Error &) {
     return failure("Windows Computer worker is not configured");
   }
   const auto provides_browser_status =
       std::find(computer.capabilities.begin(), computer.capabilities.end(), "browser.status") !=
       computer.capabilities.end();
-  if (!computer.enabled || !computer.healthy || computer.status != "healthy" ||
-      !computer.supports_status || !computer.supports_cancellation || !provides_browser_status)
+  if (!computer.enabled || !computer.supports_status || !computer.supports_cancellation ||
+      !provides_browser_status)
     return failure("Windows Computer browser status is unavailable");
   if (!policy_)
     return failure("LASO policy is unavailable");
   const auto classification =
       parent.request_metadata.value("classification", std::string{"public"});
-  const auto decision = policy_->evaluate(
-      {"", parent.node_id, computer_id, classification, computer.remote, computer.remote, true});
+  const auto authorize_computer = [&](const WorkerMetadata &metadata) {
+    return policy_->evaluate(
+        {"", parent.node_id, computer_id, classification, metadata.remote, metadata.remote, true});
+  };
+  auto decision = authorize_computer(computer);
   if (decision.decision != PolicyDecision::Allow)
     return failure("Windows Computer browser status is not allowed by policy");
+
+  // A disconnected process transport leaves its last health snapshot failed
+  // even after the remote Computer endpoint reconnects. Refresh only after the
+  // parent tool authorization and policy allow, and only when this adapter can
+  // restart its transport. This does not enable replay of an old Computer job.
+  if (!computer.healthy && computer.status != "disabled" && computer.status != "unavailable" &&
+      computer_adapter->supports_transport_restart()) {
+    try {
+      computer_adapter->start();
+    } catch (...) {
+    }
+    try {
+      computer = computer_adapter->metadata();
+    } catch (...) {
+      return failure("Windows Computer browser status is unavailable");
+    }
+    if (computer.enabled) {
+      decision = authorize_computer(computer);
+      if (decision.decision != PolicyDecision::Allow)
+        return failure("Windows Computer browser status is not allowed by policy");
+    }
+  }
+  const auto refreshed_provides_browser_status =
+      std::find(computer.capabilities.begin(), computer.capabilities.end(), "browser.status") !=
+      computer.capabilities.end();
+  if (!computer.enabled || !computer.healthy || computer.status != "healthy" ||
+      !computer.supports_status || !computer.supports_cancellation ||
+      !refreshed_provides_browser_status)
+    return failure("Windows Computer browser status is unavailable");
 
   auto deadline = request.deadline;
   if (deadline.empty())
