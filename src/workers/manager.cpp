@@ -1177,9 +1177,15 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
         try {
           auto failed = job(created.id);
           if (failed.state == WorkerJobState::Submitting && failed.external_job_id.empty()) {
-            failed.state = WorkerJobState::Failed;
-            failed.failure_kind = WorkerFailureKind::Job;
-            failed.error = "Worker submission could not be scheduled";
+            if (failed.cancellation_requested) {
+              failed.state = failed.cancellation_target_state;
+              failed.cancellation_acknowledged = true;
+              failed.cancellation_error.clear();
+            } else {
+              failed.state = WorkerJobState::Failed;
+              failed.failure_kind = WorkerFailureKind::Job;
+              failed.error = "Worker submission could not be scheduled";
+            }
             failed.completed_at = timestamp();
             persist(failed);
           }
