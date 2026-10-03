@@ -1138,6 +1138,17 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
           if (request.metadata.contains(key))
             created.request_metadata[key] = request.metadata.at(key);
       }
+      if (!request.parent_worker_job_id.empty()) {
+        WorkerJob parent;
+        try {
+          parent = job(request.parent_worker_job_id);
+        } catch (const Error &) {
+          throw Error(ErrorCode::Conflict, "Parent worker job is unavailable");
+        }
+        if (parent.run_id != request.run_id || parent.cancellation_requested ||
+            worker_job_terminal(parent.state))
+          throw Error(ErrorCode::Conflict, "Parent worker job is no longer active");
+      }
       if (!storage_.claim({RecordKind::WorkerJob, created.id, created.run_id, Json(created)}))
         return job(durable_id);
       created.state = WorkerJobState::Submitting;
@@ -1215,6 +1226,14 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
     value.cancellation_requested = true;
     value.cancellation_target_state = requested_state;
     value.cancellation_error = bounded_error(reason);
+    if (value.request_metadata.contains("codex_browser_status_reservations") &&
+        value.request_metadata["codex_browser_status_reservations"].is_array()) {
+      for (auto &reservation : value.request_metadata["codex_browser_status_reservations"])
+        if (reservation.is_object()) {
+          reservation["state"] = "cancelled";
+          reservation["error"] = bounded_error(reason);
+        }
+    }
     if (const auto signal = submission_cancellation_signals_.find(id);
         signal != submission_cancellation_signals_.end())
       signal->second->store(true, std::memory_order_release);
@@ -1554,19 +1573,10 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
     return failure("Parent worker job deadline has expired");
 
   const auto call_key = request.turn_id + ":" + request.request_id;
-  if (parent.request_metadata.contains("codex_browser_status_calls")) {
-    const auto &calls = parent.request_metadata.at("codex_browser_status_calls");
-    if (!calls.is_array())
-      return failure("Stored browser status call evidence is invalid");
-    const auto duplicate = std::any_of(calls.begin(), calls.end(), [&](const Json &entry) {
-      return entry.is_object() && entry.value("call_key", std::string{}) == call_key;
-    });
-    if (!duplicate && !calls.empty())
-      return failure("This Codex turn already used its browser status tool call");
-  }
   const auto idempotency_key = "codex-browser-status:" + parent.id + ":" + call_key;
   if (idempotency_key.size() > 512)
     return failure("LASO browser status call identity exceeds its limit");
+  const auto child_job_id = job_id_for(idempotency_key);
 
   WorkerRequest child_request;
   child_request.worker_id = computer_id;
@@ -1586,14 +1596,101 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   child_request.parent_provider_session_id = request.session_id;
   child_request.metadata = {{"classification", classification}};
 
+  // Claim this parent turn durably before scheduling the Computer submission.
+  // A competing unique call id observes the reservation under state_mutex_ and
+  // cannot dispatch a second child. Replays of the exact same call reuse the
+  // deterministic child job id, including after a process restart.
+  {
+    std::lock_guard state_lock(state_mutex_);
+    try {
+      parent = job(request.worker_job_id);
+    } catch (const Error &) {
+      return failure("Parent worker job was not found");
+    }
+    if (parent.worker_id != request.worker_id || parent.run_id != child_request.run_id ||
+        worker_job_terminal(parent.state) || parent.cancellation_requested ||
+        parent.request_metadata.value("required_tool", std::string{}) != "laso.browser_status")
+      return failure("Parent worker job is no longer active");
+
+    const auto calls = parent.request_metadata.value("codex_browser_status_calls", Json::array());
+    if (!calls.is_array())
+      return failure("Stored browser status call evidence is invalid");
+    const auto completed_call = std::find_if(calls.begin(), calls.end(), [&](const Json &entry) {
+      return entry.is_object() && entry.value("call_key", std::string{}) == call_key &&
+             entry.value("session_id", std::string{}) == request.session_id &&
+             entry.value("turn_id", std::string{}) == request.turn_id;
+    });
+    if (!calls.empty() && completed_call == calls.end())
+      return failure("This Codex turn already used its browser status tool call");
+
+    auto reservations =
+        parent.request_metadata.value("codex_browser_status_reservations", Json::array());
+    if (!reservations.is_array())
+      return failure("Stored browser status call reservation is invalid");
+    const auto existing_reservation =
+        std::find_if(reservations.begin(), reservations.end(), [&](const Json &entry) {
+          return entry.is_object() &&
+                 entry.value("session_id", std::string{}) == request.session_id &&
+                 entry.value("turn_id", std::string{}) == request.turn_id;
+        });
+    if (existing_reservation != reservations.end()) {
+      if (existing_reservation->value("call_key", std::string{}) != call_key ||
+          existing_reservation->value("child_worker_job_id", std::string{}) != child_job_id)
+        return failure("This Codex turn already reserved its browser status tool call");
+    } else {
+      if (!reservations.empty() || reservations.size() >= 16)
+        return failure("A browser status tool call is already reserved for this parent job");
+      reservations.push_back({{"call_key", call_key},
+                              {"session_id", request.session_id},
+                              {"turn_id", request.turn_id},
+                              {"child_worker_job_id", child_job_id},
+                              {"state", "reserved"}});
+      parent.request_metadata["codex_browser_status_reservations"] = std::move(reservations);
+      try {
+        persist(parent);
+      } catch (...) {
+        return failure("Unable to persist browser status call reservation");
+      }
+    }
+  }
+
+  const auto update_reservation = [&](const std::string &state, const std::string &error = "") {
+    try {
+      std::lock_guard state_lock(state_mutex_);
+      auto current = job(request.worker_job_id);
+      auto reservations =
+          current.request_metadata.value("codex_browser_status_reservations", Json::array());
+      if (!reservations.is_array())
+        return;
+      const auto found =
+          std::find_if(reservations.begin(), reservations.end(), [&](const Json &entry) {
+            return entry.is_object() && entry.value("call_key", std::string{}) == call_key &&
+                   entry.value("session_id", std::string{}) == request.session_id &&
+                   entry.value("turn_id", std::string{}) == request.turn_id &&
+                   entry.value("child_worker_job_id", std::string{}) == child_job_id;
+          });
+      if (found == reservations.end() || found->value("state", std::string{}) == "cancelled")
+        return;
+      (*found)["state"] = state;
+      if (!error.empty())
+        (*found)["error"] = bounded_error(error);
+      current.request_metadata["codex_browser_status_reservations"] = std::move(reservations);
+      persist(current);
+    } catch (...) {
+    }
+  };
+
   WorkerJob child;
   try {
     child = submit_async(child_request);
   } catch (const Error &error) {
+    update_reservation("submission_failed", error.what());
     return failure(error.what());
   } catch (...) {
+    update_reservation("submission_failed", "Unable to dispatch Windows Computer browser status");
     return failure("Unable to dispatch Windows Computer browser status");
   }
+  update_reservation("submitted");
 
   const auto cancel_child = [&](WorkerJobState state, const std::string &reason) {
     try {
@@ -1622,6 +1719,7 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
       child = refresh(child.id);
     } catch (const Error &) {
       cancel_child(WorkerJobState::Cancelled, "Unable to refresh Computer job");
+      update_reservation("terminal_failure", "Unable to refresh Windows Computer browser status");
       return failure("Unable to refresh Windows Computer browser status");
     }
     if (worker_job_terminal(child.state)) {
@@ -1659,17 +1757,37 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
           } else {
             calls.push_back(std::move(attestation));
           }
+          auto reservations =
+              parent.request_metadata.value("codex_browser_status_reservations", Json::array());
+          if (!reservations.is_array())
+            return failure("Browser status call reservation is invalid");
+          const auto reservation =
+              std::find_if(reservations.begin(), reservations.end(), [&](const Json &entry) {
+                return entry.is_object() && entry.value("call_key", std::string{}) == call_key &&
+                       entry.value("session_id", std::string{}) == request.session_id &&
+                       entry.value("turn_id", std::string{}) == request.turn_id &&
+                       entry.value("child_worker_job_id", std::string{}) == child.id;
+              });
+          if (reservation == reservations.end())
+            return failure("Browser status call reservation disappeared before completion");
+          (*reservation)["state"] = "completed";
+          (*reservation)["result_retrieved"] = true;
+          parent.request_metadata["codex_browser_status_reservations"] = std::move(reservations);
           persist(parent);
         } catch (...) {
           return failure("Unable to persist browser status result correlation");
         }
         return {request.request_id, true, child.result, {}};
       }
+      update_reservation("terminal_failure", child.error.empty()
+                                                 ? "Windows Computer browser status failed"
+                                                 : child.error);
       return failure(child.error.empty() ? "Windows Computer browser status failed" : child.error);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
   cancel_child(WorkerJobState::TimedOut, "Windows Computer browser status deadline expired");
+  update_reservation("timed_out", "Windows Computer browser status deadline expired");
   return failure("Windows Computer browser status timed out");
 }
 

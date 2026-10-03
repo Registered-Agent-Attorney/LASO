@@ -135,7 +135,8 @@ public:
 
 class BrowserStatusWorker final : public WorkerTransport {
 public:
-  explicit BrowserStatusWorker(bool wait_for_cancel = false) : wait_for_cancel_(wait_for_cancel) {}
+  explicit BrowserStatusWorker(bool wait_for_cancel = false, bool block_submission = false)
+      : wait_for_cancel_(wait_for_cancel), block_submission_(block_submission) {}
   WorkerMetadata metadata() const override {
     WorkerMetadata result;
     result.id = "windows_computer";
@@ -151,12 +152,17 @@ public:
     return result;
   }
   WorkerSubmission submit(const WorkerRequest &request) override {
+    ++submission_calls_;
     {
       std::lock_guard lock(mutex_);
       request_ = request;
       submitted_ = true;
     }
     submitted_changed_.notify_all();
+    if (block_submission_) {
+      std::unique_lock lock(mutex_);
+      submitted_changed_.wait(lock, [&] { return release_submission_; });
+    }
     WorkerSubmission result;
     result.external_job_id = "computer-browser-status-job";
     result.state = WorkerJobState::Queued;
@@ -190,6 +196,16 @@ public:
     std::unique_lock lock(mutex_);
     return submitted_changed_.wait_for(lock, timeout, [&] { return submitted_; });
   }
+  void release_submission() {
+    {
+      std::lock_guard lock(mutex_);
+      release_submission_ = true;
+    }
+    submitted_changed_.notify_all();
+  }
+  unsigned submission_calls() const {
+    return submission_calls_;
+  }
   WorkerRequest request() const {
     std::lock_guard lock(mutex_);
     return request_;
@@ -200,11 +216,13 @@ public:
 
 private:
   bool wait_for_cancel_;
+  bool block_submission_;
   std::atomic<bool> cancelled_{false};
   std::atomic<unsigned> result_calls_{0};
+  std::atomic<unsigned> submission_calls_{0};
   mutable std::mutex mutex_;
   std::condition_variable submitted_changed_;
-  bool submitted_ = false;
+  bool submitted_ = false, release_submission_ = false;
   WorkerRequest request_;
 };
 
@@ -450,6 +468,177 @@ TEST(Workers, CodexBrowserStatusToolDispatchesFixedComputerJobAndPersistsResult)
   EXPECT_FALSE(manager.has_completed_browser_status_tool_result(parent.id, parent.run_id));
 }
 
+TEST(Workers, ConcurrentCodexBrowserStatusCallIdsReserveOnlyOneComputerSubmission) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto agent = std::make_shared<ParentAgentWorker>();
+  auto computer = std::make_shared<BrowserStatusWorker>(false, true);
+  registry.add("agent-one", agent);
+  registry.add("windows_computer", computer);
+  PolicyEngine policy({}, false, {"windows_computer"});
+  WorkerManager manager(storage, registry, policy);
+  auto parent = parent_codex_job();
+  parent.node_id = "agent_three";
+  parent.request_metadata["required_tool"] = "laso.browser_status";
+  storage.commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+
+  auto first_call = browser_status_call();
+  auto second_call = first_call;
+  second_call.request_id = "call-browser-status-racing-id";
+  std::mutex start_mutex;
+  std::condition_variable start_changed;
+  unsigned ready = 0;
+  bool release_calls = false;
+  const auto invoke = [&](const WorkerToolCallRequest &call) {
+    {
+      std::unique_lock lock(start_mutex);
+      ++ready;
+      start_changed.notify_all();
+      start_changed.wait(lock, [&] { return release_calls; });
+    }
+    return manager.handle_tool_call(call);
+  };
+  auto first = std::async(std::launch::async, [&] { return invoke(first_call); });
+  auto second = std::async(std::launch::async, [&] { return invoke(second_call); });
+  bool both_ready = false;
+  {
+    std::unique_lock lock(start_mutex);
+    both_ready = start_changed.wait_for(lock, std::chrono::seconds(2), [&] { return ready == 2; });
+    release_calls = true;
+  }
+  start_changed.notify_all();
+  EXPECT_TRUE(both_ready);
+  EXPECT_TRUE(computer->wait_for_submission(std::chrono::seconds(2)));
+
+  const auto submitted_request = computer->request();
+  const auto submitted_call_key = submitted_request.parent_tool_call_id;
+  const auto child_key = "codex-browser-status:" + parent.id + ":" + submitted_call_key;
+  const auto reserved_parent = manager.job(parent.id);
+  const auto reservations =
+      reserved_parent.request_metadata.value("codex_browser_status_reservations", Json::array());
+  const auto reservation =
+      reservations.is_array() && !reservations.empty() ? reservations.front() : Json::object();
+
+  const auto first_failed_while_submission_blocked =
+      first.wait_for(std::chrono::milliseconds(250)) == std::future_status::ready;
+  const auto second_failed_while_submission_blocked =
+      second.wait_for(std::chrono::milliseconds(250)) == std::future_status::ready;
+  computer->release_submission();
+
+  ASSERT_EQ(first.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  ASSERT_EQ(second.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  const auto first_response = first.get();
+  const auto second_response = second.get();
+  ASSERT_TRUE(reservations.is_array());
+  ASSERT_EQ(reservations.size(), 1U);
+  EXPECT_EQ(reservation.value("call_key", std::string{}), submitted_call_key);
+  EXPECT_EQ(reservation.value("child_worker_job_id", std::string{}), manager.job_id_for(child_key));
+  EXPECT_EQ(first_response.success + second_response.success, 1);
+  EXPECT_TRUE(first_failed_while_submission_blocked || second_failed_while_submission_blocked);
+  EXPECT_EQ(computer->submission_calls(), 1U);
+
+  const auto completed_parent = manager.job(parent.id);
+  const auto completed_reservations =
+      completed_parent.request_metadata.value("codex_browser_status_reservations", Json::array());
+  ASSERT_EQ(completed_reservations.size(), 1U);
+  EXPECT_EQ(completed_reservations.front().value("state", std::string{}), "completed");
+  const auto calls =
+      completed_parent.request_metadata.value("codex_browser_status_calls", Json::array());
+  ASSERT_EQ(calls.size(), 1U);
+  EXPECT_EQ(manager.jobs(parent.run_id).size(), 2U);
+}
+
+TEST(Workers, CodexBrowserStatusReservationReusesDurableChildAfterRestart) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto agent = std::make_shared<ParentAgentWorker>();
+  auto computer = std::make_shared<BrowserStatusWorker>();
+  registry.add("agent-one", agent);
+  registry.add("windows_computer", computer);
+  PolicyEngine policy({}, false, {"windows_computer"});
+  WorkerManager manager(storage, registry, policy);
+
+  auto parent = parent_codex_job("parent-browser-restart");
+  parent.node_id = "agent_three";
+  parent.request_metadata["required_tool"] = "laso.browser_status";
+  const auto call = browser_status_call(parent.id);
+  const auto call_key = call.turn_id + ":" + call.request_id;
+  const auto idempotency_key = "codex-browser-status:" + parent.id + ":" + call_key;
+  const auto child_id = manager.job_id_for(idempotency_key);
+  parent.request_metadata["codex_browser_status_reservations"] =
+      Json::array({Json{{"call_key", call_key},
+                        {"session_id", call.session_id},
+                        {"turn_id", call.turn_id},
+                        {"child_worker_job_id", child_id},
+                        {"state", "submitted"}}});
+  storage.commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+
+  WorkerJob child;
+  child.id = child_id;
+  child.worker_id = "windows_computer";
+  child.run_id = parent.run_id;
+  child.node_id = "agent_three.browser_status";
+  child.idempotency_key = idempotency_key;
+  child.external_job_id = "computer-browser-status-recovered";
+  child.state = WorkerJobState::Completed;
+  child.result =
+      Json{{"window_count", 1},
+           {"browser_status", Json{{"browser_visible", true}, {"active_browser_visible", true}}}};
+  child.request_metadata = {
+      {"task_type", "browser.status"},        {"capability", "browser.status"},
+      {"parent_worker_job_id", parent.id},    {"parent_tool_call_id", call_key},
+      {"parent_codex_turn_id", call.turn_id}, {"parent_codex_session_id", call.session_id},
+      {"codex_tool_result_retrieved", true}};
+  storage.commit({{RecordKind::WorkerJob, child.id, child.run_id, Json(child)}});
+
+  WorkerManager recovered(storage, registry, policy);
+  const auto response = recovered.handle_tool_call(call);
+  ASSERT_TRUE(response.success) << response.error;
+  EXPECT_EQ(response.result, child.result);
+  EXPECT_EQ(computer->submission_calls(), 0U);
+
+  auto different_call = call;
+  different_call.request_id = "different-call-after-restart";
+  EXPECT_FALSE(recovered.handle_tool_call(different_call).success);
+  EXPECT_EQ(computer->submission_calls(), 0U);
+}
+
+TEST(Workers, CodexBrowserStatusChildIsNotCreatedAfterParentCancellation) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto computer = std::make_shared<BrowserStatusWorker>();
+  registry.add("windows_computer", computer);
+  PolicyEngine policy({}, false, {"windows_computer"});
+  WorkerManager manager(storage, registry, policy);
+
+  auto parent = parent_codex_job("cancelled-browser-parent");
+  parent.state = WorkerJobState::Cancelled;
+  parent.cancellation_requested = true;
+  parent.request_metadata["codex_browser_status_reservations"] =
+      Json::array({Json{{"call_key", "fixture-turn:fixture-call"},
+                        {"session_id", "fixture-thread"},
+                        {"turn_id", "fixture-turn"},
+                        {"child_worker_job_id", "reserved-browser-child"},
+                        {"state", "cancelled"}}});
+  storage.commit({{RecordKind::WorkerJob, parent.id, parent.run_id, Json(parent)}});
+
+  WorkerRequest child;
+  child.worker_id = "windows_computer";
+  child.capability = "browser.status";
+  child.task_type = "browser.status";
+  child.run_id = parent.run_id;
+  child.node_id = "agent_three.browser_status";
+  child.idempotency_key = "codex-browser-status:cancelled-browser-parent:fixture-turn:fixture-call";
+  child.parent_worker_job_id = parent.id;
+  child.parent_tool_call_id = "fixture-turn:fixture-call";
+  child.parent_tool_turn_id = "fixture-turn";
+  child.parent_provider_session_id = "fixture-thread";
+
+  EXPECT_THROW(manager.submit_async(child), Error);
+  EXPECT_EQ(computer->submission_calls(), 0U);
+  EXPECT_EQ(manager.jobs(parent.run_id).size(), 1U);
+}
+
 TEST(Workers, CodexBrowserStatusRefreshesComputerTransportAfterEndpointReconnect) {
   InMemoryWorkerStorage storage;
   WorkerRegistry registry;
@@ -602,6 +791,12 @@ TEST(Workers, ParentCancellationCancelsDurableComputerToolChild) {
   const auto child_key =
       "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" + request.request_id;
   const auto child_id = manager.job_id_for(child_key);
+  const auto reserved_parent = manager.job(parent.id);
+  const auto reservations =
+      reserved_parent.request_metadata.value("codex_browser_status_reservations", Json::array());
+  ASSERT_TRUE(reservations.is_array());
+  ASSERT_EQ(reservations.size(), 1U);
+  EXPECT_EQ(reservations.front().value("child_worker_job_id", std::string{}), child_id);
   const auto submit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (manager.job(child_id).external_job_id.empty() &&
          std::chrono::steady_clock::now() < submit_deadline)
@@ -612,6 +807,11 @@ TEST(Workers, ParentCancellationCancelsDurableComputerToolChild) {
   EXPECT_FALSE(future.get().success);
   EXPECT_EQ(manager.job(parent.id).state, WorkerJobState::Cancelled);
   EXPECT_EQ(manager.job(child_id).state, WorkerJobState::Cancelled);
+  const auto cancelled_parent = manager.job(parent.id);
+  const auto cancelled_reservations =
+      cancelled_parent.request_metadata.value("codex_browser_status_reservations", Json::array());
+  ASSERT_EQ(cancelled_reservations.size(), 1U);
+  EXPECT_EQ(cancelled_reservations.front().value("state", std::string{}), "cancelled");
 }
 
 TEST(Workers, PluginLoadsStartsAndReportsHealth) {
