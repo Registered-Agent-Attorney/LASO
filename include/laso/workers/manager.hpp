@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <laso/events/events.hpp>
 #include <laso/policies/policy.hpp>
 #include <laso/storage/storage.hpp>
@@ -67,13 +68,17 @@ private:
   mutable std::mutex async_mutex_;
   std::set<std::string> async_submissions_;
   std::set<std::string> active_submissions_;
-  std::vector<std::jthread> async_threads_;
+  std::function<void(std::vector<std::jthread> &, std::function<void(std::stop_token)>)>
+      async_thread_launcher_;
   mutable std::mutex state_mutex_;
   std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>>
       submission_cancellation_signals_;
   std::condition_variable state_changed_;
   mutable std::mutex interaction_mutex_;
   std::condition_variable interaction_changed_;
+  // Destroy/join async workers before destroying the state and synchronization
+  // members their closures access. Members are destroyed in reverse order.
+  std::vector<std::jthread> async_threads_;
   void apply_event(const Event &);
   WorkerJob reconcile(WorkerJob, bool fail_transport);
   WorkerJob finalize_pending_cancellation(const std::string &);
@@ -92,5 +97,6 @@ private:
   static std::string durable_job_id(const std::string &idempotency_key);
   static WorkerJobState parse_state(const Json &,
                                     WorkerJobState fallback = WorkerJobState::Unknown);
+  friend struct WorkerManagerTestAccess;
 };
 } // namespace laso

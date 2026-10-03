@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <laso/core/config.hpp>
 #include <laso/workers/manager.hpp>
 #include <laso/workers/process_protocol.hpp>
@@ -1066,8 +1067,14 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
   }
 
   const auto durable_id = durable_job_id(request.idempotency_key);
+  // Copy the request before creating a durable Submitting row. The async
+  // submission closure must not allocate while copying request data after the
+  // dispatch reservation has been persisted.
+  auto async_request = request;
+  auto async_job_id = durable_id;
   WorkerJob created;
   bool dispatch_reserved = false;
+  std::exception_ptr reservation_error;
   {
     std::lock_guard state_lock(state_mutex_);
     retire_superseded_distributed_jobs_locked();
@@ -1153,62 +1160,128 @@ WorkerJob WorkerManager::submit_async(const WorkerRequest &request) {
         return job(durable_id);
       created.state = WorkerJobState::Submitting;
       persist(created);
-      submission_cancellation_signals_[created.id] = std::make_shared<std::atomic<bool>>(false);
-      {
-        std::lock_guard async_lock(async_mutex_);
-        dispatch_reserved = async_submissions_.insert(created.id).second;
+      try {
+        auto cancellation_signal = std::make_shared<std::atomic<bool>>(false);
+        submission_cancellation_signals_.emplace(created.id, std::move(cancellation_signal));
+        {
+          std::lock_guard async_lock(async_mutex_);
+          dispatch_reserved = async_submissions_.insert(created.id).second;
+        }
+      } catch (...) {
+        reservation_error = std::current_exception();
+        submission_cancellation_signals_.erase(created.id);
+        {
+          std::lock_guard async_lock(async_mutex_);
+          async_submissions_.erase(created.id);
+        }
+        try {
+          auto failed = job(created.id);
+          if (failed.state == WorkerJobState::Submitting && failed.external_job_id.empty()) {
+            failed.state = WorkerJobState::Failed;
+            failed.failure_kind = WorkerFailureKind::Job;
+            failed.error = "Worker submission could not be scheduled";
+            failed.completed_at = timestamp();
+            persist(failed);
+          }
+        } catch (...) {
+          // If storage is unavailable, the unreserved Submitting record can be
+          // fenced by normal durable recovery.
+        }
       }
     }
   }
 
-  {
-    std::lock_guard async_lock(async_mutex_);
-    if (!dispatch_reserved && !async_submissions_.insert(created.id).second)
-      return created;
-    async_threads_.emplace_back([this, request, id = created.id](std::stop_token) {
-      try {
-        (void)submit_impl(request, true, id);
-      } catch (const Error &error) {
-        if (error.code == ErrorCode::Storage) {
-          log_diagnostic("worker.submission_deferred_after_storage_error",
-                         {{"worker_job_id", id}, {"worker_id", request.worker_id}});
-        } else {
-          try {
-            std::lock_guard state_lock(state_mutex_);
-            auto failed = job(id);
-            if (!worker_job_terminal(failed.state)) {
-              failed.state = WorkerJobState::Failed;
-              failed.failure_kind = WorkerFailureKind::Job;
-              failed.error = bounded_error(error.what());
-              failed.completed_at = timestamp();
-              persist(failed);
-            }
-          } catch (...) {
-          }
-        }
-      } catch (...) {
+  if (reservation_error) {
+    state_changed_.notify_all();
+    std::rethrow_exception(reservation_error);
+  }
+
+  auto async_submission = [this, request = std::move(async_request),
+                           id = std::move(async_job_id)](std::stop_token) {
+    try {
+      (void)submit_impl(request, true, id);
+    } catch (const Error &error) {
+      if (error.code == ErrorCode::Storage) {
+        log_diagnostic("worker.submission_deferred_after_storage_error",
+                       {{"worker_job_id", id}, {"worker_id", request.worker_id}});
+      } else {
         try {
           std::lock_guard state_lock(state_mutex_);
           auto failed = job(id);
           if (!worker_job_terminal(failed.state)) {
             failed.state = WorkerJobState::Failed;
             failed.failure_kind = WorkerFailureKind::Job;
-            failed.error = "Worker submission failed";
+            failed.error = bounded_error(error.what());
             failed.completed_at = timestamp();
             persist(failed);
           }
         } catch (...) {
         }
       }
-      {
-        std::lock_guard async_lock(async_mutex_);
-        async_submissions_.erase(id);
-      }
-      {
+    } catch (...) {
+      try {
         std::lock_guard state_lock(state_mutex_);
-        submission_cancellation_signals_.erase(id);
+        auto failed = job(id);
+        if (!worker_job_terminal(failed.state)) {
+          failed.state = WorkerJobState::Failed;
+          failed.failure_kind = WorkerFailureKind::Job;
+          failed.error = "Worker submission failed";
+          failed.completed_at = timestamp();
+          persist(failed);
+        }
+      } catch (...) {
       }
-    });
+    }
+    {
+      std::lock_guard async_lock(async_mutex_);
+      async_submissions_.erase(id);
+    }
+    {
+      std::lock_guard state_lock(state_mutex_);
+      submission_cancellation_signals_.erase(id);
+    }
+  };
+  std::exception_ptr launch_error;
+  {
+    std::lock_guard async_lock(async_mutex_);
+    if (!dispatch_reserved && !async_submissions_.insert(created.id).second)
+      return created;
+    try {
+      if (async_thread_launcher_)
+        async_thread_launcher_(async_threads_, std::move(async_submission));
+      else
+        async_threads_.emplace_back(std::move(async_submission));
+    } catch (...) {
+      // Do not leave a false in-memory dispatch reservation when no thread
+      // was created. The durable Submitting row is failed below.
+      async_submissions_.erase(created.id);
+      launch_error = std::current_exception();
+    }
+  }
+  if (launch_error) {
+    try {
+      std::lock_guard state_lock(state_mutex_);
+      submission_cancellation_signals_.erase(created.id);
+      auto failed = job(created.id);
+      if (failed.state == WorkerJobState::Submitting && failed.external_job_id.empty()) {
+        if (failed.cancellation_requested) {
+          failed.state = failed.cancellation_target_state;
+          failed.cancellation_acknowledged = true;
+          failed.cancellation_error.clear();
+        } else {
+          failed.state = WorkerJobState::Failed;
+          failed.failure_kind = WorkerFailureKind::Job;
+          failed.error = "Worker submission could not be scheduled";
+        }
+        failed.completed_at = timestamp();
+        persist(failed);
+      }
+    } catch (...) {
+      // Preserve the launch exception. If storage is unavailable, normal
+      // durable recovery will fence the still-Submitting record.
+    }
+    state_changed_.notify_all();
+    std::rethrow_exception(launch_error);
   }
   return created;
 }
