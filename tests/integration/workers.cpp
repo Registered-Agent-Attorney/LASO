@@ -241,8 +241,7 @@ public:
   WorkerStatus result(const std::string &) override {
     WorkerStatus result;
     result.state = WorkerJobState::Completed;
-    result.result = Json{{"window_count", 1},
-                         {"browser_status", Json{{"browser_visible", true}}}};
+    result.result = Json{{"window_count", 1}, {"browser_status", Json{{"browser_visible", true}}}};
     return result;
   }
   bool cancel(const std::string &) override {
@@ -481,8 +480,8 @@ TEST(Workers, CodexBrowserStatusRefreshesComputerTransportAfterEndpointReconnect
   EXPECT_EQ(computer->starts.load(), 2U);
   EXPECT_EQ(computer->submissions.load(), 1U);
 
-  const auto child_key = "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" +
-                         request.request_id;
+  const auto child_key =
+      "codex-browser-status:" + parent.id + ":" + request.turn_id + ":" + request.request_id;
   const auto child = manager.job(manager.job_id_for(child_key));
   EXPECT_EQ(child.state, WorkerJobState::Completed);
   EXPECT_TRUE(child.request_metadata.value("codex_tool_result_retrieved", false));
@@ -495,8 +494,7 @@ TEST(Workers, CodexBrowserStatusDoesNotRestartComputerWhenPolicyDenies) {
   registry.add("agent-one", std::make_shared<ParentAgentWorker>());
   auto computer = std::make_shared<ReconnectingBrowserStatusWorker>();
   registry.add("windows_computer", computer);
-  PolicyEngine policy({{"windows_computer", PolicyDecision::Deny}}, false,
-                      {"windows_computer"});
+  PolicyEngine policy({{"windows_computer", PolicyDecision::Deny}}, false, {"windows_computer"});
   WorkerManager manager(storage, registry, policy);
   auto parent = parent_codex_job();
   parent.request_metadata["required_tool"] = "laso.browser_status";

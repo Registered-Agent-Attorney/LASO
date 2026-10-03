@@ -1511,8 +1511,8 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   const auto classification =
       parent.request_metadata.value("classification", std::string{"public"});
   const auto authorize_computer = [&](const WorkerMetadata &metadata) {
-    return policy_->evaluate({"", parent.node_id, computer_id, classification, metadata.remote,
-                              metadata.remote, true});
+    return policy_->evaluate(
+        {"", parent.node_id, computer_id, classification, metadata.remote, metadata.remote, true});
   };
   auto decision = authorize_computer(computer);
   if (decision.decision != PolicyDecision::Allow)
