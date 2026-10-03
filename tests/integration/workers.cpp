@@ -232,14 +232,18 @@ public:
     WorkerMetadata result;
     result.id = "windows_computer";
     result.name = result.id;
-    result.capabilities = {"browser.status"};
     result.remote = true;
     result.enabled = true;
     result.healthy = online.load();
     result.status = result.healthy ? "healthy" : "failed";
-    result.supports_status = true;
+    // Before a successful transport hello, the remote worker has not yet
+    // supplied the metadata that handle_tool_call requires for dispatch.
+    if (result.healthy) {
+      result.capabilities = {"browser.status"};
+      result.supports_status = true;
+      result.supports_cancellation = true;
+    }
     result.supports_recovery = false;
-    result.supports_cancellation = true;
     return result;
   }
   WorkerSubmission submit(const WorkerRequest &request) override {

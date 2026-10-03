@@ -1597,11 +1597,7 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   } catch (const Error &) {
     return failure("Windows Computer worker is not configured");
   }
-  const auto provides_browser_status =
-      std::find(computer.capabilities.begin(), computer.capabilities.end(), "browser.status") !=
-      computer.capabilities.end();
-  if (!computer.enabled || !computer.supports_status || !computer.supports_cancellation ||
-      !provides_browser_status)
+  if (!computer.enabled)
     return failure("Windows Computer browser status is unavailable");
   if (!policy_)
     return failure("LASO policy is unavailable");
@@ -1615,10 +1611,11 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   if (decision.decision != PolicyDecision::Allow)
     return failure("Windows Computer browser status is not allowed by policy");
 
-  // A disconnected process transport leaves its last health snapshot failed
-  // even after the remote Computer endpoint reconnects. Refresh only after the
-  // parent tool authorization and policy allow, and only when this adapter can
-  // restart its transport. This does not enable replay of an old Computer job.
+  // A process transport can fail before its latest hello populates the
+  // worker's status, cancellation, and capability metadata. Authorize against
+  // the stable configured transport identity first, then re-probe an enabled
+  // failed transport before relying on metadata that only a successful hello
+  // can provide. The checks below remain fail closed after the re-probe.
   if (!computer.healthy && computer.status != "disabled" && computer.status != "unavailable" &&
       computer_adapter->supports_transport_restart()) {
     try {
