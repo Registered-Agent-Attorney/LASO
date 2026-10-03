@@ -1231,7 +1231,6 @@ void WorkerManager::cancel(const std::string &id, WorkerJobState requested_state
       for (auto &reservation : value.request_metadata["codex_browser_status_reservations"])
         if (reservation.is_object()) {
           reservation["state"] = "cancelled";
-          reservation["error"] = bounded_error(reason);
         }
     }
     if (const auto signal = submission_cancellation_signals_.find(id);
@@ -1654,7 +1653,7 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
     }
   }
 
-  const auto update_reservation = [&](const std::string &state, const std::string &error = "") {
+  const auto update_reservation = [&](const std::string &state) {
     try {
       std::lock_guard state_lock(state_mutex_);
       auto current = job(request.worker_job_id);
@@ -1672,8 +1671,6 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
       if (found == reservations.end() || found->value("state", std::string{}) == "cancelled")
         return;
       (*found)["state"] = state;
-      if (!error.empty())
-        (*found)["error"] = bounded_error(error);
       current.request_metadata["codex_browser_status_reservations"] = std::move(reservations);
       persist(current);
     } catch (...) {
@@ -1684,10 +1681,10 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   try {
     child = submit_async(child_request);
   } catch (const Error &error) {
-    update_reservation("submission_failed", error.what());
+    update_reservation("submission_failed");
     return failure(error.what());
   } catch (...) {
-    update_reservation("submission_failed", "Unable to dispatch Windows Computer browser status");
+    update_reservation("submission_failed");
     return failure("Unable to dispatch Windows Computer browser status");
   }
   update_reservation("submitted");
@@ -1719,7 +1716,7 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
       child = refresh(child.id);
     } catch (const Error &) {
       cancel_child(WorkerJobState::Cancelled, "Unable to refresh Computer job");
-      update_reservation("terminal_failure", "Unable to refresh Windows Computer browser status");
+      update_reservation("terminal_failure");
       return failure("Unable to refresh Windows Computer browser status");
     }
     if (worker_job_terminal(child.state)) {
@@ -1779,15 +1776,13 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
         }
         return {request.request_id, true, child.result, {}};
       }
-      update_reservation("terminal_failure", child.error.empty()
-                                                 ? "Windows Computer browser status failed"
-                                                 : child.error);
+      update_reservation("terminal_failure");
       return failure(child.error.empty() ? "Windows Computer browser status failed" : child.error);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
   cancel_child(WorkerJobState::TimedOut, "Windows Computer browser status deadline expired");
-  update_reservation("timed_out", "Windows Computer browser status deadline expired");
+  update_reservation("timed_out");
   return failure("Windows Computer browser status timed out");
 }
 
