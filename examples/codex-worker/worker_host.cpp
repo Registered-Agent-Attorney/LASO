@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fcntl.h>
+#include <fstream>
 #include <iostream>
 #include <laso/workers/process_protocol.hpp>
 #include <laso/workers/worker.hpp>
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/wait.h>
+#include <vector>
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -31,6 +33,44 @@ constexpr std::size_t max_codex_line = 4 * 1024 * 1024;
 constexpr std::size_t max_codex_stderr = 64 * 1024;
 constexpr std::size_t max_text = 256 * 1024;
 constexpr std::size_t max_actions = 128;
+
+std::string validate_direct_luna_catalog(const std::string &path) {
+  if (path.empty())
+    return {};
+  const std::filesystem::path configured(path);
+  if (!configured.is_absolute())
+    throw WorkerTransportError("Codex model catalog path must be absolute");
+  std::error_code ec;
+  const auto canonical = std::filesystem::canonical(configured, ec);
+  if (ec || !std::filesystem::is_regular_file(canonical))
+    throw WorkerTransportError("Codex model catalog file is unavailable");
+  const auto canonical_string = canonical.string();
+  if (canonical_string.find_first_of("\r\n\"\\") != std::string::npos)
+    throw WorkerTransportError("Codex model catalog path contains unsupported characters");
+  std::ifstream file(canonical, std::ios::binary);
+  if (!file)
+    throw WorkerTransportError("Codex model catalog file cannot be read");
+  const auto catalog = Json::parse(file, nullptr, false);
+  if (catalog.is_discarded() || !catalog.is_object() || !catalog.contains("models") ||
+      !catalog.at("models").is_array() || catalog.at("models").size() != 1)
+    throw WorkerTransportError("Codex direct-tool catalog must contain only GPT-6 Luna");
+  const auto &model = catalog.at("models").front();
+  if (!model.is_object())
+    throw WorkerTransportError("Codex direct-tool catalog model entry is invalid");
+  const auto levels = model.value("supported_reasoning_levels", Json::array());
+  const auto experimental_tools = model.value("experimental_supported_tools", Json::array());
+  if (model.value("slug", std::string{}) != "gpt-6-luna" ||
+      model.value("tool_mode", std::string{}) != "direct" ||
+      model.value("shell_type", std::string{}) != "disabled" ||
+      model.value("multi_agent_version", std::string{}) != "disabled" ||
+      model.value("supports_search_tool", true) || !experimental_tools.is_array() ||
+      !experimental_tools.empty() ||
+      model.value("default_reasoning_level", std::string{}) != "high" ||
+      !levels.is_array() || levels.size() != 1 || !levels.front().is_object() ||
+      levels.front().value("effort", std::string{}) != "high")
+    throw WorkerTransportError("Codex direct-tool catalog must enforce GPT-6 Luna High and disable other native tools");
+  return canonical_string;
+}
 
 bool arm_parent_death_signal() noexcept {
 #ifdef __linux__
@@ -131,8 +171,10 @@ struct TurnStartObservation {
 
 class CodexProcess {
 public:
-  CodexProcess(std::string executable, std::uint64_t timeout_ms)
-      : executable_(std::move(executable)), timeout_ms_(timeout_ms) {}
+  CodexProcess(std::string executable, std::uint64_t timeout_ms,
+               std::string model_catalog_json = {})
+      : executable_(std::move(executable)), timeout_ms_(timeout_ms),
+        model_catalog_json_(std::move(model_catalog_json)) {}
   ~CodexProcess() { stop(); }
   CodexProcess(const CodexProcess &) = delete;
   CodexProcess &operator=(const CodexProcess &) = delete;
@@ -172,14 +214,22 @@ public:
         _exit(126);
       close_all();
       const std::string listen = "stdio://";
-      char *const argv[] = {const_cast<char *>(executable_.c_str()),
-                            const_cast<char *>("app-server"),
-                            const_cast<char *>("--listen"),
-                            const_cast<char *>(listen.c_str()), nullptr};
+      std::vector<std::string> arguments{executable_, "app-server"};
+      if (!model_catalog_json_.empty()) {
+        arguments.push_back("-c");
+        arguments.push_back("model_catalog_json=\"" + model_catalog_json_ + "\"");
+      }
+      arguments.push_back("--listen");
+      arguments.push_back(listen);
+      std::vector<char *> argv;
+      argv.reserve(arguments.size() + 1);
+      for (auto &argument : arguments)
+        argv.push_back(argument.data());
+      argv.push_back(nullptr);
       if (executable_.find('/') != std::string::npos)
-        ::execv(executable_.c_str(), argv);
+        ::execv(executable_.c_str(), argv.data());
       else
-        ::execvp(executable_.c_str(), argv);
+        ::execvp(executable_.c_str(), argv.data());
       _exit(127);
     }
     close_fd(child_in[0]);
@@ -282,6 +332,7 @@ private:
   pid_t pid_ = -1;
   int input_fd_ = -1, output_fd_ = -1, error_fd_ = -1;
   std::string output_, stderr_;
+  std::string model_catalog_json_;
 
   void write_all(const std::string &wire, Clock::time_point deadline) {
     std::size_t offset = 0;
@@ -319,9 +370,11 @@ private:
 class CodexAdapter {
 public:
   CodexAdapter(std::string worker_id, std::string executable,
-               std::vector<std::filesystem::path> roots, std::uint64_t timeout_ms)
+               std::vector<std::filesystem::path> roots, std::uint64_t timeout_ms,
+               std::string model_catalog_json)
       : executable_(std::move(executable)), timeout_ms_(timeout_ms),
-        process_(executable_, timeout_ms_), worker_id_(std::move(worker_id)) {
+        model_catalog_json_(validate_direct_luna_catalog(model_catalog_json)),
+        process_(executable_, timeout_ms_, model_catalog_json_), worker_id_(std::move(worker_id)) {
     if (!valid_worker_id(worker_id_))
       throw WorkerTransportError("Codex worker id is invalid");
     for (const auto &root : roots) {
@@ -375,6 +428,8 @@ public:
     const auto required_tool = metadata.value("required_tool", std::string{});
     if (!required_tool.empty() && required_tool != "laso.browser_status")
       throw CodexFailure("LASO worker request requires an unsupported dynamic tool");
+    if (required_tool == "laso.browser_status" && model_catalog_json_.empty())
+      throw CodexFailure("LASO browser.status requires the pinned GPT-6 Luna High direct-tool catalog");
     const auto directory = canonical_project(metadata.value("project_dir", std::string{}));
     const bool durable_session = payload.value("durable_session", false);
     durable_session_id_ = durable_session ? payload.value("durable_session_id", std::string{})
@@ -577,6 +632,7 @@ private:
   std::string executable_;
   std::uint64_t timeout_ms_;
   std::vector<std::filesystem::path> roots_;
+  std::string model_catalog_json_;
   CodexProcess process_;
   bool healthy_ = false;
   std::uint64_t rpc_id_ = 0, interaction_id_ = 0;
@@ -802,8 +858,28 @@ private:
   void start_thread(const std::filesystem::path &directory, const Json &metadata) {
     Json params{{"cwd", directory.string()}, {"approvalPolicy", "on-request"},
                 {"sandbox", "workspace-write"}, {"ephemeral", false}};
-    if (metadata.value("required_tool", std::string{}) == "laso.browser_status")
+    if (metadata.value("required_tool", std::string{}) == "laso.browser_status") {
+      params["config"] = Json{{"features.code_mode", false},
+                              {"features.code_mode_only", false},
+                              {"features.multi_agent", false},
+                              {"features.multi_agent_v2", false},
+                              {"features.standalone_web_search", false},
+                              {"features.apps", false},
+                              {"features.plugins", false},
+                              {"features.shell_tool", false},
+                              {"features.unified_exec", false},
+                              {"agents.enabled", false},
+                              {"web_search", "disabled"},
+                              {"tools.experimental_request_user_input.enabled", false}};
+      params["developerInstructions"] =
+          "LASO required-tool restriction: this task has exactly one task-specific tool, "
+          "laso.browser_status({}). Invoke it exactly once before answering, then use its "
+          "returned result verbatim. Do not use built-in exec or shell, Code Mode, file tools, "
+          "native Codex collaboration/subagent tools, other tools, or browser actions. "
+          "If the LASO tool is unavailable or fails, stop and "
+          "report that failure; never substitute or claim a result.";
       params["dynamicTools"] = Json::array({browser_status_tool_spec()});
+    }
     if (metadata.contains("model") && metadata.at("model").is_string())
       params["model"] = metadata.at("model");
     const auto response = call("thread/start", params, {});
@@ -911,9 +987,11 @@ int main(int argc, char **argv) {
       return 125;
     const auto worker_id = option(argc, argv, "--worker-id", "codex");
     const auto codex = option(argc, argv, "--codex", "codex");
+    const auto model_catalog_json = option(argc, argv, "--codex-model-catalog");
     auto roots = options(argc, argv, "--allowed-root");
     const auto timeout = std::stoull(option(argc, argv, "--timeout-ms", "60000"));
-    CodexAdapter adapter(worker_id, codex, {roots.begin(), roots.end()}, timeout);
+    CodexAdapter adapter(worker_id, codex, {roots.begin(), roots.end()}, timeout,
+                         model_catalog_json);
     std::string line;
     while (std::getline(std::cin, line)) {
       if (line.size() > process_protocol::max_frame_bytes)

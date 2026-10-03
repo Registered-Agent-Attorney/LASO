@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -146,11 +147,23 @@ struct ProcessTransportStopGuard {
 
 ProcessWorkerConfig codex_config(const std::filesystem::path &root,
                                  const std::string &fixture_mode = "success",
-                                 const std::string &worker_id = "codex") {
+                                 const std::string &worker_id = "codex",
+                                 bool direct_browser_status_mode = true) {
   ProcessWorkerConfig result;
   result.executable = LASO_CODEX_WORKER;
   result.args = {"--worker-id",    worker_id,     "--codex",      LASO_CODEX_FIXTURE,
                  "--allowed-root", root.string(), "--timeout-ms", "2000"};
+  if (direct_browser_status_mode) {
+    const auto catalog_path = root / "gpt-6-luna-high-direct.json";
+    std::ofstream catalog(catalog_path, std::ios::binary | std::ios::trunc);
+    if (!catalog)
+      throw std::runtime_error("unable to create fixture model catalog");
+    catalog
+        << R"({"models":[{"slug":"gpt-6-luna","tool_mode":"direct","shell_type":"disabled","multi_agent_version":"disabled","supports_search_tool":false,"experimental_supported_tools":[],"default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"}]}]})";
+    catalog.close();
+    result.args.insert(result.args.end(), {"--codex-model-catalog", catalog_path.string()});
+    result.environment["LASO_CODEX_FIXTURE_REQUIRE_DIRECT_CATALOG"] = "1";
+  }
   if (fixture_mode != "success")
     result.environment["LASO_CODEX_FIXTURE_MODE"] = fixture_mode;
   result.startup_timeout_ms = 2000;
@@ -388,6 +401,26 @@ TEST(CodexWorker, BrowserStatusDynamicToolReturnsToTheSameCodexTurn) {
   EXPECT_NE(result.result.value("summary", std::string{}).find("BROWSER_STATUS_RESULT:"),
             std::string::npos);
   EXPECT_NE(result.result.value("summary", std::string{}).find("window_count"), std::string::npos);
+  transport.stop();
+}
+
+TEST(CodexWorker, RequiredBrowserStatusFailsClosedWithoutDirectToolCatalog) {
+  TemporaryDirectory root;
+  ProcessWorkerTransport transport("agent-one",
+                                   codex_config(root.path, "success", "agent-one", false));
+  std::atomic<unsigned> calls{0};
+  transport.set_tool_call_handler([&](const WorkerToolCallRequest &) {
+    ++calls;
+    return WorkerToolCallResponse{"unexpected", true, Json::object(), {}};
+  });
+  ASSERT_NO_THROW(transport.start());
+  auto tool_request = request(root.path, "codex-browser-status-without-direct-catalog",
+                              "request-browser-status", {}, "agent-one");
+  tool_request.metadata["required_tool"] = "laso.browser_status";
+  const auto result = transport.submit(tool_request);
+  EXPECT_EQ(result.state, WorkerJobState::Failed);
+  EXPECT_NE(result.error.find("pinned GPT-6 Luna High direct-tool catalog"), std::string::npos);
+  EXPECT_EQ(calls.load(), 0U);
   transport.stop();
 }
 
