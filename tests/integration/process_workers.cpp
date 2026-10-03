@@ -9,12 +9,27 @@
 #include <laso/workers/process_transport.hpp>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 using namespace laso;
 using namespace laso::test;
+
+namespace laso {
+struct WorkerManagerTestAccess {
+  static void fail_next_async_thread_launch(WorkerManager &manager) {
+    auto fail_once = std::make_shared<std::atomic<bool>>(true);
+    manager.async_thread_launcher_ = [fail_once](std::vector<std::jthread> &threads,
+                                                 std::function<void(std::stop_token)> submission) {
+      if (fail_once->exchange(false))
+        throw std::runtime_error("injected async thread creation failure");
+      threads.emplace_back(std::move(submission));
+    };
+  }
+};
+} // namespace laso
 
 namespace {
 std::string worker_owner_token() {
@@ -365,6 +380,36 @@ TEST(ProcessWorker, AsyncNonRecoverableAdapterPollsActiveJobWithoutResubmission)
   EXPECT_EQ(completed.external_job_id, "accepted-once");
   EXPECT_TRUE(completed.result.at("ok"));
   EXPECT_EQ(adapter->submit_count.load(), 1U);
+}
+
+TEST(ProcessWorker, AsyncWorkersJoinBeforeManagerStateIsDestroyed) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  std::promise<void> release;
+  auto adapter = std::make_shared<NonRecoverableAsyncWorker>(started, release.get_future().share());
+  registry.add("non-recoverable", adapter);
+
+  auto manager = std::make_unique<WorkerManager>(storage, registry);
+  auto worker_request = request("non-recoverable");
+  worker_request.idempotency_key = "async-manager-teardown-joins-worker";
+  const auto submitted = manager->submit_async(worker_request);
+  ASSERT_EQ(submitted.state, WorkerJobState::Submitting);
+  ASSERT_EQ(started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+  // Let destruction begin before unblocking the submission closure. The
+  // manager must join it while its mutexes and cancellation state are alive.
+  std::thread release_during_destruction([&release] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    release.set_value();
+  });
+  manager.reset();
+  release_during_destruction.join();
+
+  const auto durable = storage.get(RecordKind::WorkerJob, submitted.id).get<WorkerJob>();
+  EXPECT_EQ(durable.state, WorkerJobState::Queued);
+  EXPECT_EQ(durable.external_job_id, "accepted-once");
 }
 
 TEST(ProcessWorker, ReconcilesStaleStatusCapableJobsBeforeEnforcingCapacity) {
@@ -753,6 +798,41 @@ TEST(ProcessWorker, MetadataTracksRemoteProcessConfiguration) {
   const auto metadata = transport.metadata();
   EXPECT_TRUE(metadata.remote);
   EXPECT_FALSE(metadata.local);
+}
+
+TEST(ProcessWorker, AsyncThreadLaunchFailureFinalizesChildAndReleasesCapacity) {
+  InMemoryWorkerStorage storage;
+  WorkerRegistry registry;
+  auto transport = std::make_shared<ProcessWorkerTransport>("process", worker_config("success"));
+  transport->start();
+  registry.add("process", transport);
+  WorkerManager manager(storage, registry, 1, 1);
+  WorkerManagerTestAccess::fail_next_async_thread_launch(manager);
+
+  auto failed_request = request();
+  failed_request.idempotency_key = "async-thread-launch-failure";
+  EXPECT_THROW(manager.submit_async(failed_request), std::runtime_error);
+  const auto failed_id = manager.job_id_for(failed_request.idempotency_key);
+  const auto failed = manager.job(failed_id);
+  EXPECT_EQ(failed.state, WorkerJobState::Failed);
+  EXPECT_EQ(failed.failure_kind, WorkerFailureKind::Job);
+  EXPECT_EQ(failed.error, "Worker submission could not be scheduled");
+  EXPECT_TRUE(failed.external_job_id.empty());
+
+  auto succeeding_request = request();
+  succeeding_request.idempotency_key = "async-thread-launch-after-recovery";
+  const auto submitting = manager.submit_async(succeeding_request);
+  ASSERT_EQ(submitting.state, WorkerJobState::Submitting);
+  const auto succeeding_id = manager.job_id_for(succeeding_request.idempotency_key);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  WorkerJob completed;
+  do {
+    completed = manager.job(succeeding_id);
+    if (worker_job_terminal(completed.state))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  } while (std::chrono::steady_clock::now() < deadline);
+  EXPECT_EQ(completed.state, WorkerJobState::Completed);
 }
 
 TEST(ProcessWorker, ShutdownDoesNotLeaveReferenceChildRunning) {
