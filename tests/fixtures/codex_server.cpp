@@ -81,6 +81,16 @@ std::string slugify(std::string_view input) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (const auto *required = std::getenv("LASO_CODEX_FIXTURE_REQUIRE_DIRECT_CATALOG");
+      required && std::string(required) == "1") {
+    bool catalog_argument = false;
+    for (int index = 1; index + 1 < argc; ++index)
+      catalog_argument =
+          catalog_argument || (std::string(argv[index]) == "-c" &&
+                               std::string(argv[index + 1]).starts_with("model_catalog_json=\""));
+    if (!catalog_argument)
+      return 80;
+  }
   const std::string mode =
       argc > 1 && std::string(argv[1]) != "app-server"
           ? argv[1]
@@ -113,6 +123,8 @@ int main(int argc, char **argv) {
       const auto params = request.value("params", Json::object());
       const auto cwd = params.value("cwd", std::string{});
       const auto tools = params.value("dynamicTools", Json::array());
+      const auto thread_config = params.value("config", Json::object());
+      const auto developer_instructions = params.value("developerInstructions", std::string{});
       dynamic_tools_advertised = false;
       const auto tool_functions =
           tools.size() == 1 ? tools.front().value("tools", Json::array()) : Json::array();
@@ -127,6 +139,27 @@ int main(int argc, char **argv) {
           function.value("name", std::string{}) == "browser_status" &&
           function.value("description", std::string{}).find("Do not claim it is unavailable") !=
               std::string::npos &&
+          thread_config.value("features.code_mode", true) == false &&
+          thread_config.value("features.code_mode_only", true) == false &&
+          thread_config.value("features.multi_agent", true) == false &&
+          thread_config.value("features.multi_agent_v2", true) == false &&
+          thread_config.value("features.sleep_tool", true) == false &&
+          thread_config.value("features.standalone_web_search", true) == false &&
+          thread_config.value("features.apps", true) == false &&
+          thread_config.value("features.plugins", true) == false &&
+          thread_config.value("features.view_image", true) == false &&
+          thread_config.value("features.shell_tool", true) == false &&
+          thread_config.value("features.unified_exec", true) == false &&
+          thread_config.value("agents.enabled", true) == false &&
+          thread_config.value("web_search", std::string{}) == "disabled" &&
+          thread_config.value("tools.update_plan.enabled", true) == false &&
+          thread_config.value("tools.experimental_request_user_input.enabled", true) == false &&
+          developer_instructions.find("exactly one task-specific tool") != std::string::npos &&
+          developer_instructions.find("Do not use built-in exec or shell, Code Mode") !=
+              std::string::npos &&
+          developer_instructions.find("native Codex collaboration/subagent tools") !=
+              std::string::npos &&
+          developer_instructions.find("never substitute or claim a result") != std::string::npos &&
           function.value("deferLoading", true) == false &&
           input_schema.value("type", std::string{}) == "object" &&
           input_schema.value("properties", Json::object()).empty() &&

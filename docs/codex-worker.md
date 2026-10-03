@@ -141,6 +141,31 @@ It never uses model-supplied worker IDs, commands, prompts, or capability names.
 Core fails closed unless the Computer worker is healthy and the deployment
 policy allows that exact worker.
 
+GPT-6 Luna's bundled Codex catalog selects Code Mode, which does not expose the
+Core dynamic tool as a direct provider function. The Computer-capable worker
+must therefore use the release-pinned
+[`gpt-6-luna-high-direct-v0.156.1.json`](../deploy/codex/gpt-6-luna-high-direct-v0.156.1.json)
+catalog at app-server startup. It contains only GPT-6 Luna, sets direct tool
+mode, disables shell, search, native Codex agent collaboration, direct patching,
+Node REPL metadata, image viewing, planning, and experimental tools, and exposes
+only High reasoning.
+Pass its absolute
+path to `laso-codex-worker` with `--codex-model-catalog` for the worker assigned
+to `required_tool: laso.browser_status`. The worker validates the catalog
+before launching Codex and fails closed if the catalog is absent or differs
+from that policy. Its `thread/start` disables Code Mode, shell, search, plugin,
+app, experimental-request, and native-agent features and supplies only the
+authorized `laso.browser_status({})` dynamic tool.
+
+The catalog is pinned to Codex CLI 0.156.1 because `model_catalog_json` is a
+process-start override and the catalog schema is version-specific. Update the
+file from the matching Codex release catalog when the worker CLI version
+changes; keep the same single-model, High-only, direct-tool constraints.
+
+The paired worker environment must set LASO_CODEX_ALLOW_DIRECT_CATALOG=1 for
+this Computer-capable worker only. The lock wrapper rejects the catalog
+override without that opt-in.
+
 The Computer request is a durable child `WorkerJob` in the parent run. Its
 metadata records the parent worker-job ID, Codex session and turn IDs, and
 dynamic-tool call ID. After terminal status, Core fetches the Computer result
