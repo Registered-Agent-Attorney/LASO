@@ -63,7 +63,9 @@ std::string validate_direct_luna_catalog(const std::string &path) {
       model.value("tool_mode", std::string{}) != "direct" ||
       model.value("shell_type", std::string{}) != "disabled" ||
       model.value("multi_agent_version", std::string{}) != "disabled" ||
-      (model.contains("apply_patch_tool_type") && !model.at("apply_patch_tool_type").is_null()) ||
+      !model.contains("apply_patch_tool_type") || !model.at("apply_patch_tool_type").is_null() ||
+      !model.contains("node_repl_disabled") || !model.at("node_repl_disabled").is_boolean() ||
+      !model.at("node_repl_disabled").get<bool>() ||
       model.value("supports_search_tool", true) || !experimental_tools.is_array() ||
       !experimental_tools.empty() ||
       model.value("default_reasoning_level", std::string{}) != "high" ||

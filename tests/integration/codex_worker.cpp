@@ -159,7 +159,7 @@ ProcessWorkerConfig codex_config(const std::filesystem::path &root,
     if (!catalog)
       throw std::runtime_error("unable to create fixture model catalog");
     catalog
-        << R"({"models":[{"slug":"gpt-6-luna","tool_mode":"direct","shell_type":"disabled","apply_patch_tool_type":null,"multi_agent_version":"disabled","supports_search_tool":false,"experimental_supported_tools":[],"default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"}]}]})";
+        << R"({"models":[{"slug":"gpt-6-luna","tool_mode":"direct","shell_type":"disabled","apply_patch_tool_type":null,"node_repl_disabled":true,"multi_agent_version":"disabled","supports_search_tool":false,"experimental_supported_tools":[],"default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"}]}]})";
     catalog.close();
     result.args.insert(result.args.end(), {"--codex-model-catalog", catalog_path.string()});
     result.environment["LASO_CODEX_FIXTURE_REQUIRE_DIRECT_CATALOG"] = "1";
@@ -422,6 +422,40 @@ TEST(CodexWorker, RequiredBrowserStatusFailsClosedWithoutDirectToolCatalog) {
   EXPECT_NE(result.error.find("pinned GPT-6 Luna High direct-tool catalog"), std::string::npos);
   EXPECT_EQ(calls.load(), 0U);
   transport.stop();
+}
+
+TEST(CodexWorker, DirectCatalogRequiresNativeToolDisablesToBeExplicit) {
+  for (const auto &test_case :
+       std::array<std::string, 5>{"node_repl_missing", "node_repl_false", "node_repl_wrong_type",
+                                  "patch_tool_missing", "patch_tool_enabled"}) {
+    TemporaryDirectory root;
+    auto worker_config = codex_config(root.path, "success", "agent-one");
+    const auto catalog_path = root.path / "gpt-6-luna-high-direct.json";
+    Json catalog;
+    {
+      std::ifstream input(catalog_path, std::ios::binary);
+      ASSERT_TRUE(input) << test_case;
+      input >> catalog;
+    }
+    auto &model = catalog.at("models").at(0);
+    if (test_case == "node_repl_missing")
+      model.erase("node_repl_disabled");
+    else if (test_case == "node_repl_false")
+      model["node_repl_disabled"] = false;
+    else if (test_case == "node_repl_wrong_type")
+      model["node_repl_disabled"] = "true";
+    else if (test_case == "patch_tool_missing")
+      model.erase("apply_patch_tool_type");
+    else
+      model["apply_patch_tool_type"] = "freeform";
+    {
+      std::ofstream output(catalog_path, std::ios::binary | std::ios::trunc);
+      ASSERT_TRUE(output) << test_case;
+      output << catalog.dump();
+    }
+    ProcessWorkerTransport transport("agent-one", worker_config);
+    EXPECT_THROW(transport.start(), WorkerTransportError) << test_case;
+  }
 }
 
 TEST(CodexWorker, WorkerNodePropagatesFutureDeadlineAndDispatchesBrowserStatus) {
@@ -996,8 +1030,13 @@ TEST(CodexWorker, StartsNewSessionForDifferentWorkspaceRoot) {
 TEST(CodexWorker, QuietProviderIntervalUsesOverallDeadline) {
   TemporaryDirectory root;
   auto worker_config = codex_config(root.path, "quiet-over-one-minute");
-  worker_config.args = {"--codex", LASO_CODEX_FIXTURE, "--allowed-root", root.path.string(),
-                        "--timeout-ms", "65000", "--codex-model-catalog",
+  worker_config.args = {"--codex",
+                        LASO_CODEX_FIXTURE,
+                        "--allowed-root",
+                        root.path.string(),
+                        "--timeout-ms",
+                        "65000",
+                        "--codex-model-catalog",
                         (root.path / "gpt-6-luna-high-direct.json").string()};
   worker_config.startup_timeout_ms = 2000;
   worker_config.request_timeout_ms = 65000;
