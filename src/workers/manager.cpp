@@ -1619,12 +1619,46 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
   if (!computer.healthy && computer.status != "disabled" && computer.status != "unavailable" &&
       computer_adapter->supports_transport_restart()) {
     try {
-      computer_adapter->start();
+      log_diagnostic("worker.browser_status_transport_restart_attempted",
+                     {{"worker_id", computer_id}});
     } catch (...) {
+    }
+    try {
+      computer_adapter->start();
+    } catch (const WorkerTransportError &error) {
+      try {
+        log_diagnostic("worker.browser_status_transport_restart_failed",
+                       {{"worker_id", computer_id},
+                        {"failure_category", error.timed_out ? "timeout" : "transport_error"}});
+      } catch (...) {
+      }
+    } catch (const Error &) {
+      try {
+        log_diagnostic("worker.browser_status_transport_restart_failed",
+                       {{"worker_id", computer_id}, {"failure_category", "worker_error"}});
+      } catch (...) {
+      }
+    } catch (const std::exception &) {
+      try {
+        log_diagnostic("worker.browser_status_transport_restart_failed",
+                       {{"worker_id", computer_id}, {"failure_category", "unexpected_exception"}});
+      } catch (...) {
+      }
+    } catch (...) {
+      try {
+        log_diagnostic("worker.browser_status_transport_restart_failed",
+                       {{"worker_id", computer_id}, {"failure_category", "unknown_exception"}});
+      } catch (...) {
+      }
     }
     try {
       computer = computer_adapter->metadata();
     } catch (...) {
+      try {
+        log_diagnostic("worker.browser_status_transport_restart_failed",
+                       {{"worker_id", computer_id}, {"failure_category", "metadata_read_error"}});
+      } catch (...) {
+      }
       return failure("Windows Computer browser status is unavailable");
     }
     if (computer.enabled) {
@@ -1638,8 +1672,16 @@ WorkerToolCallResponse WorkerManager::handle_tool_call(const WorkerToolCallReque
       computer.capabilities.end();
   if (!computer.enabled || !computer.healthy || computer.status != "healthy" ||
       !computer.supports_status || !computer.supports_cancellation ||
-      !refreshed_provides_browser_status)
+      !refreshed_provides_browser_status) {
+    if (!computer.healthy || computer.status != "healthy") {
+      try {
+        log_diagnostic("worker.browser_status_transport_restart_failed",
+                       {{"worker_id", computer_id}, {"failure_category", "still_unhealthy"}});
+      } catch (...) {
+      }
+    }
     return failure("Windows Computer browser status is unavailable");
+  }
 
   auto deadline = request.deadline;
   if (deadline.empty())

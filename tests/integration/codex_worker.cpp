@@ -276,6 +276,41 @@ TEST(CodexWorker, StructuredSessionFollowupAndUsage) {
   transport.stop();
 }
 
+TEST(CodexWorker, OperatorShowsOnlyAllowlistedAppServerFailureEnums) {
+  TemporaryDirectory root;
+  asio::io_context io;
+  Service service(io, codex_session_config(root.path, "thread-start-rpc-error"));
+  const auto pipeline = service.register_pipeline(standalone_worker_pipeline());
+  const auto run_id = service.start(pipeline.at("id").get<std::string>(), Json::object(), "local",
+                                    false, Json::object(), Json::object());
+  io.run();
+
+  const auto run = service.get(RecordKind::Run, run_id).get<laso::Run>();
+  ASSERT_EQ(run.state, RunState::Failed);
+  const auto jobs = service.worker_jobs(run_id);
+  ASSERT_EQ(jobs.size(), 1U);
+  const auto job_id = jobs.front().at("id").get<std::string>();
+
+  LocalDevelopmentIdentity identity;
+  Api api(service, identity);
+  const auto operator_jobs = api.handle("GET", "/api/v1/operator/worker-jobs?limit=100", "");
+  ASSERT_EQ(operator_jobs.status, 200U);
+  const auto operator_job =
+      std::find_if(operator_jobs.body.begin(), operator_jobs.body.end(),
+                   [&](const Json &job) { return job.value("id", std::string{}) == job_id; });
+  ASSERT_NE(operator_job, operator_jobs.body.end());
+  EXPECT_EQ(operator_job->value("provider_failure_stage", std::string{}), "thread_start");
+  EXPECT_EQ(operator_job->value("provider_failure_category", std::string{}), "rpc_internal_error");
+  EXPECT_FALSE(operator_job->contains("provider_failure_message"));
+  EXPECT_FALSE(operator_job->contains("provider_failure_data"));
+  EXPECT_EQ(operator_jobs.body.dump().find("fixture startup detail"), std::string::npos);
+
+  const auto public_job = api.handle("GET", "/api/v1/worker-jobs/" + job_id, "");
+  ASSERT_EQ(public_job.status, 200U);
+  EXPECT_FALSE(public_job.body.contains("provider_failure_stage"));
+  EXPECT_FALSE(public_job.body.contains("provider_failure_category"));
+}
+
 TEST(CodexWorker, PublicViewsRedactSessionIdsAndOperatorViewExposesTurnEvidence) {
   TemporaryDirectory root;
   asio::io_context io;

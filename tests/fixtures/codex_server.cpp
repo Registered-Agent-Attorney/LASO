@@ -120,6 +120,12 @@ int main(int argc, char **argv) {
     if (mode == "crash")
       return 73;
     if (method == "thread/start") {
+      if (mode == "thread-start-rpc-error") {
+        send({{"jsonrpc", "2.0"},
+              {"id", id},
+              {"error", Json{{"code", -32603}, {"message", "fixture startup detail"}}}});
+        continue;
+      }
       const auto params = request.value("params", Json::object());
       const auto cwd = params.value("cwd", std::string{});
       const auto tools = params.value("dynamicTools", Json::array());
