@@ -1126,7 +1126,7 @@ Json operator_worker_job_summary(const Json &value) {
   // redact these identifiers and paths.
   if (job.worker_id.starts_with("codex")) {
     const auto add_safe_enum = [&summary, &job](const char *source, const char *target,
-                                               std::initializer_list<std::string_view> allowed) {
+                                                std::initializer_list<std::string_view> allowed) {
       const auto &metadata = job.result_metadata;
       if (!metadata.is_object() || !metadata.contains(source) || !metadata.at(source).is_string())
         return;
@@ -1176,8 +1176,8 @@ Json operator_worker_job_summary(const Json &value) {
     add_safe_timestamp("codex_turn_started_at", "codex_turn_started_at");
     add_safe_timestamp("codex_turn_completed_at", "codex_turn_completed_at");
     add_safe_enum("codex_failure_stage", "provider_failure_stage",
-                  {"initialize", "thread_start", "thread_resume", "turn_start",
-                   "turn_interrupt", "app_server_request"});
+                  {"initialize", "thread_start", "thread_resume", "turn_start", "turn_interrupt",
+                   "app_server_request"});
     add_safe_enum("codex_failure_category", "provider_failure_category",
                   {"rpc_parse_error", "rpc_invalid_request", "rpc_method_not_found",
                    "rpc_invalid_params", "rpc_internal_error", "rpc_error",

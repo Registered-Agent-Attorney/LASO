@@ -281,9 +281,8 @@ TEST(CodexWorker, OperatorShowsOnlyAllowlistedAppServerFailureEnums) {
   asio::io_context io;
   Service service(io, codex_session_config(root.path, "thread-start-rpc-error"));
   const auto pipeline = service.register_pipeline(standalone_worker_pipeline());
-  const auto run_id =
-      service.start(pipeline.at("id").get<std::string>(), Json::object(), "local", false,
-                    Json::object(), Json::object());
+  const auto run_id = service.start(pipeline.at("id").get<std::string>(), Json::object(), "local",
+                                    false, Json::object(), Json::object());
   io.run();
 
   const auto run = service.get(RecordKind::Run, run_id).get<laso::Run>();
@@ -301,8 +300,7 @@ TEST(CodexWorker, OperatorShowsOnlyAllowlistedAppServerFailureEnums) {
                    [&](const Json &job) { return job.value("id", std::string{}) == job_id; });
   ASSERT_NE(operator_job, operator_jobs.body.end());
   EXPECT_EQ(operator_job->value("provider_failure_stage", std::string{}), "thread_start");
-  EXPECT_EQ(operator_job->value("provider_failure_category", std::string{}),
-            "rpc_internal_error");
+  EXPECT_EQ(operator_job->value("provider_failure_category", std::string{}), "rpc_internal_error");
   EXPECT_FALSE(operator_job->contains("provider_failure_message"));
   EXPECT_FALSE(operator_job->contains("provider_failure_data"));
   EXPECT_EQ(operator_jobs.body.dump().find("fixture startup detail"), std::string::npos);

@@ -27,9 +27,9 @@ constexpr std::size_t max_error_bytes = 512;
 void log_start_failure(const std::string &worker_id, const char *stage,
                        const char *failure_category) noexcept {
   try {
-    log_diagnostic("worker.process_transport_start_failed",
-                   {{"worker_id", worker_id}, {"stage", stage},
-                    {"failure_category", failure_category}});
+    log_diagnostic(
+        "worker.process_transport_start_failed",
+        {{"worker_id", worker_id}, {"stage", stage}, {"failure_category", failure_category}});
   } catch (...) {
   }
 }
@@ -287,7 +287,7 @@ struct ProcessWorkerTransport::Impl {
     } catch (...) {
       log_start_failure(id, stage,
                         std::string_view(stage) == "spawn" ? "spawn_exception"
-                                                            : "unexpected_exception");
+                                                           : "unexpected_exception");
       terminate_locked();
       metadata_.healthy = false;
       metadata_.status = "failed";
