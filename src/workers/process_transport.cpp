@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
+#include <string_view>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -22,6 +23,16 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t max_id_bytes = 512;
 constexpr std::size_t max_error_bytes = 512;
+
+void log_start_failure(const std::string &worker_id, const char *stage,
+                       const char *failure_category) noexcept {
+  try {
+    log_diagnostic("worker.process_transport_start_failed",
+                   {{"worker_id", worker_id}, {"stage", stage},
+                    {"failure_category", failure_category}});
+  } catch (...) {
+  }
+}
 
 void close_fd(int &fd) {
   if (fd >= 0)
@@ -228,12 +239,15 @@ struct ProcessWorkerTransport::Impl {
     metadata_.status = "starting";
     metadata_.healthy = false;
     publish_metadata_locked();
+    const char *stage = "spawn";
     try {
       spawn_locked();
+      stage = "hello";
       const auto response = request_locked(lock, "hello", "", "", Json{{"client", "laso"}},
                                            config.startup_timeout_ms);
       if (!response.value("ok", false))
         throw WorkerTransportError("Worker hello was rejected");
+      stage = "metadata";
       if (!response.contains("metadata") || !response.at("metadata").is_object() ||
           response.at("metadata").dump().size() > process_protocol::max_metadata_bytes)
         throw WorkerTransportError("Worker hello metadata is invalid");
@@ -253,7 +267,27 @@ struct ProcessWorkerTransport::Impl {
       metadata_.healthy = true;
       metadata_.status = "healthy";
       publish_metadata_locked();
+    } catch (const WorkerTransportError &error) {
+      const char *failure_category = "hello_transport_error";
+      if (std::string_view(stage) == "spawn")
+        failure_category = "spawn_failed";
+      else if (error.timed_out)
+        failure_category = "timeout";
+      else if (std::string_view(stage) == "hello" &&
+               std::string_view(error.what()) == "Worker hello was rejected")
+        failure_category = "hello_rejected";
+      else if (std::string_view(stage) == "metadata")
+        failure_category = "hello_metadata_invalid";
+      log_start_failure(id, stage, failure_category);
+      terminate_locked();
+      metadata_.healthy = false;
+      metadata_.status = "failed";
+      publish_metadata_locked();
+      throw;
     } catch (...) {
+      log_start_failure(id, stage,
+                        std::string_view(stage) == "spawn" ? "spawn_exception"
+                                                            : "unexpected_exception");
       terminate_locked();
       metadata_.healthy = false;
       metadata_.status = "failed";

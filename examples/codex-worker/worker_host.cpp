@@ -17,6 +17,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/wait.h>
 #include <vector>
 #ifdef __linux__
@@ -162,9 +163,58 @@ bool within(const std::filesystem::path &path, const std::filesystem::path &root
   return !ec && relative != ".." && text.rfind("../", 0) != 0;
 }
 
+std::string_view codex_rpc_failure_stage(std::string_view method) noexcept {
+  if (method == "initialize")
+    return "initialize";
+  if (method == "thread/start")
+    return "thread_start";
+  if (method == "thread/resume")
+    return "thread_resume";
+  if (method == "turn/start")
+    return "turn_start";
+  if (method == "turn/interrupt")
+    return "turn_interrupt";
+  return "app_server_request";
+}
+
+std::string_view codex_rpc_failure_category(const Json &error) noexcept {
+  if (!error.is_object() || !error.contains("code") || !error.at("code").is_number_integer())
+    return "rpc_error";
+  try {
+    switch (error.at("code").get<std::int64_t>()) {
+    case -32700:
+      return "rpc_parse_error";
+    case -32600:
+      return "rpc_invalid_request";
+    case -32601:
+      return "rpc_method_not_found";
+    case -32602:
+      return "rpc_invalid_params";
+    case -32603:
+      return "rpc_internal_error";
+    default:
+      return "rpc_error";
+    }
+  } catch (...) {
+    return "rpc_error";
+  }
+}
+
 class CodexFailure final : public std::runtime_error {
 public:
-  explicit CodexFailure(const std::string &message) : std::runtime_error(message) {}
+  explicit CodexFailure(const std::string &message, std::string_view stage = {},
+                        std::string_view category = {})
+      : std::runtime_error(message), stage_(stage), category_(category) {}
+
+  Json safe_metadata() const {
+    if (stage_.empty() || category_.empty())
+      return Json::object();
+    return Json{{"codex_failure_stage", stage_}, {"codex_failure_category", category_}};
+  }
+
+private:
+  std::string stage_;
+  std::string category_;
 };
 
 struct TurnStartObservation {
@@ -690,8 +740,11 @@ private:
       if (handle_server_request(message, job_id))
         continue;
       if (message.contains("id") && message.at("id") == id) {
-        if (message.contains("error"))
-          throw CodexFailure(message.at("error").value("message", "Codex request failed"));
+        if (message.contains("error")) {
+          const auto &rpc_error = message.at("error");
+          throw CodexFailure("Codex app-server request failed", codex_rpc_failure_stage(method),
+                             codex_rpc_failure_category(rpc_error));
+        }
         return message.value("result", Json::object());
       }
       if (message.value("method", std::string{}) == "thread/tokenUsage/updated") {
@@ -899,7 +952,8 @@ private:
     reasoning_effort_ =
         response.value("reasoningEffort", thread.value("reasoningEffort", std::string{}));
     if (provider_ != "openai" || model_ != "gpt-6-luna" || reasoning_effort_ != "high")
-      throw CodexFailure("LASO requires openai/gpt-6-luna with high reasoning");
+      throw CodexFailure("LASO requires openai/gpt-6-luna with high reasoning", "thread_start",
+                         "model_policy_mismatch");
   }
 
   static Json browser_status_tool_spec() {
@@ -945,7 +999,8 @@ private:
     reasoning_effort_ =
         response.value("reasoningEffort", thread.value("reasoningEffort", std::string{}));
     if (provider_ != "openai" || model_ != "gpt-6-luna" || reasoning_effort_ != "high")
-      throw CodexFailure("LASO requires openai/gpt-6-luna with high reasoning");
+      throw CodexFailure("LASO requires openai/gpt-6-luna with high reasoning", "thread_resume",
+                         "model_policy_mismatch");
   }
 
   void record_usage(const Json &params) {
@@ -1034,8 +1089,10 @@ int main(int argc, char **argv) {
         }
       } catch (const CodexFailure &error) {
         const auto job_id = request.value("job_id", std::string{"rejected"});
+        const auto metadata = error.safe_metadata();
         response(request, {{"ok", true}, {"state", "Failed"},
                            {"external_job_id", "codex-rejected-" + job_id},
+                           {"metadata", metadata},
                            {"error", error.what()}});
       }
     }

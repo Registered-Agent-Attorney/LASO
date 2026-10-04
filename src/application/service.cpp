@@ -13,6 +13,7 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1124,6 +1125,15 @@ Json operator_worker_job_summary(const Json &value) {
   // fields needed to correlate real Codex execution. General job/message APIs
   // redact these identifiers and paths.
   if (job.worker_id.starts_with("codex")) {
+    const auto add_safe_enum = [&summary, &job](const char *source, const char *target,
+                                               std::initializer_list<std::string_view> allowed) {
+      const auto &metadata = job.result_metadata;
+      if (!metadata.is_object() || !metadata.contains(source) || !metadata.at(source).is_string())
+        return;
+      const auto value = metadata.at(source).get<std::string>();
+      if (std::find(allowed.begin(), allowed.end(), std::string_view(value)) != allowed.end())
+        summary[target] = value;
+    };
     const auto add_safe_identifier = [&summary, &job](const char *source, const char *target,
                                                       std::size_t maximum, bool allow_slash) {
       const auto &metadata = job.result_metadata;
@@ -1165,6 +1175,13 @@ Json operator_worker_job_summary(const Json &value) {
     add_safe_identifier("codex_turn_id", "codex_turn_id", 128, false);
     add_safe_timestamp("codex_turn_started_at", "codex_turn_started_at");
     add_safe_timestamp("codex_turn_completed_at", "codex_turn_completed_at");
+    add_safe_enum("codex_failure_stage", "provider_failure_stage",
+                  {"initialize", "thread_start", "thread_resume", "turn_start",
+                   "turn_interrupt", "app_server_request"});
+    add_safe_enum("codex_failure_category", "provider_failure_category",
+                  {"rpc_parse_error", "rpc_invalid_request", "rpc_method_not_found",
+                   "rpc_invalid_params", "rpc_internal_error", "rpc_error",
+                   "model_policy_mismatch"});
   }
   return summary;
 }
